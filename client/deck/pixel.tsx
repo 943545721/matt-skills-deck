@@ -24,6 +24,15 @@ export const PIXEL_MARK = "▚";
 
 const MONO = Platform.select({ ios: "Menlo", android: "monospace", default: "monospace" });
 
+/**
+ * 触屏判定。
+ *
+ * 用 `Platform.OS` 而不是宿主给的 `layout.platform`：皮肤在弹窗里也要用，而弹窗拿不到 layout；
+ * 两者在运行时本来指同一件事。手机上的按钮要高到手指能稳稳点到（约 40pt），
+ * 桌面端保持紧凑，不然一屏能放下的票会少一半。
+ */
+const TOUCH = Platform.OS === "ios" || Platform.OS === "android";
+
 export interface PixelSkin {
   /** 投影露出的厚度，布局里要对齐时用得上。 */
   depth: number;
@@ -38,7 +47,7 @@ export interface PixelSkin {
   mono: TextStyle;
 }
 
-export function pixelSkin(theme: PluginTheme): PixelSkin {
+export function pixelSkin(theme: PluginTheme, touch: boolean = TOUCH): PixelSkin {
   const line = theme.colors.border;
   return {
     depth: DEPTH,
@@ -50,8 +59,10 @@ export function pixelSkin(theme: PluginTheme): PixelSkin {
       borderRadius: 0,
     },
     button: {
-      paddingVertical: 5,
-      paddingHorizontal: 10,
+      minHeight: touch ? 40 : undefined,
+      justifyContent: "center" as const,
+      paddingVertical: touch ? 8 : 5,
+      paddingHorizontal: touch ? 14 : 10,
       borderRadius: 0,
       borderWidth: EDGE,
       borderColor: line,
@@ -59,9 +70,9 @@ export function pixelSkin(theme: PluginTheme): PixelSkin {
     },
     buttonActive: { borderColor: theme.colors.accent, backgroundColor: theme.colors.accent },
     buttonPressed: { backgroundColor: theme.colors.surface1 },
-    buttonText: { color: theme.colors.foreground, fontSize: 12 },
+    buttonText: { color: theme.colors.foreground, fontSize: touch ? 13 : 12 },
     // 选中态用强调色作底，字必须翻成深色才读得清（与版面上其他强调徽标保持一致）。
-    buttonTextActive: { color: "#000000", fontSize: 12, fontWeight: "600" },
+    buttonTextActive: { color: "#000000", fontSize: touch ? 13 : 12, fontWeight: "600" as const },
     mark: { color: theme.colors.accent, fontSize: 11, lineHeight: 16 },
     mono: { fontFamily: MONO },
   };
