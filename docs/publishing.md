@@ -47,20 +47,23 @@
 - 清单 `paseo-plugin.json`（id、`requirements.paseo: >=0.13.0 <0.14.0`）；
 - 双语 overview、README、LICENSE / NOTICE；
 - 可用的 `npm run typecheck` 与 `npm test`（提交前门槛）。
-
-已经处理完的：
-
-- **公开远端**：`git@github.com:943545721/matt-skills-deck.git`，默认分支 `main`。
-- **版本**：`package.json` 为 `0.1.0`，已打附注 tag `v0.1.0`；`paseo plugin install git:943545721/matt-skills-deck --ref v0.1.0` 现在就能装。
+- **远端**：`git@github.com:943545721/matt-skills-deck.git`，默认分支 `main`。**仓库目前是私有的**
+  （匿名 `api.github.com/repos/...` 与 `raw.githubusercontent.com` 均返回 404），转公开前
+  `paseo plugin install git:…` 对外不可用，注册表也无法 clone 到 artifact。
+- **版本**：`package.json` 为 `0.1.0`，已打附注 tag `v0.1.0`；转公开后即可用
+  `paseo plugin install git:943545721/matt-skills-deck --ref v0.1.0` 安装。
+- **提交入口已核实**：公开注册表是 [`getpaseo/plugins`](https://github.com/getpaseo/plugins)，
+  作者开 submission issue、机器人转 review PR；提交包见 [`registry-submission.md`](registry-submission.md)。
 - **包元数据**：补了 `repository` / `homepage` / `bugs` / `keywords` / `engines`，`files` 带上 `assets/`。
 - **图标**：`assets/icon.png`（512×512 像素风），清单里以 `icon` 引用；`media` 仍为空数组。
 - **CI**：`.github/workflows/ci.yml` 在 Node 22 上跑 `npm ci` + 两套 typecheck + 71 条测试。
 
 还差的，需要人到场处理：
 
-1. **`media` 是空的**：注册表条目要求一串图片/视频 URL，本环境起不了 Paseo 桌面端窗口，截不了图。
+1. **仓库要转公开**：注册表的 review 会 clone artifact，私有仓库直接失败（本地已复现：
+   `validate.ts --online` 报 `could not read Username`）。转公开前，git 安装与注册表提交都无效。
+2. **提交 issue 要本人开**：需要 GitHub 登录态，本机只有 SSH 密钥、没有 API token。
+3. **`media` 是空的**：注册表条目要求一串图片/视频 URL，本环境起不了 Paseo 桌面端窗口，截不了图。
    等能截图时，录一段「任务板 → 地图 → 下一步」的 gif 或 mp4 最省事。
-2. **提交入口未核对**：CLI 里没有 `publish` 子命令，注册表条目的审核与提交是平台侧流程，
-   本机没能核实具体入口（默认注册表 `https://plugins.paseo.sh` 在受限网络下打不开）。发布前应到该站点确认当前提交方式。
-3. **`package.json` 仍带 `"private": true`**：这是故意的，防手滑发到 npm；本机也没有 npm 凭据。
+4. **`package.json` 仍带 `"private": true`**：这是故意的，防手滑发到 npm；本机也没有 npm 凭据。
    真要走 npm 产物时，去掉这个字段再 `npm publish`（`license` / `repository` 已经补齐）。
