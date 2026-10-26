@@ -1,6 +1,6 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
-import { FlatList, Markdown, Modal, useToast } from "@getpaseo/plugin/client/ui";
+import { copyText, FlatList, Markdown, Modal, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -98,6 +98,7 @@ export function SkillsView({
       description: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 17 },
       hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
       error: { color: theme.colors.statusDanger, fontSize: 12 },
+      actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8 },
       modalBody: { gap: 10 },
     }),
     [theme],
@@ -194,14 +195,32 @@ export function SkillsView({
             {detail.error ? <Text style={styles.error}>{detail.error.message}</Text> : null}
             {detail.data ? <Markdown>{detail.data.markdown}</Markdown> : null}
             {detailId ? (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={t("skills.installOne")}
-                style={styles.action}
-                onPress={() => install.mutate([detailId])}
-              >
-                <Text style={styles.actionText}>{t("skills.installOne")}</Text>
-              </Pressable>
+              <View style={styles.actions}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={t("skills.installOne")}
+                  style={styles.action}
+                  onPress={() => install.mutate([detailId])}
+                >
+                  <Text style={styles.actionText}>{t("skills.installOne")}</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={t("skills.copyOne")}
+                  style={styles.action}
+                  disabled={!detail.data}
+                  onPress={() => {
+                    // 源仓库把技能直接注进对话框；Paseo 改不了输入框，退一步把原文复制给用户。
+                    const text = detail.data?.markdown ?? "";
+                    if (!text) return;
+                    void copyText(text)
+                      .then(() => toast.show(t("common.copied"), { variant: "success" }))
+                      .catch(() => toast.error(t("common.copyFailed")));
+                  }}
+                >
+                  <Text style={styles.actionText}>{t("skills.copyOne")}</Text>
+                </Pressable>
+              </View>
             ) : null}
           </View>
         </Modal.Content>
