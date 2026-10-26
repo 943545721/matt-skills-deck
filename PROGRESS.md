@@ -7,7 +7,7 @@
 | 阶段 | 内容 | 状态 | 验收证据 |
 |---|---|---|---|
 | P0 | 骨架：manifest、双 tsconfig、工作区面板 + 整页界面 + 侧栏行、`deck.status` RPC | **完成** | `paseo plugin ls` = running；`paseo plugin logs` 无错误；两端 typecheck 通过 |
-| P1 | 技能包：27×2 技能入库、技能页、按工作区安装按钮 | 进行中 | — |
+| P1 | 技能包：27×2 技能入库、技能页、按工作区安装按钮 | **完成** | 27/27 中英齐；安装写入 `.claude/skills` 与 `.agents/skills`；重复安装跳过、内容不同判冲突不覆盖；8 条测试全绿 |
 | P2 | 只读任务板：`tracker` 领域逻辑迁移、GitHub 后端、列表 + 详情 | 未开始 | — |
 | P3 | 写入与动作：评论、标签配色、绑定与切换、复制提示词 | 未开始 | — |
 | P4 | 周边页：版本管理、环境检查、诊断日志、设置、双语 | 未开始 | — |
@@ -29,3 +29,6 @@
 - 客户端无任意网络、无 DOM → 图片走服务端 data URL，样式只用 RN + theme token。
 - 插件 API 处于实验期 → `requirements.paseo` 钉 `>=0.13.0 <0.14.0`。
 - 服务端无沙箱 → 命令白名单只放 `gh` / `glab` / `git`，路径必须落在工作区内。
+- 服务端相对导入一律写 `.ts` 扩展名：测试直接用 `node --test` 跑 TypeScript（Node 自带类型剥离），
+  不带扩展名会在测试阶段报 `ERR_MODULE_NOT_FOUND`，而 tsc 不报。`allowImportingTsExtensions` 已开。
+- 插件运行时的自身目录只能从 `$PASEO_HOME/config.json` 读（实测 `import.meta` 为空、cwd 为 `/`）。

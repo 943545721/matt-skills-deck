@@ -71,7 +71,7 @@ export function DeckHome({ theme, layout, host }: PluginScreenProps) {
       </View>
 
       <Text style={styles.body}>
-        当前为 P0 骨架版本：宿主装配、工作区快照、RPC 通道已验证，票面与技能包在后续阶段接入。
+        当前为 P1 版本：27 个中英技能已随包分发，可在工作区的「技能」页逐个查看与安装；票面与地图在 P2 接入。
       </Text>
     </View>
   );

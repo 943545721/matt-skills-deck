@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { PLUGIN_VERSION } from "../shared/version";
+import { PLUGIN_VERSION } from "../shared/version.ts";
 
 const execFileAsync = promisify(execFile);
 

@@ -5,12 +5,13 @@ import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { statusRpc } from "../../shared/status";
+import { SkillsView } from "./SkillsView";
 
 /**
  * 面板内的视图状态由 Paseo 持久化（关掉标签页、重启应用后仍在），
  * 所以这里只存「看哪一页」，不存数据本身——数据永远现取，避免陈旧快照被当成事实。
  */
-const tabSchema = z.object({ view: z.enum(["board", "about"]) });
+const tabSchema = z.object({ view: z.enum(["board", "skills", "about"]) });
 type TabState = z.infer<typeof tabSchema>;
 const DEFAULT_TAB_STATE: TabState = { view: "board" };
 
@@ -97,6 +98,14 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
         </Pressable>
         <Pressable
           accessibilityRole="button"
+          accessibilityLabel="查看技能"
+          style={[styles.tab, state.view === "skills" ? styles.tabActive : null]}
+          onPress={() => setState({ view: "skills" })}
+        >
+          <Text style={state.view === "skills" ? styles.tabTextActive : styles.tabText}>技能</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
           accessibilityLabel="查看环境"
           style={[styles.tab, state.view === "about" ? styles.tabActive : null]}
           onPress={() => setState({ view: "about" })}
@@ -108,12 +117,18 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
       {state.view === "board" ? (
         <View style={styles.card}>
           <Text style={styles.notice}>
-            这是 P0 骨架：宿主装配、工作区快照、RPC 通道、标签页状态四条链路已验证。
+            「技能」页已可用：27 个中英技能可逐个查看原文，并按工作区安装到 .claude/skills 与 .agents/skills。
           </Text>
           <Text style={styles.notice}>
             票面列表、地图详情与三后端（GitHub / GitLab / 本地 Markdown）在 P2 接入。
           </Text>
         </View>
+      ) : state.view === "skills" ? (
+        workspace ? (
+          <SkillsView theme={theme} layout={layout} workspaceDir={workspace.directory} />
+        ) : (
+          <Text style={styles.notice}>工作区目录未知，暂时无法安装技能。</Text>
+        )
       ) : (
         <View style={styles.card}>
           <View style={styles.row}>
