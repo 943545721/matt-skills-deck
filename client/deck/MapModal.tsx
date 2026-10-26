@@ -3,10 +3,11 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { copyText, Modal, useToast } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { mapRpc } from "../../shared/map";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import type { DeckKey } from "./i18n";
+import { PixelButton, PixelCard, PixelHead, usePixel } from "./pixel";
 
 type Suggestion = { code: string; number?: number; count?: number };
 type RouteKind = "research" | "prototype" | "grilling" | "task";
@@ -45,6 +46,7 @@ export function MapModal({
 }) {
   const { t } = useDeckText();
   const toast = useToast();
+  const skin = usePixel(theme);
   const readMap = useRpc(mapRpc);
 
   const query = useQuery({
@@ -56,33 +58,25 @@ export function MapModal({
   const styles = useMemo(
     () => ({
       body: { gap: 10 },
-      card: {
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
-        borderRadius: 8,
-        padding: 10,
-        gap: 6,
-      },
+      cardBody: { padding: 10, gap: 6 },
       head: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
-      meta: { color: theme.colors.foregroundMuted, fontSize: 11 },
+      meta: { color: theme.colors.foregroundMuted, fontSize: 11, fontFamily: skin.mono.fontFamily },
       text: { color: theme.colors.foreground, fontSize: 12, lineHeight: 18 },
       hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
       error: { color: theme.colors.statusDanger, fontSize: 12 },
       row: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
       item: { gap: 2 },
-      action: {
-        paddingVertical: 4,
-        paddingHorizontal: 9,
-        borderRadius: 6,
+      badge: {
+        fontSize: 10,
+        paddingHorizontal: 6,
+        paddingVertical: 1,
+        overflow: "hidden" as const,
+        color: theme.colors.foreground,
         backgroundColor: theme.colors.surface2,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
       },
-      actionText: { color: theme.colors.foreground, fontSize: 11 },
-      badge: { fontSize: 10, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 999, overflow: "hidden" as const },
+      grow: { flexShrink: 1 },
     }),
-    [theme],
+    [theme, skin],
   );
 
   const copyPrompt = (text: string) => {
@@ -154,31 +148,35 @@ export function MapModal({
       <Modal.Content>
         <View style={styles.body}>
           {failure ? (
-            <>
+            <PixelCard skin={skin} style={styles.cardBody}>
               <Text style={styles.error}>{staticText(t, FAILURE_KEYS[failure.reason] ?? "failure.read")}</Text>
               <Text style={styles.hint}>{failure.detail}</Text>
-            </>
+            </PixelCard>
           ) : null}
           {query.isPending ? <Text style={styles.hint}>{t("common.loading")}</Text> : null}
 
           {data ? (
             <>
               <View style={styles.row}>
-                <Text style={styles.head}>{data.issue.title}</Text>
+                <Text style={[styles.head, styles.grow]} numberOfLines={2}>
+                  #{data.issue.number} {data.issue.title}
+                </Text>
                 <Text style={styles.badge}>
                   {data.issue.state === "OPEN" ? t("issue.open") : t("issue.closed")}
                 </Text>
               </View>
 
-              <View style={styles.card}>
-                <Text style={styles.head}>{t("map.destination")}</Text>
-                <Text style={styles.text}>
-                  {data.map.destination || t("map.destinationEmpty")}
-                </Text>
-              </View>
+              <PixelCard skin={skin} style={styles.cardBody}>
+                <PixelHead skin={skin} style={styles.head}>
+                  {t("map.destination")}
+                </PixelHead>
+                <Text style={styles.text}>{data.map.destination || t("map.destinationEmpty")}</Text>
+              </PixelCard>
 
-              <View style={styles.card}>
-                <Text style={styles.head}>{t("map.nextSteps")}</Text>
+              <PixelCard skin={skin} style={styles.cardBody}>
+                <PixelHead skin={skin} style={styles.head}>
+                  {t("map.nextSteps")}
+                </PixelHead>
                 {data.suggestions.length === 0 ? (
                   <Text style={styles.hint}>{t("map.nextStepsEmpty")}</Text>
                 ) : (
@@ -187,32 +185,29 @@ export function MapModal({
                     if (!view) return null;
                     return (
                       <View key={item.code} style={styles.row}>
-                        <View style={{ flexShrink: 1 }}>
-                          <Text style={styles.text}>{view.reason}</Text>
-                        </View>
-                        <Pressable
-                          accessibilityRole="button"
-                          accessibilityLabel={t("map.copyPrompt")}
-                          style={styles.action}
+                        <Text style={[styles.text, styles.grow]}>{view.reason}</Text>
+                        <PixelButton
+                          skin={skin}
+                          label={t("map.copyPrompt")}
                           onPress={() => copyPrompt(view.prompt)}
-                        >
-                          <Text style={styles.actionText}>{t("map.copyPrompt")}</Text>
-                        </Pressable>
+                        />
                       </View>
                     );
                   })
                 )}
-              </View>
+              </PixelCard>
 
-              <View style={styles.card}>
-                <Text style={styles.head}>{t("map.route")}</Text>
+              <PixelCard skin={skin} style={styles.cardBody}>
+                <PixelHead skin={skin} style={styles.head}>
+                  {t("map.route")}
+                </PixelHead>
                 {data.route.length === 0 ? (
                   <Text style={styles.hint}>{t("map.routeEmpty")}</Text>
                 ) : (
                   data.route.map((item) => (
                     <View key={item.number} style={styles.row}>
                       <Text style={styles.badge}>{staticText(t, KIND_KEY[item.kind])}</Text>
-                      <Text style={[styles.text, { flexShrink: 1 }]} numberOfLines={1}>
+                      <Text style={[styles.text, styles.grow]} numberOfLines={1}>
                         #{item.number} {item.title}
                       </Text>
                       <Text style={styles.meta}>
@@ -221,10 +216,12 @@ export function MapModal({
                     </View>
                   ))
                 )}
-              </View>
+              </PixelCard>
 
-              <View style={styles.card}>
-                <Text style={styles.head}>{t("map.decisions")}</Text>
+              <PixelCard skin={skin} style={styles.cardBody}>
+                <PixelHead skin={skin} style={styles.head}>
+                  {t("map.decisions")}
+                </PixelHead>
                 {data.map.decisions.length === 0 ? (
                   <Text style={styles.hint}>{t("map.decisionsEmpty")}</Text>
                 ) : (
@@ -236,10 +233,12 @@ export function MapModal({
                     </View>
                   ))
                 )}
-              </View>
+              </PixelCard>
 
-              <View style={styles.card}>
-                <Text style={styles.head}>{t("map.fog")}</Text>
+              <PixelCard skin={skin} style={styles.cardBody}>
+                <PixelHead skin={skin} style={styles.head}>
+                  {t("map.fog")}
+                </PixelHead>
                 {data.map.fog.length === 0 ? (
                   <Text style={styles.hint}>{t("map.fogEmpty")}</Text>
                 ) : (
@@ -249,10 +248,12 @@ export function MapModal({
                     </Text>
                   ))
                 )}
-              </View>
+              </PixelCard>
 
-              <View style={styles.card}>
-                <Text style={styles.head}>{t("map.outOfScope")}</Text>
+              <PixelCard skin={skin} style={styles.cardBody}>
+                <PixelHead skin={skin} style={styles.head}>
+                  {t("map.outOfScope")}
+                </PixelHead>
                 {data.map.outOfScope.length === 0 ? (
                   <Text style={styles.hint}>{t("map.outOfScopeEmpty")}</Text>
                 ) : (
@@ -262,13 +263,15 @@ export function MapModal({
                     </Text>
                   ))
                 )}
-              </View>
+              </PixelCard>
 
               {data.map.notes ? (
-                <View style={styles.card}>
-                  <Text style={styles.head}>{t("map.notes")}</Text>
+                <PixelCard skin={skin} style={styles.cardBody}>
+                  <PixelHead skin={skin} style={styles.head}>
+                    {t("map.notes")}
+                  </PixelHead>
                   <Text style={styles.text}>{data.map.notes}</Text>
-                </View>
+                </PixelCard>
               ) : null}
             </>
           ) : null}

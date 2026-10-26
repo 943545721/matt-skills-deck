@@ -8,6 +8,7 @@ import { DiagnosticsView } from "./DiagnosticsView";
 import type { DeckKey } from "./i18n";
 import { staticText, useDeckText } from "./i18n";
 import { LabelsView } from "./LabelsView";
+import { PixelButton, usePixel } from "./pixel";
 import { SkillsView } from "./SkillsView";
 import { VersionView } from "./VersionView";
 
@@ -54,6 +55,7 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
   }));
   const [state, setState] = useTabState(tab, tabSchema, DEFAULT_TAB_STATE);
   const { t } = useDeckText();
+  const skin = usePixel(theme);
 
   const styles = useMemo(
     () => ({
@@ -70,26 +72,15 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
       binding: {
         paddingVertical: 2,
         paddingHorizontal: 8,
-        borderRadius: 999,
-        borderWidth: 1,
+        borderWidth: 2,
         borderColor: theme.colors.accent,
         backgroundColor: theme.colors.surface1,
       },
       bindingText: { color: theme.colors.foreground, fontSize: 11 },
       tabs: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const, alignItems: "center" as const },
-      tab: {
-        paddingVertical: 4,
-        paddingHorizontal: 10,
-        borderRadius: 999,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-      },
-      tabActive: { borderColor: theme.colors.accent, backgroundColor: theme.colors.surface2 },
-      tabText: { color: theme.colors.foregroundMuted, fontSize: 12 },
-      tabTextActive: { color: theme.colors.foreground, fontSize: 12 },
       notice: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
     }),
-    [theme, layout.compact],
+    [theme, layout.compact, skin],
   );
 
   const directory = workspace?.directory;
@@ -119,17 +110,14 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
 
       <View style={styles.tabs}>
         {TABS.map((item) => (
-          <Pressable
+          <PixelButton
             key={item.key}
-            accessibilityRole="button"
+            skin={skin}
+            label={staticText(t, item.label)}
             accessibilityLabel={staticText(t, item.hint)}
-            style={[styles.tab, state.view === item.key ? styles.tabActive : null]}
+            active={state.view === item.key}
             onPress={() => setState({ ...state, view: item.key })}
-          >
-            <Text style={state.view === item.key ? styles.tabTextActive : styles.tabText}>
-              {staticText(t, item.label)}
-            </Text>
-          </Pressable>
+          />
         ))}
       </View>
 

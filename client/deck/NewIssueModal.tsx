@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { issuesCreateRpc } from "../../shared/issues";
+import { PixelButton, usePixel } from "./pixel";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 
 /**
@@ -31,6 +32,7 @@ export function NewIssueModal({
   const [isMap, setIsMap] = useState(false);
   const toast = useToast();
   const queryClient = useQueryClient();
+  const skin = usePixel(theme);
 
   const createIssue = useRpc(issuesCreateRpc);
   const create = useMutation({
@@ -73,38 +75,17 @@ export function NewIssueModal({
       body: { gap: 10 },
       hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
       input: {
-        borderWidth: 1,
+        borderWidth: 2,
         borderColor: theme.colors.border,
         backgroundColor: theme.colors.surface1,
-        borderRadius: 6,
         color: theme.colors.foreground,
         padding: 8,
         fontSize: 12,
       },
       inputBody: { minHeight: 120 },
       actions: { flexDirection: "row" as const, gap: 8, alignItems: "center" as const },
-      action: {
-        paddingVertical: 6,
-        paddingHorizontal: 12,
-        borderRadius: 6,
-        backgroundColor: theme.colors.surface2,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-      },
-      actionPrimary: { borderColor: theme.colors.accent },
-      actionText: { color: theme.colors.foreground, fontSize: 12 },
-      toggleActive: { borderColor: theme.colors.accent, backgroundColor: theme.colors.surface2 },
-      toggle: {
-        paddingVertical: 4,
-        paddingHorizontal: 10,
-        borderRadius: 999,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-      },
-      toggleText: { color: theme.colors.foregroundMuted, fontSize: 12 },
-      toggleTextActive: { color: theme.colors.foreground, fontSize: 12 },
     }),
-    [theme],
+    [theme, skin],
   );
 
   return (
@@ -133,36 +114,23 @@ export function NewIssueModal({
             onChangeText={setLabels}
             placeholder={t("new.labelsField")}
           />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("new.markMap")}
-            style={[styles.toggle, isMap ? styles.toggleActive : null]}
-            onPress={() => setIsMap((value) => !value)}
-          >
-            <Text style={isMap ? styles.toggleTextActive : styles.toggleText}>
-              {isMap ? t("new.markMapOn") : t("new.markMap")}
-            </Text>
-          </Pressable>
+          <View style={styles.actions}>
+            <PixelButton
+              skin={skin}
+              label={isMap ? t("new.markMapOn") : t("new.markMap")}
+              active={isMap}
+              onPress={() => setIsMap((value) => !value)}
+            />
+          </View>
 
           <View style={styles.actions}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("new.submit")}
-              style={[styles.action, styles.actionPrimary]}
+            <PixelButton
+              skin={skin}
+              label={create.isPending ? t("new.submitting") : t("new.submit")}
+              disabled={create.isPending}
               onPress={() => create.mutate()}
-            >
-              <Text style={styles.actionText}>
-                {create.isPending ? t("new.submitting") : t("new.submit")}
-              </Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={t("common.cancel")}
-              style={styles.action}
-              onPress={onClose}
-            >
-              <Text style={styles.actionText}>{t("common.cancel")}</Text>
-            </Pressable>
+            />
+            <PixelButton skin={skin} label={t("common.cancel")} onPress={onClose} />
           </View>
           <Text style={styles.hint}>{t("new.hint")}</Text>
         </View>

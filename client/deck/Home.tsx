@@ -33,10 +33,9 @@ export function DeckHome({ theme, layout, host }: PluginScreenProps) {
       title: { color: theme.colors.foreground, fontSize: layout.compact ? 20 : 24, fontWeight: "600" as const },
       body: { color: theme.colors.foregroundMuted, fontSize: 13, lineHeight: 20 },
       card: {
-        borderWidth: 1,
+        borderWidth: 2,
         borderColor: theme.colors.border,
         backgroundColor: theme.colors.surface1,
-        borderRadius: 8,
         padding: 12,
         gap: 6,
       },

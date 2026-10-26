@@ -33,10 +33,9 @@ export function DiagnosticsView({
     () => ({
       screen: { flex: 1, gap: 8 },
       card: {
-        borderWidth: 1,
+        borderWidth: 2,
         borderColor: theme.colors.border,
         backgroundColor: theme.colors.surface1,
-        borderRadius: 8,
         padding: 10,
         gap: 4,
       },
@@ -49,9 +48,8 @@ export function DiagnosticsView({
       action: {
         paddingVertical: 5,
         paddingHorizontal: 10,
-        borderRadius: 6,
         backgroundColor: theme.colors.surface2,
-        borderWidth: 1,
+        borderWidth: 2,
         borderColor: theme.colors.border,
       },
       actionText: { color: theme.colors.foreground, fontSize: 12 },

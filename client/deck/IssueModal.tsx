@@ -3,10 +3,11 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { copyText, Markdown, Modal, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { issuesCommentRpc, issuesDetailRpc, issuesSetLabelsRpc } from "../../shared/issues";
 import { readableText } from "./format";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
+import { PixelButton, usePixel } from "./pixel";
 
 /**
  * 票面详情。
@@ -109,39 +110,30 @@ export function IssueModal({
       .replace(/\n{3,}/g, "\n\n");
   };
 
+  const skin = usePixel(theme);
+
   const styles = useMemo(
     () => ({
       body: { gap: 10 },
       title: { color: theme.colors.foreground, fontSize: 15, fontWeight: "600" as const },
       meta: { color: theme.colors.foregroundMuted, fontSize: 11 },
       labels: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 4 },
-      label: { fontSize: 10, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 999, overflow: "hidden" as const },
-      comment: { borderTopWidth: 1, borderTopColor: theme.colors.border, paddingTop: 8, gap: 3 },
+      label: { fontSize: 10, paddingHorizontal: 6, paddingVertical: 1, overflow: "hidden" as const },
+      comment: { borderTopWidth: 2, borderTopColor: theme.colors.border, paddingTop: 8, gap: 3 },
       hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
       error: { color: theme.colors.statusDanger, fontSize: 12 },
       actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8 },
-      action: {
-        paddingVertical: 5,
-        paddingHorizontal: 10,
-        borderRadius: 6,
-        backgroundColor: theme.colors.surface2,
-        borderWidth: 1,
-        borderColor: theme.colors.border,
-      },
-      actionActive: { borderColor: theme.colors.accent },
-      actionText: { color: theme.colors.foreground, fontSize: 12 },
       input: {
-        borderWidth: 1,
+        borderWidth: 2,
         borderColor: theme.colors.border,
         backgroundColor: theme.colors.surface1,
-        borderRadius: 6,
         color: theme.colors.foreground,
         padding: 8,
         fontSize: 12,
         minHeight: 64,
       },
     }),
-    [theme],
+    [theme, skin],
   );
 
   return (
@@ -183,40 +175,31 @@ export function IssueModal({
               <Markdown>{issue.body || t("issue.noBody")}</Markdown>
 
               <View style={styles.actions}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={t("issue.copyPrompt")}
-                  style={styles.action}
+                <PixelButton
+                  skin={skin}
+                  label={t("issue.copyPrompt")}
                   onPress={() => {
                     void copyText(promptForIssue(issue))
                       .then(() => toast.show(t("issue.promptCopied"), { variant: "success" }))
                       .catch(() => toast.error(t("common.copyFailed")));
                   }}
-                >
-                  <Text style={styles.actionText}>{t("issue.copyPrompt")}</Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
+                />
+                <PixelButton
+                  skin={skin}
+                  label={isCurrent ? t("issue.bound") : t("issue.bind")}
                   accessibilityLabel={
                     isCurrent
                       ? t("issue.unbindHint", { number })
                       : t("issue.bindHint", { number })
                   }
-                  style={[styles.action, isCurrent ? styles.actionActive : null]}
+                  active={isCurrent}
                   onPress={onBind}
-                >
-                  <Text style={styles.actionText}>
-                    {isCurrent ? t("issue.bound") : t("issue.bind")}
-                  </Text>
-                </Pressable>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={t("issue.editLabels")}
-                  style={styles.action}
+                />
+                <PixelButton
+                  skin={skin}
+                  label={t("issue.editLabels")}
                   onPress={() => setLabelDraft(issue.labels.map((label) => label.name).join(", "))}
-                >
-                  <Text style={styles.actionText}>{t("issue.editLabels")}</Text>
-                </Pressable>
+                />
               </View>
 
               {labelDraft !== null ? (
@@ -230,10 +213,10 @@ export function IssueModal({
                     multiline
                   />
                   <View style={styles.actions}>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={t("issue.saveLabels")}
-                      style={styles.action}
+                    <PixelButton
+                      skin={skin}
+                      label={labelMutation.isPending ? t("issue.savingLabels") : t("issue.saveLabels")}
+                      disabled={labelMutation.isPending}
                       onPress={() =>
                         labelMutation.mutate(
                           labelDraft
@@ -242,19 +225,8 @@ export function IssueModal({
                             .filter(Boolean),
                         )
                       }
-                    >
-                      <Text style={styles.actionText}>
-                        {labelMutation.isPending ? t("issue.savingLabels") : t("issue.saveLabels")}
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel={t("issue.discardLabels")}
-                      style={styles.action}
-                      onPress={() => setLabelDraft(null)}
-                    >
-                      <Text style={styles.actionText}>{t("common.cancel")}</Text>
-                    </Pressable>
+                    />
+                    <PixelButton skin={skin} label={t("common.cancel")} onPress={() => setLabelDraft(null)} />
                   </View>
                   <Text style={styles.hint}>{t("issue.labelsHint")}</Text>
                 </>
@@ -279,20 +251,18 @@ export function IssueModal({
                 placeholder={t("issue.commentPlaceholder")}
                 multiline
               />
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={t("issue.submitComment")}
-                style={styles.action}
-                onPress={() => commentMutation.mutate()}
-              >
-                <Text style={styles.actionText}>
-                  {commentMutation.isPending
+              <PixelButton
+                skin={skin}
+                label={
+                  commentMutation.isPending
                     ? t("issue.commenting")
                     : comment.trim()
                       ? t("issue.submitComment")
-                      : t("issue.commentEmpty")}
-                </Text>
-              </Pressable>
+                      : t("issue.commentEmpty")
+                }
+                disabled={commentMutation.isPending || !comment.trim()}
+                onPress={() => commentMutation.mutate()}
+              />
             </>
           ) : null}
         </View>
