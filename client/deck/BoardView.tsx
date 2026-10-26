@@ -8,6 +8,7 @@ import { issuesListRpc } from "../../shared/issues";
 import { readableText } from "./format";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import { IssueModal } from "./IssueModal";
+import { MapModal } from "./MapModal";
 import { NewIssueModal } from "./NewIssueModal";
 
 /**
@@ -34,6 +35,8 @@ export function BoardView({
   const [includeClosed, setIncludeClosed] = useState(false);
   const [openNumber, setOpenNumber] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
+  /** 地图弹窗：地图票的入口，与票面详情并列，而不是替代它。 */
+  const [mapNumber, setMapNumber] = useState<number | null>(null);
 
   const listIssues = useRpc(issuesListRpc);
   const list = useQuery({
@@ -75,6 +78,8 @@ export function BoardView({
         marginBottom: 8,
         gap: 5,
       },
+      rowOuter: { flexDirection: "row" as const, alignItems: "flex-start" as const, gap: 8 },
+      rowMain: { gap: 5, flexShrink: 1 },
       rowHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
       number: { color: theme.colors.foregroundMuted, fontSize: 11 },
       title: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const, flexShrink: 1 },
@@ -157,49 +162,56 @@ export function BoardView({
           </Text>
         }
         renderItem={({ item }) => (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={`#${item.number} ${item.title}`}
-            style={styles.row}
-            onPress={() => setOpenNumber(item.number)}
-          >
-            <View style={styles.rowHead}>
-              <Text style={styles.number}>#{item.number}</Text>
-              {current === item.number ? (
-                <Text style={[styles.label, { backgroundColor: theme.colors.accent, color: "#000000" }]}>
-                  {t("board.current")}
-                </Text>
-              ) : null}
-              {item.isMap ? (
-                <Text style={[styles.label, { backgroundColor: theme.colors.surface2, color: theme.colors.foreground }]}>
-                  {t("board.map")}
-                </Text>
-              ) : null}
-              {item.state === "CLOSED" ? (
-                <Text style={[styles.label, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>
-                  {t("board.closed")}
-                </Text>
-              ) : null}
-              <Text style={styles.title} numberOfLines={2}>
-                {item.title}
-              </Text>
-            </View>
-            {item.labels.length ? (
-              <View style={styles.labels}>
-                {item.labels.map((label) => (
-                  <Text
-                    key={label.name}
-                    style={[styles.label, { backgroundColor: `#${label.color}`, color: readableText(label.color) }]}
-                  >
-                    {label.name}
+          <View style={[styles.row, styles.rowOuter]}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`#${item.number} ${item.title}`}
+              style={styles.rowMain}
+              onPress={() => setOpenNumber(item.number)}
+            >
+              <View style={styles.rowHead}>
+                <Text style={styles.number}>#{item.number}</Text>
+                {current === item.number ? (
+                  <Text style={[styles.label, { backgroundColor: theme.colors.accent, color: "#000000" }]}>
+                    {t("board.current")}
                   </Text>
-                ))}
+                ) : null}
+                {item.state === "CLOSED" ? (
+                  <Text style={[styles.label, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>
+                    {t("board.closed")}
+                  </Text>
+                ) : null}
+                <Text style={styles.title} numberOfLines={2}>
+                  {item.title}
+                </Text>
               </View>
+              {item.labels.length ? (
+                <View style={styles.labels}>
+                  {item.labels.map((label) => (
+                    <Text
+                      key={label.name}
+                      style={[styles.label, { backgroundColor: `#${label.color}`, color: readableText(label.color) }]}
+                    >
+                      {label.name}
+                    </Text>
+                  ))}
+                </View>
+              ) : null}
+              {item.assignees.length ? (
+                <Text style={styles.meta}>{t("board.assignees", { names: item.assignees.join(", ") })}</Text>
+              ) : null}
+            </Pressable>
+            {item.isMap ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("map.open")}
+                style={styles.action}
+                onPress={() => setMapNumber(item.number)}
+              >
+                <Text style={styles.actionText}>{t("map.open")}</Text>
+              </Pressable>
             ) : null}
-            {item.assignees.length ? (
-              <Text style={styles.meta}>{t("board.assignees", { names: item.assignees.join(", ") })}</Text>
-            ) : null}
-          </Pressable>
+          </View>
         )}
       />
 
@@ -211,6 +223,16 @@ export function BoardView({
           isCurrent={current === openNumber}
           onBind={() => onBind(current === openNumber ? undefined : openNumber)}
           onClose={() => setOpenNumber(null)}
+        />
+      ) : null}
+
+      {mapNumber !== null ? (
+        <MapModal
+          theme={theme}
+          workspaceDir={workspaceDir}
+          number={mapNumber}
+          open
+          onClose={() => setMapNumber(null)}
         />
       ) : null}
 

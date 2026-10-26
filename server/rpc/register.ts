@@ -7,6 +7,7 @@ import {
   issuesSetLabelsRpc,
 } from "../../shared/issues.ts";
 import { labelsColorsRpc, labelsListRpc } from "../../shared/labels.ts";
+import { mapRpc } from "../../shared/map.ts";
 import { logsRpc } from "../../shared/logs.ts";
 import { listLogs } from "../logs.ts";
 import { skillsInstallRpc, skillsListRpc, skillsReadRpc } from "../../shared/skills.ts";
@@ -31,6 +32,7 @@ import {
   setIssueLabelsHandler,
 } from "./issues.ts";
 import { listLabelsHandler, setLabelColorsHandler } from "./labels.ts";
+import { mapHandler } from "./map.ts";
 import { listSkills, installSkillsHandler, readSkill } from "./skills.ts";
 import { readStatus } from "../status.ts";
 import {
@@ -64,6 +66,8 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(issuesCommentRpc, commentIssueHandler);
   server.handle(issuesCreateRpc, createIssueHandler);
   server.handle(issuesSetLabelsRpc, setIssueLabelsHandler);
+
+  server.handle(mapRpc, mapHandler);
 
   server.handle(labelsListRpc, listLabelsHandler);
   server.handle(labelsColorsRpc, setLabelColorsHandler);
