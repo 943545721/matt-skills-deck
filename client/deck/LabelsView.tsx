@@ -5,7 +5,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { labelsColorsRpc, labelsListRpc } from "../../shared/labels";
-import { FAILURE_TEXT } from "./format";
+import { failureText } from "./format";
+import type { Lang } from "./i18n";
+import { t } from "./i18n";
 
 /** 只把改了颜色的标签发出去：整批发等于每点一次保存就重写几十条，白担限流的风险。 */
 function dirtyColor(next: Record<string, string>, original: { name: string; color: string }[]): Record<string, string> {
@@ -27,10 +29,12 @@ function dirtyColor(next: Record<string, string>, original: { name: string; colo
 export function LabelsView({
   theme,
   layout,
+  lang,
   workspaceDir,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
+  lang: Lang;
   workspaceDir: string;
 }) {
   const [edits, setEdits] = useState<Record<string, string>>({});
@@ -50,17 +54,17 @@ export function LabelsView({
     mutationFn: (changes: { name: string; color: string }[]) => setColors({ workspaceDir, changes }),
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${FAILURE_TEXT[result.reason] ?? "改色失败"}：${result.detail}`, { variant: "error" });
+        toast.show(`${failureText(lang, result.reason)}：${result.detail}`, { variant: "error" });
         return;
       }
       setEdits({});
       void queryClient.invalidateQueries({ queryKey: ["deck", "labels", workspaceDir] });
       void queryClient.invalidateQueries({ queryKey: ["deck", "issues", workspaceDir] });
       const summary = [
-        result.applied.length ? `改动 ${result.applied.length} 个` : "",
-        result.failed.length ? `失败 ${result.failed.length} 个` : "",
-      ].filter(Boolean).join("，");
-      toast.show(summary || "没有改动", { variant: result.failed.length ? "warning" : "success" });
+        result.applied.length ? t(lang, "labels.done", { applied: result.applied.length }) : "",
+        result.failed.length ? t(lang, "labels.failedCount", { n: result.failed.length }) : "",
+      ].filter(Boolean).join(" · ");
+      toast.show(summary || t(lang, "labels.nothing"), { variant: result.failed.length ? "warning" : "success" });
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
   });
@@ -115,30 +119,34 @@ export function LabelsView({
   return (
     <View style={styles.screen}>
       <View style={styles.toolbar}>
-        <Text style={styles.hint}>{labels.length ? `${labels.length} 个标签` : ""}</Text>
+        <Text style={styles.hint}>{labels.length ? t(lang, "labels.count", { n: labels.length }) : ""}</Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="保存标签颜色到 GitHub"
+          accessibilityLabel={t(lang, "labels.save")}
           style={styles.action}
           onPress={() =>
             save.mutate(Object.entries(pending).map(([name, color]) => ({ name, color })))
           }
         >
           <Text style={styles.actionText}>
-            {save.isPending ? "保存中…" : Object.keys(pending).length ? `保存 ${Object.keys(pending).length} 处` : "保存"}
+            {save.isPending
+              ? t(lang, "labels.saving")
+              : Object.keys(pending).length
+                ? t(lang, "labels.saveN", { n: Object.keys(pending).length })
+                : t(lang, "labels.save")}
           </Text>
         </Pressable>
       </View>
 
-      <Text style={styles.hint}>颜色填 6 位十六进制，带不带 # 都行。改完点保存才会写回仓库。</Text>
-      {failure ? <Text style={styles.error}>{FAILURE_TEXT[failure.reason] ?? "读取失败"}：{failure.detail}</Text> : null}
+      <Text style={styles.hint}>{t(lang, "labels.hint")}</Text>
+      {failure ? <Text style={styles.error}>{failureText(lang, failure.reason)}：{failure.detail}</Text> : null}
 
       <FlatList
         data={labels}
         keyExtractor={(item) => item.name}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>{list.isPending ? "读取中…" : "这个仓库还没有标签。"}</Text>
+          <Text style={styles.hint}>{list.isPending ? t(lang, "common.loading") : t(lang, "labels.empty")}</Text>
         }
         renderItem={({ item }) => {
           const value = edits[item.name] ?? item.color;
@@ -154,7 +162,7 @@ export function LabelsView({
                 {item.description}
               </Text>
               <TextInput
-                accessibilityLabel={`标签 ${item.name} 的颜色`}
+                accessibilityLabel={t(lang, "labels.colorOf", { name: item.name })}
                 style={styles.input}
                 value={value}
                 onChangeText={(next) => setEdits((current) => ({ ...current, [item.name]: next }))}

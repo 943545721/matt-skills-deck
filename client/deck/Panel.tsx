@@ -5,30 +5,42 @@ import { Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { BoardView } from "./BoardView";
 import { DiagnosticsView } from "./DiagnosticsView";
+import type { Lang, MessageKey } from "./i18n";
+import { t } from "./i18n";
 import { LabelsView } from "./LabelsView";
 import { SkillsView } from "./SkillsView";
 import { VersionView } from "./VersionView";
 
 /**
  * 面板内的视图状态由 Paseo 持久化（关掉标签页、重启应用后仍在），
- * 所以这里只存「看哪一页」和「当前票是哪张」，不存数据本身——数据永远现取，
- * 避免陈旧快照被当成事实。
+ * 所以这里只存「看哪一页」「当前票是哪张」「界面说什么语言」，不存数据本身——
+ * 数据永远现取，避免陈旧快照被当成事实。
  */
 const tabSchema = z.object({
   view: z.enum(["board", "skills", "labels", "version", "diagnostics"]),
   /** 当前票：绑定在「这个工作区」上，换工作区就换一张，符合人的心智。 */
   current: z.number().int().min(1).optional(),
+  /** 界面语言。跟着面板一起持久化，而不是每次打开都回落到默认值。 */
+  lang: z.enum(["zh", "en"]).default("zh"),
 });
 type TabState = z.infer<typeof tabSchema>;
-const DEFAULT_TAB_STATE: TabState = { view: "board" };
+const DEFAULT_TAB_STATE: TabState = { view: "board", lang: "zh" };
 
-const TABS = [
-  { key: "board" as const, label: "任务板", hint: "查看任务板" },
-  { key: "skills" as const, label: "技能", hint: "查看技能" },
-  { key: "labels" as const, label: "标签", hint: "查看标签配色" },
-  { key: "version" as const, label: "版本", hint: "查看版本管理" },
-  { key: "diagnostics" as const, label: "诊断", hint: "查看诊断信息" },
+const TABS: { key: TabState["view"]; label: MessageKey; hint: MessageKey }[] = [
+  { key: "board", label: "tabs.board", hint: "tabs.boardHint" },
+  { key: "skills", label: "tabs.skills", hint: "tabs.skillsHint" },
+  { key: "labels", label: "tabs.labels", hint: "tabs.labelsHint" },
+  { key: "version", label: "tabs.version", hint: "tabs.versionHint" },
+  { key: "diagnostics", label: "tabs.diagnostics", hint: "tabs.diagnosticsHint" },
 ];
+
+const NO_WORKSPACE: Record<TabState["view"], MessageKey> = {
+  board: "common.noWorkspaceBoard",
+  skills: "common.noWorkspaceSkills",
+  labels: "common.noWorkspaceLabels",
+  version: "common.noWorkspaceVersion",
+  diagnostics: "common.unknownWorkspace",
+};
 
 /**
  * 任务板工作区面板。
@@ -43,6 +55,8 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
     kind: snapshot.kind,
   }));
   const [state, setState] = useTabState(tab, tabSchema, DEFAULT_TAB_STATE);
+  /** 老版本存下的状态没有 lang 字段，读出来可能是 undefined：这里兜一层。 */
+  const lang: Lang = state.lang ?? "zh";
 
   const styles = useMemo(
     () => ({
@@ -65,7 +79,7 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
         backgroundColor: theme.colors.surface1,
       },
       bindingText: { color: theme.colors.foreground, fontSize: 11 },
-      tabs: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const },
+      tabs: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const, alignItems: "center" as const },
       tab: {
         paddingVertical: 4,
         paddingHorizontal: 10,
@@ -76,29 +90,41 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
       tabActive: { borderColor: theme.colors.accent, backgroundColor: theme.colors.surface2 },
       tabText: { color: theme.colors.foregroundMuted, fontSize: 12 },
       tabTextActive: { color: theme.colors.foreground, fontSize: 12 },
+      langToggle: {
+        marginLeft: "auto" as const,
+        paddingVertical: 3,
+        paddingHorizontal: 10,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: theme.colors.border,
+      },
       notice: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
     }),
     [theme, layout.compact],
   );
 
+  const directory = workspace?.directory;
+
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
         <View style={styles.titleRow}>
-          <Text style={styles.title}>{workspace?.name ?? "任务板"}</Text>
+          <Text style={styles.title}>{workspace?.name ?? t(lang, "tabs.board")}</Text>
           {state.current ? (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`解除当前票 #${state.current}`}
+              accessibilityLabel={t(lang, "issue.unbindHint", { number: state.current })}
               style={styles.binding}
               onPress={() => setState({ ...state, current: undefined })}
             >
-              <Text style={styles.bindingText}>当前票 #{state.current} ✕</Text>
+              <Text style={styles.bindingText}>
+                {t(lang, "board.current")} #{state.current} ✕
+              </Text>
             </Pressable>
           ) : null}
         </View>
         <Text style={styles.subtitle} numberOfLines={1}>
-          {workspace?.directory ?? "工作区目录未知"}
+          {directory ?? t(lang, "common.unknownWorkspace")}
         </Text>
       </View>
 
@@ -107,13 +133,23 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
           <Pressable
             key={item.key}
             accessibilityRole="button"
-            accessibilityLabel={item.hint}
+            accessibilityLabel={t(lang, item.hint)}
             style={[styles.tab, state.view === item.key ? styles.tabActive : null]}
             onPress={() => setState({ ...state, view: item.key })}
           >
-            <Text style={state.view === item.key ? styles.tabTextActive : styles.tabText}>{item.label}</Text>
+            <Text style={state.view === item.key ? styles.tabTextActive : styles.tabText}>
+              {t(lang, item.label)}
+            </Text>
           </Pressable>
         ))}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={lang === "zh" ? "Switch language to English" : "切换界面语言为中文"}
+          style={styles.langToggle}
+          onPress={() => setState({ ...state, lang: lang === "zh" ? "en" : "zh" })}
+        >
+          <Text style={styles.tabText}>{lang === "zh" ? "EN" : "中文"}</Text>
+        </Pressable>
       </View>
 
       {state.view === "board" ? (
@@ -121,33 +157,34 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
           <BoardView
             theme={theme}
             layout={layout}
+            lang={lang}
             workspaceDir={workspace.directory}
             current={state.current}
             onBind={(number) => setState({ ...state, current: number })}
           />
         ) : (
-          <Text style={styles.notice}>工作区目录未知，暂时读不到票面。</Text>
+          <Text style={styles.notice}>{t(lang, NO_WORKSPACE.board)}</Text>
         )
       ) : state.view === "skills" ? (
         workspace ? (
-          <SkillsView theme={theme} layout={layout} workspaceDir={workspace.directory} />
+          <SkillsView theme={theme} layout={layout} lang={lang} workspaceDir={workspace.directory} />
         ) : (
-          <Text style={styles.notice}>工作区目录未知，暂时无法安装技能。</Text>
+          <Text style={styles.notice}>{t(lang, NO_WORKSPACE.skills)}</Text>
         )
       ) : state.view === "labels" ? (
         workspace ? (
-          <LabelsView theme={theme} layout={layout} workspaceDir={workspace.directory} />
+          <LabelsView theme={theme} layout={layout} lang={lang} workspaceDir={workspace.directory} />
         ) : (
-          <Text style={styles.notice}>工作区目录未知，暂时读不到标签。</Text>
+          <Text style={styles.notice}>{t(lang, NO_WORKSPACE.labels)}</Text>
         )
       ) : state.view === "version" ? (
         workspace ? (
-          <VersionView theme={theme} layout={layout} workspaceDir={workspace.directory} />
+          <VersionView theme={theme} layout={layout} lang={lang} workspaceDir={workspace.directory} />
         ) : (
-          <Text style={styles.notice}>工作区目录未知，暂时读不到版本状态。</Text>
+          <Text style={styles.notice}>{t(lang, NO_WORKSPACE.version)}</Text>
         )
       ) : (
-        <DiagnosticsView theme={theme} layout={layout} />
+        <DiagnosticsView theme={theme} layout={layout} lang={lang} />
       )}
     </View>
   );

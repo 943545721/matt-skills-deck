@@ -5,7 +5,9 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { issuesListRpc } from "../../shared/issues";
-import { FAILURE_TEXT, readableText } from "./format";
+import { failureText, readableText } from "./format";
+import type { Lang } from "./i18n";
+import { t } from "./i18n";
 import { IssueModal } from "./IssueModal";
 import { NewIssueModal } from "./NewIssueModal";
 
@@ -18,12 +20,14 @@ import { NewIssueModal } from "./NewIssueModal";
 export function BoardView({
   theme,
   layout,
+  lang,
   workspaceDir,
   current,
   onBind,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
+  lang: Lang;
   workspaceDir: string;
   /** 当前票：绑在面板状态里，换工作区就换一张。 */
   current?: number;
@@ -94,42 +98,48 @@ export function BoardView({
       <View style={styles.toolbar}>
         <View style={styles.chip}>
           <Text style={styles.chipText} numberOfLines={1}>
-            {header ?? "未关联仓库"}
+            {header ?? t(lang, "board.unbound")}
           </Text>
         </View>
         <Text style={styles.chipText}>
-          {list.data?.ok ? `${list.data.issues.length} / ${list.data.totalCount} 张` : ""}
+          {list.data?.ok
+            ? t(lang, "board.count", { shown: list.data.issues.length, total: list.data.totalCount })
+            : ""}
         </Text>
         <View style={styles.spacer} />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="新建票"
+          accessibilityLabel={t(lang, "board.new")}
           style={styles.action}
           onPress={() => setCreating(true)}
         >
-          <Text style={styles.actionText}>新建</Text>
+          <Text style={styles.actionText}>{t(lang, "board.new")}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={includeClosed ? "只看未关闭" : "显示已关闭"}
+          accessibilityLabel={includeClosed ? t(lang, "board.onlyOpenHint") : t(lang, "board.withClosedHint")}
           style={[styles.action, includeClosed ? styles.actionActive : null]}
           onPress={() => setIncludeClosed((value) => !value)}
         >
-          <Text style={styles.actionText}>{includeClosed ? "含已关闭" : "仅未关闭"}</Text>
+          <Text style={styles.actionText}>
+            {includeClosed ? t(lang, "board.withClosed") : t(lang, "board.onlyOpen")}
+          </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="刷新任务板"
+          accessibilityLabel={t(lang, "board.refreshHint")}
           style={styles.action}
           onPress={() => void list.refetch()}
         >
-          <Text style={styles.actionText}>{list.isFetching ? "刷新中…" : "刷新"}</Text>
+          <Text style={styles.actionText}>
+            {list.isFetching ? t(lang, "common.refreshing") : t(lang, "common.refresh")}
+          </Text>
         </Pressable>
       </View>
 
       {failure ? (
         <View style={styles.row}>
-          <Text style={styles.error}>{FAILURE_TEXT[failure.reason] ?? "读取失败"}</Text>
+          <Text style={styles.error}>{failureText(lang, failure.reason)}</Text>
           <Text style={styles.hint}>{failure.detail}</Text>
         </View>
       ) : null}
@@ -142,29 +152,35 @@ export function BoardView({
         ListEmptyComponent={
           <Text style={styles.hint}>
             {list.isPending
-              ? "读取中…"
+              ? t(lang, "common.loading")
               : failure
-                ? "修好后点刷新即可，不需要重开面板"
-                : "这个仓库还没有票，点「新建」写一张。"}
+                ? t(lang, "board.emptyAfterFailure")
+                : t(lang, "board.empty")}
           </Text>
         }
         renderItem={({ item }) => (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`查看票 #${item.number} ${item.title}`}
+            accessibilityLabel={`#${item.number} ${item.title}`}
             style={styles.row}
             onPress={() => setOpenNumber(item.number)}
           >
             <View style={styles.rowHead}>
               <Text style={styles.number}>#{item.number}</Text>
               {current === item.number ? (
-                <Text style={[styles.label, { backgroundColor: theme.colors.accent, color: "#000000" }]}>当前</Text>
+                <Text style={[styles.label, { backgroundColor: theme.colors.accent, color: "#000000" }]}>
+                  {t(lang, "board.current")}
+                </Text>
               ) : null}
               {item.isMap ? (
-                <Text style={[styles.label, { backgroundColor: theme.colors.surface2, color: theme.colors.foreground }]}>地图</Text>
+                <Text style={[styles.label, { backgroundColor: theme.colors.surface2, color: theme.colors.foreground }]}>
+                  {t(lang, "board.map")}
+                </Text>
               ) : null}
               {item.state === "CLOSED" ? (
-                <Text style={[styles.label, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>已关闭</Text>
+                <Text style={[styles.label, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>
+                  {t(lang, "board.closed")}
+                </Text>
               ) : null}
               <Text style={styles.title} numberOfLines={2}>
                 {item.title}
@@ -182,7 +198,9 @@ export function BoardView({
                 ))}
               </View>
             ) : null}
-            {item.assignees.length ? <Text style={styles.meta}>指派给 {item.assignees.join("、")}</Text> : null}
+            {item.assignees.length ? (
+              <Text style={styles.meta}>{t(lang, "board.assignees", { names: item.assignees.join(", ") })}</Text>
+            ) : null}
           </Pressable>
         )}
       />
@@ -190,6 +208,7 @@ export function BoardView({
       {openNumber !== null ? (
         <IssueModal
           theme={theme}
+          lang={lang}
           workspaceDir={workspaceDir}
           number={openNumber}
           isCurrent={current === openNumber}
@@ -198,7 +217,13 @@ export function BoardView({
         />
       ) : null}
 
-      <NewIssueModal theme={theme} workspaceDir={workspaceDir} open={creating} onClose={() => setCreating(false)} />
+      <NewIssueModal
+        theme={theme}
+        lang={lang}
+        workspaceDir={workspaceDir}
+        open={creating}
+        onClose={() => setCreating(false)}
+      />
     </View>
   );
 }

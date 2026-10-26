@@ -6,6 +6,8 @@ import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
 import { logsRpc } from "../../shared/logs";
 import { statusRpc } from "../../shared/status";
+import type { Lang } from "./i18n";
+import { t } from "./i18n";
 
 /**
  * 诊断页。
@@ -16,9 +18,11 @@ import { statusRpc } from "../../shared/status";
 export function DiagnosticsView({
   theme,
   layout,
+  lang,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
+  lang: Lang;
 }) {
   const toast = useToast();
   const readStatus = useRpc(statusRpc);
@@ -74,52 +78,60 @@ export function DiagnosticsView({
     <View style={styles.screen}>
       <View style={styles.card}>
         <View style={styles.row}>
-          <Text style={styles.label}>插件版本</Text>
-          <Text style={styles.value}>{status.data?.pluginVersion ?? "读取中…"}</Text>
+          <Text style={styles.label}>{t(lang, "diag.pluginVersion")}</Text>
+          <Text style={styles.value}>{status.data?.pluginVersion ?? t(lang, "common.loading")}</Text>
         </View>
         <View style={styles.row}>
           <Text style={styles.label}>Node</Text>
-          <Text style={styles.value}>{status.data?.node ?? "读取中…"}</Text>
+          <Text style={styles.value}>{status.data?.node ?? t(lang, "common.loading")}</Text>
         </View>
         <View style={styles.row}>
-          <Text style={styles.label}>gh 命令行</Text>
+          <Text style={styles.label}>{t(lang, "diag.gh")}</Text>
           <Text style={status.data?.gh.available ? styles.value : styles.danger}>
-            {status.data ? (status.data.gh.available ? (status.data.gh.version ?? "已安装") : "不可用") : "读取中…"}
+            {status.data
+              ? status.data.gh.available
+                ? status.data.gh.version ?? t(lang, "diag.ghAvailable")
+                : t(lang, "diag.ghUnavailable")
+              : t(lang, "common.loading")}
           </Text>
         </View>
         {status.data && !status.data.gh.available ? (
-          <Text style={styles.hint}>{status.data.gh.error ?? "未知原因"}；票面与标签相关的操作会全部失败。</Text>
+          <Text style={styles.hint}>
+            {status.data.gh.error ?? "?"} — {t(lang, "diag.ghMissingHint")}
+          </Text>
         ) : null}
         <View style={styles.row}>
-          <Text style={styles.label}>daemon 目录</Text>
+          <Text style={styles.label}>{t(lang, "diag.daemonCwd")}</Text>
           <Text style={styles.value} numberOfLines={2}>
-            {status.data?.daemonCwd ?? "读取中…"}
+            {status.data?.daemonCwd ?? t(lang, "common.loading")}
           </Text>
         </View>
       </View>
 
       <View style={styles.toolbar}>
-        <Text style={styles.label}>最近操作</Text>
+        <Text style={styles.label}>{t(lang, "diag.recent")}</Text>
         <View style={{ marginLeft: "auto" as const }} />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="刷新日志"
+          accessibilityLabel={t(lang, "diag.refreshHint")}
           style={styles.action}
           onPress={() => void logs.refetch()}
         >
-          <Text style={styles.actionText}>{logs.isFetching ? "刷新中…" : "刷新"}</Text>
+          <Text style={styles.actionText}>
+            {logs.isFetching ? t(lang, "common.refreshing") : t(lang, "common.refresh")}
+          </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="复制全部日志"
+          accessibilityLabel={t(lang, "diag.copyLogs")}
           style={styles.action}
           onPress={() => {
-            void copyText(asText || "（还没有日志）")
-              .then(() => toast.show("日志已复制", { variant: "success" }))
-              .catch(() => toast.error("复制失败：这个客户端不支持剪贴板"));
+            void copyText(asText || "—")
+              .then(() => toast.show(t(lang, "diag.logsCopied"), { variant: "success" }))
+              .catch(() => toast.error(t(lang, "common.copyFailed")));
           }}
         >
-          <Text style={styles.actionText}>复制</Text>
+          <Text style={styles.actionText}>{t(lang, "common.copy")}</Text>
         </Pressable>
       </View>
 
@@ -128,9 +140,7 @@ export function DiagnosticsView({
         keyExtractor={(item, index) => `${item.at}-${index}`}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>
-            {logs.isPending ? "读取中…" : "还没有写操作记录。评论、改标签、提交、推送都会在这里留一行。"}
-          </Text>
+          <Text style={styles.hint}>{logs.isPending ? t(lang, "common.loading") : t(lang, "diag.empty")}</Text>
         }
         renderItem={({ item }) => (
           <View style={styles.logRow}>

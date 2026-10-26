@@ -5,32 +5,30 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { skillsInstallRpc, skillsListRpc, skillsReadRpc } from "../../shared/skills";
+import type { Lang } from "./i18n";
+import { t } from "./i18n";
 
-type Lang = "en" | "zh";
 type SkillState = "none" | "current" | "differs";
-
-const STATE_LABEL: Record<SkillState, string> = {
-  none: "未安装",
-  current: "已安装",
-  differs: "有差异",
-};
 
 /**
  * 技能页。
  *
- * 这里刻意不做「自动安装」：写入会改变用户仓库里的文件，必须由人按下按钮并看到将写入哪些目录。
- * 语言切换只影响展示与安装内容，不改变工作区里已有的文件——已经装好的中文技能不会因为切到英文就变。
+ * 两个语言开关要分清：`lang` 是界面语言，`skillLang` 是技能包语言。
+ * 它们默认一致，但可以分开——有人用中文界面读英文技能原文，这不该被强行绑在一起。
+ * 这里刻意不做「自动安装」：写入会改变用户仓库里的文件，必须由人按下按钮。
  */
 export function SkillsView({
   theme,
   layout,
+  lang,
   workspaceDir,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
+  lang: Lang;
   workspaceDir: string;
 }) {
-  const [lang, setLang] = useState<Lang>("zh");
+  const [skillLang, setSkillLang] = useState<Lang>(lang);
   const [detailId, setDetailId] = useState<string | null>(null);
   const toast = useToast();
 
@@ -39,32 +37,33 @@ export function SkillsView({
   const readSkill = useRpc(skillsReadRpc);
 
   const list = useQuery({
-    queryKey: ["deck", "skills", lang, workspaceDir],
-    queryFn: () => listSkills({ workspaceDir, lang }),
+    queryKey: ["deck", "skills", skillLang, workspaceDir],
+    queryFn: () => listSkills({ workspaceDir, lang: skillLang }),
   });
 
   const detail = useQuery({
-    queryKey: ["deck", "skill", lang, detailId],
-    queryFn: () => readSkill({ lang, id: detailId ?? "" }),
+    queryKey: ["deck", "skill", skillLang, detailId],
+    queryFn: () => readSkill({ lang: skillLang, id: detailId ?? "" }),
     enabled: detailId !== null,
   });
 
   const install = useMutation({
-    mutationFn: (ids?: string[]) => installSkills({ workspaceDir, lang, ids }),
+    mutationFn: (ids?: string[]) => installSkills({ workspaceDir, lang: skillLang, ids }),
     onSuccess: (result) => {
       void list.refetch();
-      const parts = [
-        result.written.length ? `已写入 ${result.written.length} 个` : "",
-        result.skipped.length ? `跳过 ${result.skipped.length} 个` : "",
-        result.conflicts.length ? `冲突 ${result.conflicts.length} 个` : "",
-      ].filter(Boolean);
-      toast.show(parts.join("，") || "没有需要写入的技能", {
-        variant: result.conflicts.length ? "warning" : "success",
-      });
+      const touched = result.written.length + result.skipped.length + result.conflicts.length;
+      toast.show(
+        touched
+          ? t(lang, "skills.installSummary", {
+              written: result.written.length,
+              skipped: result.skipped.length,
+              conflicts: result.conflicts.length,
+            })
+          : t(lang, "skills.installNothing"),
+        { variant: result.conflicts.length ? "warning" : "success" },
+      );
     },
-    onError: (error: unknown) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    },
+    onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
   });
 
   const styles = useMemo(
@@ -106,6 +105,12 @@ export function SkillsView({
     [theme],
   );
 
+  const stateLabel: Record<SkillState, string> = {
+    none: t(lang, "skills.state.none"),
+    current: t(lang, "skills.state.current"),
+    differs: t(lang, "skills.state.differs"),
+  };
+
   const badgeStyle = (state: SkillState) => [
     styles.badge,
     {
@@ -121,33 +126,35 @@ export function SkillsView({
         <View style={styles.segmented}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="中文技能"
-            style={[styles.segItem, lang === "zh" ? styles.segItemActive : null]}
-            onPress={() => setLang("zh")}
+            accessibilityLabel={t(lang, "skills.langZh")}
+            style={[styles.segItem, skillLang === "zh" ? styles.segItemActive : null]}
+            onPress={() => setSkillLang("zh")}
           >
-            <Text style={lang === "zh" ? styles.segTextActive : styles.segText}>中文</Text>
+            <Text style={skillLang === "zh" ? styles.segTextActive : styles.segText}>{t(lang, "skills.langZh")}</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="English skills"
-            style={[styles.segItem, lang === "en" ? styles.segItemActive : null]}
-            onPress={() => setLang("en")}
+            accessibilityLabel={t(lang, "skills.langEn")}
+            style={[styles.segItem, skillLang === "en" ? styles.segItemActive : null]}
+            onPress={() => setSkillLang("en")}
           >
-            <Text style={lang === "en" ? styles.segTextActive : styles.segText}>EN</Text>
+            <Text style={skillLang === "en" ? styles.segTextActive : styles.segText}>{t(lang, "skills.langEn")}</Text>
           </Pressable>
         </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="安装全部未安装的技能"
+          accessibilityLabel={t(lang, "skills.installAll")}
           style={styles.action}
           onPress={() => install.mutate(undefined)}
         >
-          <Text style={styles.actionText}>{install.isPending ? "安装中…" : "全部安装"}</Text>
+          <Text style={styles.actionText}>
+            {install.isPending ? t(lang, "skills.installing") : t(lang, "skills.installAll")}
+          </Text>
         </Pressable>
       </View>
 
       <Text style={styles.hint}>
-        安装会写入工作区的 {".claude/skills"} 与 {".agents/skills"}；已存在且内容不同的文件不会被覆盖。
+        {t(lang, "skills.hint", { a: ".claude/skills", b: ".agents/skills" })}
       </Text>
 
       {list.error ? <Text style={styles.error}>{list.error.message}</Text> : null}
@@ -157,18 +164,18 @@ export function SkillsView({
         keyExtractor={(item) => item.id}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>{list.isPending ? "读取中…" : "没有找到技能，检查插件包里的 templates/skills 是否完整"}</Text>
+          <Text style={styles.hint}>{list.isPending ? t(lang, "common.loading") : t(lang, "skills.empty")}</Text>
         }
         renderItem={({ item }) => (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`查看技能 ${item.id}`}
+            accessibilityLabel={item.id}
             style={styles.row}
             onPress={() => setDetailId(item.id)}
           >
             <View style={styles.rowHead}>
               <Text style={styles.name}>{item.id}</Text>
-              <Text style={badgeStyle(item.state)}>{STATE_LABEL[item.state]}</Text>
+              <Text style={badgeStyle(item.state)}>{stateLabel[item.state]}</Text>
             </View>
             <Text style={styles.description} numberOfLines={2}>
               {item.description}
@@ -178,7 +185,7 @@ export function SkillsView({
       />
 
       <Modal
-        title={detailId ?? "技能"}
+        title={detailId ?? t(lang, "tabs.skills")}
         open={detailId !== null}
         onOpenChange={(open) => {
           if (!open) setDetailId(null);
@@ -191,11 +198,11 @@ export function SkillsView({
             {detailId ? (
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`安装技能 ${detailId}`}
+                accessibilityLabel={t(lang, "skills.installOne")}
                 style={styles.action}
                 onPress={() => install.mutate([detailId])}
               >
-                <Text style={styles.actionText}>安装这个技能</Text>
+                <Text style={styles.actionText}>{t(lang, "skills.installOne")}</Text>
               </Pressable>
             ) : null}
           </View>

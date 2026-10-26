@@ -5,7 +5,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { issuesCommentRpc, issuesDetailRpc, issuesSetLabelsRpc } from "../../shared/issues";
-import { FAILURE_TEXT, promptForIssue, readableText } from "./format";
+import { failureText, promptForIssue, readableText } from "./format";
+import type { Lang } from "./i18n";
+import { t } from "./i18n";
 
 /**
  * 票面详情。
@@ -15,6 +17,7 @@ import { FAILURE_TEXT, promptForIssue, readableText } from "./format";
  */
 export function IssueModal({
   theme,
+  lang,
   workspaceDir,
   number,
   isCurrent,
@@ -22,6 +25,7 @@ export function IssueModal({
   onClose,
 }: {
   theme: PluginTheme;
+  lang: Lang;
   workspaceDir: string;
   number: number;
   isCurrent: boolean;
@@ -52,11 +56,13 @@ export function IssueModal({
     mutationFn: () => writeComment({ workspaceDir, number, body: comment.trim() }),
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${FAILURE_TEXT[result.reason] ?? "评论失败"}：${result.detail}`, { variant: "error" });
+        toast.show(`${t(lang, "issue.commentFailed")}：${failureText(lang, result.reason)} — ${result.detail}`, {
+          variant: "error",
+        });
         return;
       }
       setComment("");
-      toast.show("评论已发到 GitHub", { variant: "success" });
+      toast.show(t(lang, "issue.commentDone"), { variant: "success" });
       invalidate();
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
@@ -66,11 +72,16 @@ export function IssueModal({
     mutationFn: (labels: string[]) => setLabels({ workspaceDir, number, labels }),
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${FAILURE_TEXT[result.reason] ?? "改标签失败"}：${result.detail}`, { variant: "error" });
+        toast.show(`${t(lang, "issue.labelsFailed")}：${failureText(lang, result.reason)} — ${result.detail}`, {
+          variant: "error",
+        });
         return;
       }
       setLabelDraft(null);
-      toast.show(`标签已改为 ${result.labels.map((label) => label.name).join("、") || "空"}`, { variant: "success" });
+      toast.show(
+        t(lang, "issue.labelsDone", { names: result.labels.map((label) => label.name).join(", ") || "—" }),
+        { variant: "success" },
+      );
       invalidate();
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
@@ -120,18 +131,21 @@ export function IssueModal({
           {detail.error ? <Text style={styles.error}>{detail.error.message}</Text> : null}
           {detail.data && !detail.data.ok ? (
             <>
-              <Text style={styles.error}>{FAILURE_TEXT[detail.data.reason] ?? "读取失败"}</Text>
+              <Text style={styles.error}>{failureText(lang, detail.data.reason)}</Text>
               <Text style={styles.hint}>{detail.data.detail}</Text>
             </>
           ) : null}
-          {detail.isPending ? <Text style={styles.hint}>读取中…</Text> : null}
+          {detail.isPending ? <Text style={styles.hint}>{t(lang, "common.loading")}</Text> : null}
 
           {issue ? (
             <>
               <Text style={styles.title}>{issue.title}</Text>
               <Text style={styles.meta}>
-                {issue.state === "OPEN" ? "未关闭" : "已关闭"} · 更新于 {issue.updatedAt.slice(0, 10)}
-                {issue.assignees.length ? ` · 指派给 ${issue.assignees.join("、")}` : ""}
+                {issue.state === "OPEN" ? t(lang, "issue.open") : t(lang, "issue.closed")} ·{" "}
+                {t(lang, "issue.updatedAt", { date: issue.updatedAt.slice(0, 10) })}
+                {issue.assignees.length
+                  ? ` · ${t(lang, "issue.assignedTo", { names: issue.assignees.join(", ") })}`
+                  : ""}
               </Text>
               {issue.labels.length ? (
                 <View style={styles.labels}>
@@ -146,53 +160,59 @@ export function IssueModal({
                 </View>
               ) : null}
 
-              <Markdown>{issue.body || "_这张票没有正文。_"}</Markdown>
+              <Markdown>{issue.body || t(lang, "issue.noBody")}</Markdown>
 
               <View style={styles.actions}>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`复制票 #${number} 的提示词`}
+                  accessibilityLabel={t(lang, "issue.copyPrompt")}
                   style={styles.action}
                   onPress={() => {
-                    void copyText(promptForIssue(issue))
-                      .then(() => toast.show("提示词已复制，粘到 Agent 输入框即可", { variant: "success" }))
-                      .catch(() => toast.error("复制失败：这个客户端不支持剪贴板"));
+                    void copyText(promptForIssue(lang, issue))
+                      .then(() => toast.show(t(lang, "issue.promptCopied"), { variant: "success" }))
+                      .catch(() => toast.error(t(lang, "common.copyFailed")));
                   }}
                 >
-                  <Text style={styles.actionText}>复制提示词</Text>
+                  <Text style={styles.actionText}>{t(lang, "issue.copyPrompt")}</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={isCurrent ? `取消当前票 #${number}` : `把票 #${number} 设为当前票`}
+                  accessibilityLabel={
+                    isCurrent
+                      ? t(lang, "issue.unbindHint", { number })
+                      : t(lang, "issue.bindHint", { number })
+                  }
                   style={[styles.action, isCurrent ? styles.actionActive : null]}
                   onPress={onBind}
                 >
-                  <Text style={styles.actionText}>{isCurrent ? "✓ 当前票" : "设为当前票"}</Text>
+                  <Text style={styles.actionText}>
+                    {isCurrent ? t(lang, "issue.bound") : t(lang, "issue.bind")}
+                  </Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`编辑票 #${number} 的标签`}
+                  accessibilityLabel={t(lang, "issue.editLabels")}
                   style={styles.action}
                   onPress={() => setLabelDraft(issue.labels.map((label) => label.name).join(", "))}
                 >
-                  <Text style={styles.actionText}>改标签</Text>
+                  <Text style={styles.actionText}>{t(lang, "issue.editLabels")}</Text>
                 </Pressable>
               </View>
 
               {labelDraft !== null ? (
                 <>
                   <TextInput
-                    accessibilityLabel="标签名，逗号分隔"
+                    accessibilityLabel={t(lang, "issue.editLabels")}
                     style={styles.input}
                     value={labelDraft}
                     onChangeText={setLabelDraft}
-                    placeholder="用逗号分隔，留空表示清空标签"
+                    placeholder={t(lang, "issue.labelsPlaceholder")}
                     multiline
                   />
                   <View style={styles.actions}>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel="保存标签到 GitHub"
+                      accessibilityLabel={t(lang, "issue.saveLabels")}
                       style={styles.action}
                       onPress={() =>
                         labelMutation.mutate(
@@ -203,18 +223,20 @@ export function IssueModal({
                         )
                       }
                     >
-                      <Text style={styles.actionText}>{labelMutation.isPending ? "保存中…" : "保存到 GitHub"}</Text>
+                      <Text style={styles.actionText}>
+                        {labelMutation.isPending ? t(lang, "issue.savingLabels") : t(lang, "issue.saveLabels")}
+                      </Text>
                     </Pressable>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel="放弃改标签"
+                      accessibilityLabel={t(lang, "issue.discardLabels")}
                       style={styles.action}
                       onPress={() => setLabelDraft(null)}
                     >
-                      <Text style={styles.actionText}>取消</Text>
+                      <Text style={styles.actionText}>{t(lang, "common.cancel")}</Text>
                     </Pressable>
                   </View>
-                  <Text style={styles.hint}>这里是整体替换：保存后这张票只有上面这些标签。</Text>
+                  <Text style={styles.hint}>{t(lang, "issue.labelsHint")}</Text>
                 </>
               ) : null}
 
@@ -222,7 +244,7 @@ export function IssueModal({
                 ? detail.data.comments.map((item, index) => (
                     <View key={`${item.createdAt}-${index}`} style={styles.comment}>
                       <Text style={styles.meta}>
-                        {item.author || "未知作者"} · {item.createdAt.slice(0, 10)}
+                        {item.author || t(lang, "issue.unknownAuthor")} · {item.createdAt.slice(0, 10)}
                       </Text>
                       <Markdown>{item.body}</Markdown>
                     </View>
@@ -230,21 +252,25 @@ export function IssueModal({
                 : null}
 
               <TextInput
-                accessibilityLabel="写一条评论"
+                accessibilityLabel={t(lang, "issue.submitComment")}
                 style={styles.input}
                 value={comment}
                 onChangeText={setComment}
-                placeholder="写一条评论（会发到 GitHub）"
+                placeholder={t(lang, "issue.commentPlaceholder")}
                 multiline
               />
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="提交评论到 GitHub"
+                accessibilityLabel={t(lang, "issue.submitComment")}
                 style={styles.action}
                 onPress={() => commentMutation.mutate()}
               >
                 <Text style={styles.actionText}>
-                  {commentMutation.isPending ? "提交中…" : comment.trim() ? "提交评论" : "写点什么再提交"}
+                  {commentMutation.isPending
+                    ? t(lang, "issue.commenting")
+                    : comment.trim()
+                      ? t(lang, "issue.submitComment")
+                      : t(lang, "issue.commentEmpty")}
                 </Text>
               </Pressable>
             </>

@@ -15,18 +15,21 @@ import {
   gitStatusRpc,
   gitUnstageRpc,
 } from "../../shared/git";
+import type { Lang, MessageKey } from "./i18n";
+import { t } from "./i18n";
 
 type Op = "commit" | "pull" | "push" | "fetch";
 
-const GIT_FAILURE: Record<string, string> = {
-  "no-workspace": "工作区目录不可用",
-  "git-missing": "没有找到 git 命令",
-  "git-failed": "git 拒绝了这次操作",
-  invalid: "输入不合法，没有执行",
-  blocked: "现在做不了",
-  "ticket-expired": "确认已失效",
-  "head-moved": "仓库状态在确认后变了",
-  "needs-choice": "需要先选一个远端",
+/** 失败原因码 → 文案键。用显式表而不是拼字符串，拼错了编译期就能发现。 */
+const GIT_FAILURE_KEYS: Record<string, MessageKey> = {
+  "no-workspace": "version.failure.no-workspace",
+  "git-missing": "version.failure.git-missing",
+  "git-failed": "version.failure.git-failed",
+  invalid: "version.failure.invalid",
+  blocked: "version.failure.blocked",
+  "ticket-expired": "version.failure.ticket-expired",
+  "head-moved": "version.failure.head-moved",
+  "needs-choice": "version.failure.needs-choice",
 };
 
 /**
@@ -39,10 +42,12 @@ const GIT_FAILURE: Record<string, string> = {
 export function VersionView({
   theme,
   layout,
+  lang,
   workspaceDir,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
+  lang: Lang;
   workspaceDir: string;
 }) {
   const [message, setMessage] = useState("");
@@ -63,6 +68,8 @@ export function VersionView({
   const push = useRpc(gitPushRpc);
   const readDiff = useRpc(gitDiffRpc);
 
+  const failureTextOf = (reason: string) => t(lang, GIT_FAILURE_KEYS[reason] ?? "version.failure.git-failed");
+
   const status = useQuery({
     queryKey: ["deck", "git", workspaceDir],
     queryFn: () => readStatus({ workspaceDir }),
@@ -79,6 +86,9 @@ export function VersionView({
     void queryClient.invalidateQueries({ queryKey: ["deck", "git", workspaceDir] });
   };
 
+  /** 记住最后一次点的远端操作，选完远端后按同一个操作重跑。 */
+  const lastOp = useRef<Exclude<Op, "commit"> | null>(null);
+
   const stageMutation = useMutation({
     // 两条 RPC 的失败形状一致、成功形状不同（staged / unstaged），在这里归一成「做成了没」。
     mutationFn: async (input: { paths: string[]; stage: boolean }): Promise<{ ok: true } | { ok: false; reason: string; detail: string }> => {
@@ -89,7 +99,7 @@ export function VersionView({
     },
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${GIT_FAILURE[result.reason] ?? "操作失败"}：${result.detail}`, { variant: "error" });
+        toast.show(`${failureTextOf(result.reason)}：${result.detail}`, { variant: "error" });
         return;
       }
       refresh();
@@ -102,12 +112,14 @@ export function VersionView({
       const checked = await check({ workspaceDir, op: "commit" });
       if (!checked.ok) return { kind: "blocked" as const, detail: checked.detail };
       const done = await commit({ workspaceDir, ticketId: checked.ticketId, message });
-      return done.ok ? { kind: "done" as const, detail: done.headAfter.slice(0, 7) } : { kind: "failed" as const, detail: `${GIT_FAILURE[done.reason] ?? "提交失败"}：${done.detail}` };
+      return done.ok
+        ? { kind: "done" as const, detail: done.headAfter.slice(0, 7) }
+        : { kind: "failed" as const, detail: `${failureTextOf(done.reason)}：${done.detail}` };
     },
     onSuccess: (result) => {
       if (result.kind === "done") {
         setMessage("");
-        toast.show(`已提交 ${result.detail}`, { variant: "success" });
+        toast.show(t(lang, "version.committed", { sha: result.detail }), { variant: "success" });
         refresh();
         return;
       }
@@ -128,19 +140,28 @@ export function VersionView({
       }
       if (input.op === "fetch") {
         const done = await fetchRemote({ workspaceDir, ticketId: checked.ticketId });
-        return done.ok ? { kind: "done" as const, detail: `已取回 ${done.remote}` } : { kind: "failed" as const, detail: done.detail };
+        return done.ok
+          ? { kind: "done" as const, detail: t(lang, "version.fetched", { remote: done.remote }) }
+          : { kind: "failed" as const, detail: `${failureTextOf(done.reason)}：${done.detail}` };
       }
       if (input.op === "pull") {
         const done = await pull({ workspaceDir, ticketId: checked.ticketId });
-        if (!done.ok) return { kind: "failed" as const, detail: done.detail };
-        const text = done.mode === "fast-forward" ? `已快进到 ${done.headAfter.slice(0, 7)}` : done.mode === "up-to-date" ? "已经是最新的" : "已拉取，但读不到 HEAD，结果未知";
+        if (!done.ok) return { kind: "failed" as const, detail: `${failureTextOf(done.reason)}：${done.detail}` };
+        const text =
+          done.mode === "fast-forward"
+            ? t(lang, "version.pulled", { sha: done.headAfter.slice(0, 7) })
+            : done.mode === "up-to-date"
+              ? t(lang, "version.upToDate")
+              : t(lang, "version.pullUnknown");
         return { kind: "done" as const, detail: text };
       }
       const done = await push({ workspaceDir, ticketId: checked.ticketId });
-      if (!done.ok) return { kind: "failed" as const, detail: done.detail };
+      if (!done.ok) return { kind: "failed" as const, detail: `${failureTextOf(done.reason)}：${done.detail}` };
       return {
         kind: "done" as const,
-        detail: done.upToDate ? `${done.remote}/${done.branch} 已经是最新的` : `已推送 ${done.branch} → ${done.remote}`,
+        detail: done.upToDate
+          ? t(lang, "version.pushUpToDate", { remote: done.remote, branch: done.branch })
+          : t(lang, "version.pushed", { branch: done.branch, remote: done.remote }),
       };
     },
     onSuccess: (result) => {
@@ -152,9 +173,6 @@ export function VersionView({
       if (result.kind === "done") refresh();
     },
   });
-
-  /** 记住最后一次点的远端操作，选完远端后按同一个操作重跑。 */
-  const lastOp = useRef<Exclude<Op, "commit"> | null>(null);
 
   const styles = useMemo(
     () => ({
@@ -210,51 +228,60 @@ export function VersionView({
     <View style={styles.screen}>
       <View style={styles.toolbar}>
         <Text style={styles.head}>
-          {data ? `${data.branch.name || "分离 HEAD"}${data.branch.upstream ? ` → ${data.branch.upstream}` : ""}` : "读取中…"}
+          {data
+            ? `${data.branch.name || t(lang, "version.detached")}${data.branch.upstream ? ` → ${data.branch.upstream}` : ""}`
+            : t(lang, "common.loading")}
         </Text>
         {data && (data.branch.ahead || data.branch.behind) ? (
           <Text style={styles.meta}>
-            领先 {data.branch.ahead} · 落后 {data.branch.behind}
+            {t(lang, "version.ahead", { n: data.branch.ahead })} · {t(lang, "version.behind", { n: data.branch.behind })}
           </Text>
         ) : null}
         <View style={{ marginLeft: "auto" as const }} />
-        <Pressable accessibilityRole="button" accessibilityLabel="刷新状态" style={styles.action} onPress={refresh}>
-          <Text style={styles.actionText}>{status.isFetching ? "刷新中…" : "刷新"}</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t(lang, "common.refresh")}
+          style={styles.action}
+          onPress={refresh}
+        >
+          <Text style={styles.actionText}>
+            {status.isFetching ? t(lang, "common.refreshing") : t(lang, "common.refresh")}
+          </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="取回远端记录"
+          accessibilityLabel={t(lang, "version.fetch")}
           style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "fetch" })}
         >
-          <Text style={styles.actionText}>取回</Text>
+          <Text style={styles.actionText}>{t(lang, "version.fetch")}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="拉取远端更新"
+          accessibilityLabel={t(lang, "version.pull")}
           style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "pull" })}
         >
-          <Text style={styles.actionText}>拉取</Text>
+          <Text style={styles.actionText}>{t(lang, "version.pull")}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="推送到远端"
+          accessibilityLabel={t(lang, "version.push")}
           style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "push" })}
         >
-          <Text style={styles.actionText}>推送</Text>
+          <Text style={styles.actionText}>{t(lang, "version.push")}</Text>
         </Pressable>
       </View>
 
       {choices ? (
         <View style={styles.toolbar}>
-          <Text style={styles.meta}>选一个远端：</Text>
+          <Text style={styles.meta}>{t(lang, "version.chooseRemote")}</Text>
           {choices.remotes.map((remote) => (
             <Pressable
               key={remote}
               accessibilityRole="button"
-              accessibilityLabel={`选择远端 ${remote}`}
+              accessibilityLabel={t(lang, "version.chooseRemoteHint", { name: remote })}
               style={styles.action}
               onPress={() => {
                 const picked = choices;
@@ -265,35 +292,44 @@ export function VersionView({
               <Text style={styles.actionText}>{remote}</Text>
             </Pressable>
           ))}
-          <Pressable accessibilityRole="button" accessibilityLabel="取消选择远端" style={styles.action} onPress={() => setChoices(null)}>
-            <Text style={styles.actionText}>取消</Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={t(lang, "common.cancel")}
+            style={styles.action}
+            onPress={() => setChoices(null)}
+          >
+            <Text style={styles.actionText}>{t(lang, "common.cancel")}</Text>
           </Pressable>
         </View>
       ) : null}
 
-      {failure ? <Text style={styles.error}>{GIT_FAILURE[failure.reason] ?? "读取失败"}：{failure.detail}</Text> : null}
+      {failure ? (
+        <Text style={styles.error}>
+          {failureTextOf(failure.reason)}：{failure.detail}
+        </Text>
+      ) : null}
       {status.error ? <Text style={styles.error}>{status.error.message}</Text> : null}
 
       {data ? (
         <View style={styles.toolbar}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="暂存全部改动"
+            accessibilityLabel={t(lang, "version.stageAll")}
             style={styles.action}
             onPress={() => stageMutation.mutate({ paths: unstaged, stage: true })}
           >
-            <Text style={styles.actionText}>全部暂存</Text>
+            <Text style={styles.actionText}>{t(lang, "version.stageAll")}</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="取消全部暂存"
+            accessibilityLabel={t(lang, "version.unstageAll")}
             style={styles.action}
             onPress={() => stageMutation.mutate({ paths: staged, stage: false })}
           >
-            <Text style={styles.actionText}>全部取消暂存</Text>
+            <Text style={styles.actionText}>{t(lang, "version.unstageAll")}</Text>
           </Pressable>
           <Text style={styles.meta}>
-            已暂存 {staged.length} · 未暂存 {unstaged.length}
+            {t(lang, "version.staged", { n: staged.length })} · {t(lang, "version.unstaged", { n: unstaged.length })}
           </Text>
         </View>
       ) : null}
@@ -301,9 +337,11 @@ export function VersionView({
       <FlatList
         data={data?.files ?? []}
         keyExtractor={(item) => item.path}
-        contentContainerStyle={{ paddingBottom: 8 }}
+        contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 8 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>{status.isPending ? "读取中…" : data ? "工作区干净，没有可提交的改动。" : ""}</Text>
+          <Text style={styles.hint}>
+            {status.isPending ? t(lang, "common.loading") : data ? t(lang, "version.clean") : ""}
+          </Text>
         }
         renderItem={({ item }) => (
           <View style={styles.row}>
@@ -312,26 +350,30 @@ export function VersionView({
               {item.path}
             </Text>
             {item.staged ? (
-              <Text style={[styles.badge, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>已暂存</Text>
+              <Text style={[styles.badge, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>
+                {t(lang, "version.stagedBadge")}
+              </Text>
             ) : null}
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`查看 ${item.path} 的改动`}
+              accessibilityLabel={`${t(lang, "version.diff")} ${item.path}`}
               style={styles.action}
               onPress={() => {
                 setDiffStaged(item.staged);
                 setDiffPath(item.path);
               }}
             >
-              <Text style={styles.actionText}>改动</Text>
+              <Text style={styles.actionText}>{t(lang, "version.diff")}</Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={item.staged ? `取消暂存 ${item.path}` : `暂存 ${item.path}`}
+              accessibilityLabel={`${item.staged ? t(lang, "version.unstage") : t(lang, "version.stage")} ${item.path}`}
               style={styles.action}
               onPress={() => stageMutation.mutate({ paths: [item.path], stage: !item.staged })}
             >
-              <Text style={styles.actionText}>{item.staged ? "取消暂存" : "暂存"}</Text>
+              <Text style={styles.actionText}>
+                {item.staged ? t(lang, "version.unstage") : t(lang, "version.stage")}
+              </Text>
             </Pressable>
           </View>
         )}
@@ -339,27 +381,29 @@ export function VersionView({
 
       <View style={{ gap: 6 }}>
         <TextInput
-          accessibilityLabel="提交信息"
+          accessibilityLabel={t(lang, "version.messagePlaceholder")}
           style={styles.input}
           value={message}
           onChangeText={setMessage}
-          placeholder="提交信息（会连同已暂存的改动一起提交）"
+          placeholder={t(lang, "version.messagePlaceholder")}
         />
         <View style={styles.toolbar}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="提交已暂存的改动"
+            accessibilityLabel={t(lang, "version.commit")}
             style={styles.action}
             onPress={() => commitMutation.mutate()}
           >
-            <Text style={styles.actionText}>{commitMutation.isPending ? "提交中…" : "提交"}</Text>
+            <Text style={styles.actionText}>
+              {commitMutation.isPending ? t(lang, "version.committing") : t(lang, "version.commit")}
+            </Text>
           </Pressable>
-          <Text style={styles.hint}>提交与推送都会先做一次预检，被挡住时会说明原因。</Text>
+          <Text style={styles.hint}>{t(lang, "version.hint")}</Text>
         </View>
       </View>
 
       <Modal
-        title={diffPath ? `改动：${diffPath}` : "改动"}
+        title={diffPath ? t(lang, "version.diffTitle", { path: diffPath }) : t(lang, "version.diff")}
         open={diffPath !== null}
         onOpenChange={(open) => {
           if (!open) setDiffPath(null);
@@ -368,14 +412,20 @@ export function VersionView({
         <Modal.Content>
           <View style={styles.modalBody}>
             {diff.error ? <Text style={styles.error}>{diff.error.message}</Text> : null}
-            {diff.data && !diff.data.ok ? <Text style={styles.error}>{GIT_FAILURE[diff.data.reason] ?? "读取失败"}：{diff.data.detail}</Text> : null}
+            {diff.data && !diff.data.ok ? (
+              <Text style={styles.error}>
+                {failureTextOf(diff.data.reason)}：{diff.data.detail}
+              </Text>
+            ) : null}
             {diff.data?.ok ? (
               <>
-                {diff.data.truncated ? <Text style={styles.hint}>改动太大，只显示前一段。</Text> : null}
-                <Markdown>{diff.data.diff ? `\`\`\`diff\n${diff.data.diff}\n\`\`\`` : "_这个文件没有文本改动（可能是二进制或只改了权限）。_"}</Markdown>
+                {diff.data.truncated ? <Text style={styles.hint}>{t(lang, "version.diffTruncated")}</Text> : null}
+                <Markdown>
+                  {diff.data.diff ? `\`\`\`diff\n${diff.data.diff}\n\`\`\`` : t(lang, "version.diffEmpty")}
+                </Markdown>
               </>
             ) : diff.isPending ? (
-              <Text style={styles.hint}>读取中…</Text>
+              <Text style={styles.hint}>{t(lang, "common.loading")}</Text>
             ) : null}
           </View>
         </Modal.Content>

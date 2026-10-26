@@ -5,7 +5,9 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { issuesCreateRpc } from "../../shared/issues";
-import { FAILURE_TEXT } from "./format";
+import { failureText } from "./format";
+import type { Lang } from "./i18n";
+import { t } from "./i18n";
 
 /**
  * 新建票。
@@ -15,11 +17,13 @@ import { FAILURE_TEXT } from "./format";
  */
 export function NewIssueModal({
   theme,
+  lang,
   workspaceDir,
   open,
   onClose,
 }: {
   theme: PluginTheme;
+  lang: Lang;
   workspaceDir: string;
   open: boolean;
   onClose(): void;
@@ -46,12 +50,16 @@ export function NewIssueModal({
       }),
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${FAILURE_TEXT[result.reason] ?? "新建失败"}：${result.detail}`, { variant: "error" });
+        toast.show(`${t(lang, "new.failed")}：${failureText(lang, result.reason)} — ${result.detail}`, {
+          variant: "error",
+        });
         return;
       }
       void queryClient.invalidateQueries({ queryKey: ["deck", "issues", workspaceDir] });
       toast.show(
-        result.labelsFailed ? `已新建 #${result.number}，但标签没挂上，去票面补` : `已新建 #${result.number}`,
+        result.labelsFailed
+          ? t(lang, "new.doneLabelsFailed", { number: result.number })
+          : t(lang, "new.done", { number: result.number }),
         { variant: result.labelsFailed ? "warning" : "success" },
       );
       setTitle("");
@@ -103,56 +111,63 @@ export function NewIssueModal({
   );
 
   return (
-    <Modal title="新建票" open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+    <Modal title={t(lang, "new.title")} open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <Modal.Content>
         <View style={styles.body}>
           <TextInput
-            accessibilityLabel="票面标题"
+            accessibilityLabel={t(lang, "new.titleField")}
             style={styles.input}
             value={title}
             onChangeText={setTitle}
-            placeholder="标题"
+            placeholder={t(lang, "new.titleField")}
           />
           <TextInput
-            accessibilityLabel="票面正文"
+            accessibilityLabel={t(lang, "new.bodyField")}
             style={[styles.input, styles.inputBody]}
             value={body}
             onChangeText={setBody}
-            placeholder="正文（支持 Markdown）"
+            placeholder={t(lang, "new.bodyField")}
             multiline
           />
           <TextInput
-            accessibilityLabel="标签，逗号分隔"
+            accessibilityLabel={t(lang, "new.labelsField")}
             style={styles.input}
             value={labels}
             onChangeText={setLabels}
-            placeholder="标签，逗号分隔（可留空）"
+            placeholder={t(lang, "new.labelsField")}
           />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="标记为地图票"
+            accessibilityLabel={t(lang, "new.markMap")}
             style={[styles.toggle, isMap ? styles.toggleActive : null]}
             onPress={() => setIsMap((value) => !value)}
           >
             <Text style={isMap ? styles.toggleTextActive : styles.toggleText}>
-              {isMap ? "✓ 地图票（自动带 wayfinder:map）" : "标记为地图票"}
+              {isMap ? t(lang, "new.markMapOn") : t(lang, "new.markMap")}
             </Text>
           </Pressable>
 
           <View style={styles.actions}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="在 GitHub 上新建这张票"
+              accessibilityLabel={t(lang, "new.submit")}
               style={[styles.action, styles.actionPrimary]}
               onPress={() => create.mutate()}
             >
-              <Text style={styles.actionText}>{create.isPending ? "创建中…" : "创建到 GitHub"}</Text>
+              <Text style={styles.actionText}>
+                {create.isPending ? t(lang, "new.submitting") : t(lang, "new.submit")}
+              </Text>
             </Pressable>
-            <Pressable accessibilityRole="button" accessibilityLabel="取消新建" style={styles.action} onPress={onClose}>
-              <Text style={styles.actionText}>取消</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t(lang, "common.cancel")}
+              style={styles.action}
+              onPress={onClose}
+            >
+              <Text style={styles.actionText}>{t(lang, "common.cancel")}</Text>
             </Pressable>
           </View>
-          <Text style={styles.hint}>票会建在工作区所在的仓库里，标题必需。</Text>
+          <Text style={styles.hint}>{t(lang, "new.hint")}</Text>
         </View>
       </Modal.Content>
     </Modal>
