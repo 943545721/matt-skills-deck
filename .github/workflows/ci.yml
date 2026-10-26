@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 测试直接用 node 跑 TypeScript（Node 自带类型剥离），所以版本必须 >= 22.18。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # 两套 tsconfig 分别管客户端与服务端，分层边界靠它们兜住。
+      - run: npm run typecheck
+
+      - run: npm test

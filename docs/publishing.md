@@ -48,14 +48,19 @@
 - 双语 overview、README、LICENSE / NOTICE；
 - 可用的 `npm run typecheck` 与 `npm test`（提交前门槛）。
 
+已经处理完的：
+
+- **公开远端**：`git@github.com:943545721/matt-skills-deck.git`，默认分支 `main`。
+- **版本**：`package.json` 为 `0.1.0`，已打附注 tag `v0.1.0`；`paseo plugin install git:943545721/matt-skills-deck --ref v0.1.0` 现在就能装。
+- **包元数据**：补了 `repository` / `homepage` / `bugs` / `keywords` / `engines`，`files` 带上 `assets/`。
+- **图标**：`assets/icon.png`（512×512 像素风），清单里以 `icon` 引用；`media` 仍为空数组。
+- **CI**：`.github/workflows/ci.yml` 在 Node 22 上跑 `npm ci` + 两套 typecheck + 71 条测试。
+
 还差的，需要人到场处理：
 
-1. **仓库要有公开远端**：现在这个目录没有配置 git remote，注册表的 git 产物需要 `remote` + 完整 commit sha。
-2. **`media` 是空的**：注册表条目要求一串图片/视频 URL，本环境起不了 Paseo 桌面端窗口，截不了图。
+1. **`media` 是空的**：注册表条目要求一串图片/视频 URL，本环境起不了 Paseo 桌面端窗口，截不了图。
    等能截图时，录一段「任务板 → 地图 → 下一步」的 gif 或 mp4 最省事。
-3. **提交入口未核对**：CLI 里没有 `publish` 子命令，注册表条目的审核与提交是平台侧流程，
+2. **提交入口未核对**：CLI 里没有 `publish` 子命令，注册表条目的审核与提交是平台侧流程，
    本机没能核实具体入口（默认注册表 `https://plugins.paseo.sh` 在受限网络下打不开）。发布前应到该站点确认当前提交方式。
-4. **版本号**：`package.json` 仍是 `0.1.0`、`paseo-plugin.json` 没有版本字段（版本随包走），
-   首次对外发布前定版本并打 tag，`--ref vX.Y.Z` 才有意义。
-5. **`package.json` 现在带 `"private": true`**：这是故意的，防手滑发到 npm。真要走 npm 产物时，
-   先去掉这个字段、补 `license` / `repository` 字段，再 `npm publish`。
+3. **`package.json` 仍带 `"private": true`**：这是故意的，防手滑发到 npm；本机也没有 npm 凭据。
+   真要走 npm 产物时，去掉这个字段再 `npm publish`（`license` / `repository` 已经补齐）。

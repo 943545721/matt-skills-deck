@@ -5,8 +5,27 @@
   "type": "module",
   "license": "MIT",
   "description": "Matt Pocock 技能套件与 issue 任务板的 Paseo 插件",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/943545721/matt-skills-deck.git"
+  },
+  "homepage": "https://github.com/943545721/matt-skills-deck#readme",
+  "bugs": {
+    "url": "https://github.com/943545721/matt-skills-deck/issues"
+  },
+  "keywords": [
+    "paseo",
+    "paseo-plugin",
+    "skills",
+    "github-issues",
+    "mcp"
+  ],
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "files": [
     "paseo-plugin.json",
+    "assets/",
     "OVERVIEW.md",
     "OVERVIEW.*.md",
     "LICENSE",

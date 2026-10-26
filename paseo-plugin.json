@@ -2,6 +2,7 @@
   "id": "matt-skills-deck",
   "name": "MattSkillsDeck",
   "description": "Matt Pocock 技能套件与 GitHub issue 任务板：27 个工程技能中英双语，票面、地图与给 Agent 用的 deck 工具。",
+  "icon": "assets/icon.png",
   "media": [],
   "requirements": {
     "paseo": ">=0.13.0 <0.14.0"

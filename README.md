@@ -3,7 +3,7 @@
 把 [dsh-mattpocock-skills-deck](https://github.com/FeatherHunter/dsh-mattpocock-skills-deck) 移植成 Paseo 插件：
 27 个 Matt Pocock 工程技能，加上 GitHub 工作票面、地图与一组给 Agent 用的 `deck_*` 工具。
 
-当前状态：**功能对齐 DSH 版**（P0–P6 完成；注册表发布还差截图与公开远端），逐阶段证据见 `PROGRESS.md`。
+当前状态：**功能对齐 DSH 版**（P0–P6 完成，仓库已公开在 GitHub 并打了 `v0.1.0`；注册表条目还差截图与提交审核），逐阶段证据见 `PROGRESS.md`。
 
 ## 能做什么
 
@@ -20,9 +20,13 @@
 # 本地目录（开发用）
 paseo plugin install /绝对路径/paseo-matt-skills-deck
 
-# 注册表 / Git / npm（发布后）
-paseo plugin install <owner>/<slug>
-paseo plugin install git:owner/repo --ref v0.1.0
+# Git（现在就能用，推荐钉 tag）
+paseo plugin install git:943545721/matt-skills-deck --ref v0.1.0
+
+# 注册表（条目通过审核后）
+paseo plugin install 943545721/matt-skills-deck
+
+# npm（包发布后）
 paseo plugin install npm:matt-skills-deck
 
 paseo plugin reload matt-skills-deck     # 改完代码热更新
@@ -41,7 +45,7 @@ npm run typecheck    # 客户端与服务端各一份 tsconfig，边界靠类型
 npm test             # node --test，直接跑 TypeScript（Node 自带类型剥离）
 ```
 
-改完代码后 `paseo plugin reload matt-skills-deck` 即可；两端 typecheck 与 54 条测试是提交前的门槛。
+改完代码后 `paseo plugin reload matt-skills-deck` 即可；两端 typecheck 与 71 条测试是提交前的门槛，CI 也会跑同一套。
 
 ## 结构
 
