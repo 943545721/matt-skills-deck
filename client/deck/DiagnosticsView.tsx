@@ -6,8 +6,7 @@ import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
 import { logsRpc } from "../../shared/logs";
 import { statusRpc } from "../../shared/status";
-import type { Lang } from "./i18n";
-import { t } from "./i18n";
+import { useDeckText } from "./i18n";
 
 /**
  * 诊断页。
@@ -18,12 +17,11 @@ import { t } from "./i18n";
 export function DiagnosticsView({
   theme,
   layout,
-  lang,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
-  lang: Lang;
 }) {
+  const { t } = useDeckText();
   const toast = useToast();
   const readStatus = useRpc(statusRpc);
   const readLogs = useRpc(logsRpc);
@@ -78,60 +76,60 @@ export function DiagnosticsView({
     <View style={styles.screen}>
       <View style={styles.card}>
         <View style={styles.row}>
-          <Text style={styles.label}>{t(lang, "diag.pluginVersion")}</Text>
-          <Text style={styles.value}>{status.data?.pluginVersion ?? t(lang, "common.loading")}</Text>
+          <Text style={styles.label}>{t("diag.pluginVersion")}</Text>
+          <Text style={styles.value}>{status.data?.pluginVersion ?? t("common.loading")}</Text>
         </View>
         <View style={styles.row}>
           <Text style={styles.label}>Node</Text>
-          <Text style={styles.value}>{status.data?.node ?? t(lang, "common.loading")}</Text>
+          <Text style={styles.value}>{status.data?.node ?? t("common.loading")}</Text>
         </View>
         <View style={styles.row}>
-          <Text style={styles.label}>{t(lang, "diag.gh")}</Text>
+          <Text style={styles.label}>{t("diag.gh")}</Text>
           <Text style={status.data?.gh.available ? styles.value : styles.danger}>
             {status.data
               ? status.data.gh.available
-                ? status.data.gh.version ?? t(lang, "diag.ghAvailable")
-                : t(lang, "diag.ghUnavailable")
-              : t(lang, "common.loading")}
+                ? status.data.gh.version ?? t("diag.ghAvailable")
+                : t("diag.ghUnavailable")
+              : t("common.loading")}
           </Text>
         </View>
         {status.data && !status.data.gh.available ? (
           <Text style={styles.hint}>
-            {status.data.gh.error ?? "?"} — {t(lang, "diag.ghMissingHint")}
+            {status.data.gh.error ?? "?"} — {t("diag.ghMissingHint")}
           </Text>
         ) : null}
         <View style={styles.row}>
-          <Text style={styles.label}>{t(lang, "diag.daemonCwd")}</Text>
+          <Text style={styles.label}>{t("diag.daemonCwd")}</Text>
           <Text style={styles.value} numberOfLines={2}>
-            {status.data?.daemonCwd ?? t(lang, "common.loading")}
+            {status.data?.daemonCwd ?? t("common.loading")}
           </Text>
         </View>
       </View>
 
       <View style={styles.toolbar}>
-        <Text style={styles.label}>{t(lang, "diag.recent")}</Text>
+        <Text style={styles.label}>{t("diag.recent")}</Text>
         <View style={{ marginLeft: "auto" as const }} />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "diag.refreshHint")}
+          accessibilityLabel={t("diag.refreshHint")}
           style={styles.action}
           onPress={() => void logs.refetch()}
         >
           <Text style={styles.actionText}>
-            {logs.isFetching ? t(lang, "common.refreshing") : t(lang, "common.refresh")}
+            {logs.isFetching ? t("common.refreshing") : t("common.refresh")}
           </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "diag.copyLogs")}
+          accessibilityLabel={t("diag.copyLogs")}
           style={styles.action}
           onPress={() => {
             void copyText(asText || "—")
-              .then(() => toast.show(t(lang, "diag.logsCopied"), { variant: "success" }))
-              .catch(() => toast.error(t(lang, "common.copyFailed")));
+              .then(() => toast.show(t("diag.logsCopied"), { variant: "success" }))
+              .catch(() => toast.error(t("common.copyFailed")));
           }}
         >
-          <Text style={styles.actionText}>{t(lang, "common.copy")}</Text>
+          <Text style={styles.actionText}>{t("common.copy")}</Text>
         </Pressable>
       </View>
 
@@ -140,7 +138,7 @@ export function DiagnosticsView({
         keyExtractor={(item, index) => `${item.at}-${index}`}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>{logs.isPending ? t(lang, "common.loading") : t(lang, "diag.empty")}</Text>
+          <Text style={styles.hint}>{logs.isPending ? t("common.loading") : t("diag.empty")}</Text>
         }
         renderItem={({ item }) => (
           <View style={styles.logRow}>

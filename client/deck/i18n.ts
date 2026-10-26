@@ -1,373 +1,52 @@
-export type Lang = "zh" | "en";
+import { defineTranslations, useTranslation } from "@getpaseo/plugin/client";
+import { en, zh } from "./messages";
 
 /**
- * 文案表。
+ * 文案运行时。
  *
- * 中文是唯一真源：`en` 被标成同一形状，少一条键就编译不过，避免出现
- * 「英文界面里突然冒出一句中文」。占位符用 `{name}`，由 t() 统一替换。
+ * `defineTranslations` 一加载就会校验：资源键必须是语言代码、`zh` 里不能有 `en` 没有的键、
+ * 同一条文案的占位符必须一致。所以这里的失败是「开发期立刻发现」，而不是界面上冒出一句
+ * 半中半英的话。语言本身跟着 App 走（`useTranslation` 返回的 locale），插件不再自带开关。
  */
-const zh = {
-  "tabs.board": "任务板",
-  "tabs.skills": "技能",
-  "tabs.labels": "标签",
-  "tabs.version": "版本",
-  "tabs.diagnostics": "诊断",
-  "tabs.boardHint": "查看任务板",
-  "tabs.skillsHint": "查看技能",
-  "tabs.labelsHint": "查看标签配色",
-  "tabs.versionHint": "查看版本管理",
-  "tabs.diagnosticsHint": "查看诊断信息",
+export const deckMessages = defineTranslations({ resources: { en, zh } });
 
-  "common.refresh": "刷新",
-  "common.refreshing": "刷新中…",
-  "common.loading": "读取中…",
-  "common.cancel": "取消",
-  "common.save": "保存",
-  "common.copy": "复制",
-  "common.close": "关闭",
-  "common.unknownWorkspace": "工作区目录未知",
-  "common.noWorkspaceBoard": "工作区目录未知，暂时读不到票面。",
-  "common.noWorkspaceSkills": "工作区目录未知，暂时无法安装技能。",
-  "common.noWorkspaceLabels": "工作区目录未知，暂时读不到标签。",
-  "common.noWorkspaceVersion": "工作区目录未知，暂时读不到版本状态。",
-  "common.copyFailed": "复制失败：这个客户端不支持剪贴板",
-  "common.copied": "已复制",
-
-  "failure.no-repo": "这个工作区没有可识别的 GitHub 远端",
-  "failure.unsupported-host": "当前远端不是 GitHub",
-  "failure.gh-missing": "没有找到 gh 命令",
-  "failure.gh-failed": "GitHub 拒绝了这次操作",
-  "failure.not-found": "找不到这张票",
-  "failure.invalid": "输入不合法，没有发出去",
-  "failure.read": "读取失败",
-
-  "board.unbound": "未关联仓库",
-  "board.count": "{shown} / {total} 张",
-  "board.new": "新建",
-  "board.onlyOpen": "仅未关闭",
-  "board.withClosed": "含已关闭",
-  "board.onlyOpenHint": "只看未关闭",
-  "board.withClosedHint": "显示已关闭",
-  "board.refreshHint": "刷新任务板",
-  "board.empty": "这个仓库还没有票，点「新建」写一张。",
-  "board.emptyAfterFailure": "修好后点刷新即可，不需要重开面板",
-  "board.map": "地图",
-  "board.closed": "已关闭",
-  "board.current": "当前",
-  "board.assignees": "指派给 {names}",
-
-  "issue.open": "未关闭",
-  "issue.closed": "已关闭",
-  "issue.updatedAt": "更新于 {date}",
-  "issue.assignedTo": "指派给 {names}",
-  "issue.noBody": "_这张票没有正文。_",
-  "issue.copyPrompt": "复制提示词",
-  "issue.editLabels": "改标签",
-  "issue.bind": "设为当前票",
-  "issue.bound": "✓ 当前票",
-  "issue.bindHint": "把票 #{number} 设为当前票",
-  "issue.unbindHint": "取消当前票 #{number}",
-  "issue.labelsPlaceholder": "用逗号分隔，留空表示清空标签",
-  "issue.labelsHint": "这里是整体替换：保存后这张票只有上面这些标签。",
-  "issue.saveLabels": "保存到 GitHub",
-  "issue.savingLabels": "保存中…",
-  "issue.discardLabels": "放弃改标签",
-  "issue.commentPlaceholder": "写一条评论（会发到 GitHub）",
-  "issue.submitComment": "提交评论",
-  "issue.commentEmpty": "写点什么再提交",
-  "issue.commenting": "提交中…",
-  "issue.commentDone": "评论已发到 GitHub",
-  "issue.commentFailed": "评论失败",
-  "issue.labelsDone": "标签已改为 {names}",
-  "issue.labelsFailed": "改标签失败",
-  "issue.promptCopied": "提示词已复制，粘到 Agent 输入框即可",
-  "issue.unknownAuthor": "未知作者",
-  "issue.promptTitle": "请处理这张票：#{number} {title}",
-
-  "new.title": "新建票",
-  "new.titleField": "标题",
-  "new.bodyField": "正文（支持 Markdown）",
-  "new.labelsField": "标签，逗号分隔（可留空）",
-  "new.markMap": "标记为地图票",
-  "new.markMapOn": "✓ 地图票（自动带 wayfinder:map）",
-  "new.submit": "创建到 GitHub",
-  "new.submitting": "创建中…",
-  "new.done": "已新建 #{number}",
-  "new.doneLabelsFailed": "已新建 #{number}，但标签没挂上，去票面补",
-  "new.failed": "新建失败",
-  "new.hint": "票会建在工作区所在的仓库里，标题必需。",
-
-  "skills.hint": "安装会写入工作区的 {a} 与 {b}；已存在且内容不同的文件不会被覆盖。",
-  "skills.installAll": "全部安装",
-  "skills.installing": "安装中…",
-  "skills.installOne": "安装这个技能",
-  "skills.state.none": "未安装",
-  "skills.state.current": "已安装",
-  "skills.state.differs": "有差异",
-  "skills.langZh": "中文",
-  "skills.langEn": "EN",
-  "skills.empty": "没有找到技能，检查插件包里的 templates/skills 是否完整",
-
-  "labels.count": "{n} 个标签",
-  "labels.save": "保存",
-  "labels.saveN": "保存 {n} 处",
-  "labels.saving": "保存中…",
-  "labels.hint": "颜色填 6 位十六进制，带不带 # 都行。改完点保存才会写回仓库。",
-  "labels.empty": "这个仓库还没有标签。",
-  "labels.done": "改动 {applied} 个",
-  "labels.failedCount": "失败 {n} 个",
-  "labels.nothing": "没有改动",
-  "labels.colorOf": "标签 {name} 的颜色",
-
-  "version.detached": "分离 HEAD",
-  "version.ahead": "领先 {n}",
-  "version.behind": "落后 {n}",
-  "version.staged": "已暂存 {n}",
-  "version.unstaged": "未暂存 {n}",
-  "version.stagedBadge": "已暂存",
-  "version.stageAll": "全部暂存",
-  "version.unstageAll": "全部取消暂存",
-  "version.stage": "暂存",
-  "version.unstage": "取消暂存",
-  "version.diff": "改动",
-  "version.diffTitle": "改动：{path}",
-  "version.diffTruncated": "改动太大，只显示前一段。",
-  "version.diffEmpty": "_这个文件没有文本改动（可能是二进制或只改了权限）。_",
-  "version.clean": "工作区干净，没有可提交的改动。",
-  "version.messagePlaceholder": "提交信息（会连同已暂存的改动一起提交）",
-  "version.commit": "提交",
-  "version.committing": "提交中…",
-  "version.committed": "已提交 {sha}",
-  "version.commitFailed": "提交失败",
-  "version.fetch": "取回",
-  "version.pull": "拉取",
-  "version.push": "推送",
-  "version.fetched": "已取回 {remote}",
-  "version.pulled": "已快进到 {sha}",
-  "version.upToDate": "已经是最新的",
-  "version.pullUnknown": "已拉取，但读不到 HEAD，结果未知",
-  "version.pushed": "已推送 {branch} → {remote}",
-  "version.pushUpToDate": "{remote}/{branch} 已经是最新的",
-  "version.hint": "提交与推送都会先做一次预检，被挡住时会说明原因。",
-  "version.chooseRemote": "选一个远端：",
-  "version.chooseRemoteHint": "选择远端 {name}",
-  "version.failure.no-workspace": "工作区目录不可用",
-  "version.failure.git-missing": "没有找到 git 命令",
-  "version.failure.git-failed": "git 拒绝了这次操作",
-  "version.failure.invalid": "输入不合法，没有执行",
-  "version.failure.blocked": "现在做不了",
-  "version.failure.ticket-expired": "确认已失效",
-  "version.failure.head-moved": "仓库状态在确认后变了",
-  "version.failure.needs-choice": "需要先选一个远端",
-
-  "diag.pluginVersion": "插件版本",
-  "diag.gh": "gh 命令行",
-  "diag.ghAvailable": "已安装",
-  "diag.ghUnavailable": "不可用",
-  "diag.ghMissingHint": "票面与标签相关的操作会全部失败。",
-  "diag.daemonCwd": "daemon 目录",
-  "diag.recent": "最近操作",
-  "diag.copyLogs": "复制全部日志",
-  "diag.logsCopied": "日志已复制",
-  "diag.empty": "还没有写操作记录。评论、改标签、提交、推送都会在这里留一行。",
-  "diag.refreshHint": "刷新日志",
-
-  "home.guidance": "打开任意工作区，在标签栏的 + 号里选择「任务板」，即可把这个工作区的票面与地图并排放在 Agent 旁边。",
-  "home.host": "主机：{label}",
-  "home.reading": "读取中…",
-  "home.note": "技能可查看与安装；任务板可读写票面与评论；标签配色与版本管理均已接入。",
-
-  "skills.installSummary": "已写入 {written} 个，跳过 {skipped} 个，冲突 {conflicts} 个",
-  "skills.installNothing": "没有需要写入的技能",
-  "skills.installFailed": "安装失败",
-} as const;
-
-export type MessageKey = keyof typeof zh;
-
-const en: Record<MessageKey, string> = {
-  "tabs.board": "Board",
-  "tabs.skills": "Skills",
-  "tabs.labels": "Labels",
-  "tabs.version": "Version",
-  "tabs.diagnostics": "Diagnostics",
-  "tabs.boardHint": "Open the board",
-  "tabs.skillsHint": "Open skills",
-  "tabs.labelsHint": "Open label colors",
-  "tabs.versionHint": "Open version control",
-  "tabs.diagnosticsHint": "Open diagnostics",
-
-  "common.refresh": "Refresh",
-  "common.refreshing": "Refreshing…",
-  "common.loading": "Loading…",
-  "common.cancel": "Cancel",
-  "common.save": "Save",
-  "common.copy": "Copy",
-  "common.close": "Close",
-  "common.unknownWorkspace": "Workspace directory unknown",
-  "common.noWorkspaceBoard": "Workspace directory unknown, cannot read issues.",
-  "common.noWorkspaceSkills": "Workspace directory unknown, cannot install skills.",
-  "common.noWorkspaceLabels": "Workspace directory unknown, cannot read labels.",
-  "common.noWorkspaceVersion": "Workspace directory unknown, cannot read version state.",
-  "common.copyFailed": "Copy failed: this client has no clipboard",
-  "common.copied": "Copied",
-
-  "failure.no-repo": "No recognizable GitHub remote in this workspace",
-  "failure.unsupported-host": "The current remote is not GitHub",
-  "failure.gh-missing": "The gh CLI was not found",
-  "failure.gh-failed": "GitHub rejected this operation",
-  "failure.not-found": "That issue could not be found",
-  "failure.invalid": "Input was rejected before sending",
-  "failure.read": "Read failed",
-
-  "board.unbound": "No repository",
-  "board.count": "{shown} / {total}",
-  "board.new": "New",
-  "board.onlyOpen": "Open only",
-  "board.withClosed": "With closed",
-  "board.onlyOpenHint": "Show open issues only",
-  "board.withClosedHint": "Include closed issues",
-  "board.refreshHint": "Refresh the board",
-  "board.empty": "No issues yet — hit New to write one.",
-  "board.emptyAfterFailure": "Fix the cause above and refresh; no need to reopen the panel",
-  "board.map": "Map",
-  "board.closed": "Closed",
-  "board.current": "Current",
-  "board.assignees": "Assigned to {names}",
-
-  "issue.open": "Open",
-  "issue.closed": "Closed",
-  "issue.updatedAt": "updated {date}",
-  "issue.assignedTo": "assigned to {names}",
-  "issue.noBody": "_This issue has no body._",
-  "issue.copyPrompt": "Copy prompt",
-  "issue.editLabels": "Edit labels",
-  "issue.bind": "Set as current",
-  "issue.bound": "✓ Current",
-  "issue.bindHint": "Set issue #{number} as current",
-  "issue.unbindHint": "Clear current issue #{number}",
-  "issue.labelsPlaceholder": "Comma separated; empty clears all labels",
-  "issue.labelsHint": "This replaces the label set: after saving the issue has only these labels.",
-  "issue.saveLabels": "Save to GitHub",
-  "issue.savingLabels": "Saving…",
-  "issue.discardLabels": "Discard label edits",
-  "issue.commentPlaceholder": "Write a comment (posted to GitHub)",
-  "issue.submitComment": "Post comment",
-  "issue.commentEmpty": "Write something first",
-  "issue.commenting": "Posting…",
-  "issue.commentDone": "Comment posted to GitHub",
-  "issue.commentFailed": "Comment failed",
-  "issue.labelsDone": "Labels set to {names}",
-  "issue.labelsFailed": "Label update failed",
-  "issue.promptCopied": "Prompt copied — paste it into the agent input",
-  "issue.unknownAuthor": "unknown author",
-  "issue.promptTitle": "Please work on this issue: #{number} {title}",
-
-  "new.title": "New issue",
-  "new.titleField": "Title",
-  "new.bodyField": "Body (Markdown)",
-  "new.labelsField": "Labels, comma separated (optional)",
-  "new.markMap": "Mark as map",
-  "new.markMapOn": "✓ Map (adds wayfinder:map)",
-  "new.submit": "Create on GitHub",
-  "new.submitting": "Creating…",
-  "new.done": "Created #{number}",
-  "new.doneLabelsFailed": "Created #{number}, but labels failed — add them on the issue",
-  "new.failed": "Create failed",
-  "new.hint": "The issue is created in the workspace repository; a title is required.",
-
-  "skills.hint": "Installing writes into {a} and {b}; existing files with different content are never overwritten.",
-  "skills.installAll": "Install all",
-  "skills.installing": "Installing…",
-  "skills.installOne": "Install this skill",
-  "skills.state.none": "Not installed",
-  "skills.state.current": "Installed",
-  "skills.state.differs": "Differs",
-  "skills.langZh": "中文",
-  "skills.langEn": "EN",
-  "skills.empty": "No skills found — check that templates/skills shipped with the plugin",
-
-  "labels.count": "{n} labels",
-  "labels.save": "Save",
-  "labels.saveN": "Save {n}",
-  "labels.saving": "Saving…",
-  "labels.hint": "Colors are 6-digit hex, with or without #. Nothing is written until you press Save.",
-  "labels.empty": "This repository has no labels yet.",
-  "labels.done": "{applied} updated",
-  "labels.failedCount": "{n} failed",
-  "labels.nothing": "No changes",
-  "labels.colorOf": "Color of label {name}",
-
-  "version.detached": "detached HEAD",
-  "version.ahead": "{n} ahead",
-  "version.behind": "{n} behind",
-  "version.staged": "{n} staged",
-  "version.unstaged": "{n} unstaged",
-  "version.stagedBadge": "staged",
-  "version.stageAll": "Stage all",
-  "version.unstageAll": "Unstage all",
-  "version.stage": "Stage",
-  "version.unstage": "Unstage",
-  "version.diff": "Diff",
-  "version.diffTitle": "Diff: {path}",
-  "version.diffTruncated": "The diff is large; only the first part is shown.",
-  "version.diffEmpty": "_No textual change (binary, or only a file mode change)._",
-  "version.clean": "Working tree clean — nothing to commit.",
-  "version.messagePlaceholder": "Commit message (commits everything staged)",
-  "version.commit": "Commit",
-  "version.committing": "Committing…",
-  "version.committed": "Committed {sha}",
-  "version.commitFailed": "Commit failed",
-  "version.fetch": "Fetch",
-  "version.pull": "Pull",
-  "version.push": "Push",
-  "version.fetched": "Fetched {remote}",
-  "version.pulled": "Fast-forwarded to {sha}",
-  "version.upToDate": "Already up to date",
-  "version.pullUnknown": "Pulled, but HEAD could not be read — result unknown",
-  "version.pushed": "Pushed {branch} → {remote}",
-  "version.pushUpToDate": "{remote}/{branch} is already up to date",
-  "version.hint": "Commit and push run a preflight first; blocks explain themselves.",
-  "version.chooseRemote": "Pick a remote:",
-  "version.chooseRemoteHint": "Choose remote {name}",
-  "version.failure.no-workspace": "Workspace directory unusable",
-  "version.failure.git-missing": "The git CLI was not found",
-  "version.failure.git-failed": "git rejected this operation",
-  "version.failure.invalid": "Input was rejected before running",
-  "version.failure.blocked": "Not possible right now",
-  "version.failure.ticket-expired": "The confirmation expired",
-  "version.failure.head-moved": "The repository changed after you confirmed",
-  "version.failure.needs-choice": "Pick a remote first",
-
-  "diag.pluginVersion": "Plugin version",
-  "diag.gh": "gh CLI",
-  "diag.ghAvailable": "installed",
-  "diag.ghUnavailable": "unavailable",
-  "diag.ghMissingHint": "Issue and label operations will all fail.",
-  "diag.daemonCwd": "daemon directory",
-  "diag.recent": "Recent activity",
-  "diag.copyLogs": "Copy all logs",
-  "diag.logsCopied": "Logs copied",
-  "diag.empty": "No write activity yet. Comments, label edits, commits and pushes each leave a line here.",
-  "diag.refreshHint": "Refresh logs",
-
-  "home.guidance": "Open a workspace, pick \"Board\" from the + in the tab bar, and this workspace's issues sit next to the agent.",
-  "home.host": "Host: {label}",
-  "home.reading": "Loading…",
-  "home.note": "Skills are browsable and installable; the board reads and writes issues and comments; label colors and version control are wired up.",
-
-  "skills.installSummary": "{written} written, {skipped} skipped, {conflicts} conflicts",
-  "skills.installNothing": "Nothing to write",
-  "skills.installFailed": "Install failed",
-};
-
-const DICTS: Record<Lang, Record<MessageKey, string>> = { zh, en };
-
-/** 取文案；`{name}` 占位符按 vars 替换，缺值就留着占位符本身，方便一眼看出漏传。 */
-export function t(lang: Lang, key: MessageKey, vars?: Record<string, string | number>): string {
-  const template = DICTS[lang][key] ?? zh[key] ?? key;
-  if (!vars) return template;
-  return template.replace(/\{(\w+)\}/g, (match, name: string) => {
-    const value = vars[name];
-    return value === undefined ? match : String(value);
-  });
+/** 组件里取 `t` 的唯一入口。抽出来是为了让每个视图的 `t` 都带上同一份资源类型。 */
+export function useDeckText() {
+  return useTranslation(deckMessages);
 }
+
+type FlatKey<T> = {
+  [K in keyof T & string]: T[K] extends string ? K : `${K}.${FlatKey<T[K]>}`;
+}[keyof T & string];
+
+/** 全部文案键（点号形式），用于「原因码 → 文案键」这类只能运行时选键的表。 */
+export type DeckKey = FlatKey<typeof en>;
+
+export type DeckText = ReturnType<typeof useDeckText>["t"];
+
+/**
+ * 查表得到键之后再取文案。
+ *
+ * 正常调用 `t("board.empty")` 时，类型能检查出「这条文案要不要占位符」；但原因码、
+ * 标签页这种「键来自查表」的地方，编译期只知道键是 DeckKey 的并集，拿不到该键的参数形状。
+ * 于是把这一处断言收在唯一的地方，而不是散落到每个视图里各写一遍。
+ */
+export function staticText(t: DeckText, key: DeckKey): string {
+  const loose = t as unknown as (key: DeckKey) => string;
+  return loose(key);
+}
+
+/**
+ * 失败原因码 → 文案键。
+ *
+ * 服务端只回原因码，不回人话：这样同一条失败可以在不同语言下说清楚，
+ * 也让「新增一种失败」必须先在这张表里落一个键，不会悄悄漏到界面上变成空白。
+ */
+export const FAILURE_KEYS: Record<string, DeckKey> = {
+  "no-repo": "failure.no-repo",
+  "unsupported-host": "failure.unsupported-host",
+  "gh-missing": "failure.gh-missing",
+  "gh-failed": "failure.gh-failed",
+  "not-found": "failure.not-found",
+  invalid: "failure.invalid",
+};

@@ -15,13 +15,13 @@ import {
   gitStatusRpc,
   gitUnstageRpc,
 } from "../../shared/git";
-import type { Lang, MessageKey } from "./i18n";
-import { t } from "./i18n";
+import type { DeckKey } from "./i18n";
+import { staticText, useDeckText } from "./i18n";
 
 type Op = "commit" | "pull" | "push" | "fetch";
 
 /** 失败原因码 → 文案键。用显式表而不是拼字符串，拼错了编译期就能发现。 */
-const GIT_FAILURE_KEYS: Record<string, MessageKey> = {
+const GIT_FAILURE_KEYS: Record<string, DeckKey> = {
   "no-workspace": "version.failure.no-workspace",
   "git-missing": "version.failure.git-missing",
   "git-failed": "version.failure.git-failed",
@@ -42,14 +42,13 @@ const GIT_FAILURE_KEYS: Record<string, MessageKey> = {
 export function VersionView({
   theme,
   layout,
-  lang,
   workspaceDir,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
-  lang: Lang;
   workspaceDir: string;
 }) {
+  const { t } = useDeckText();
   const [message, setMessage] = useState("");
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [diffStaged, setDiffStaged] = useState(false);
@@ -68,7 +67,7 @@ export function VersionView({
   const push = useRpc(gitPushRpc);
   const readDiff = useRpc(gitDiffRpc);
 
-  const failureTextOf = (reason: string) => t(lang, GIT_FAILURE_KEYS[reason] ?? "version.failure.git-failed");
+  const failureTextOf = (reason: string) => staticText(t, GIT_FAILURE_KEYS[reason] ?? "version.failure.git-failed");
 
   const status = useQuery({
     queryKey: ["deck", "git", workspaceDir],
@@ -119,7 +118,7 @@ export function VersionView({
     onSuccess: (result) => {
       if (result.kind === "done") {
         setMessage("");
-        toast.show(t(lang, "version.committed", { sha: result.detail }), { variant: "success" });
+        toast.show(t("version.committed", { sha: result.detail }), { variant: "success" });
         refresh();
         return;
       }
@@ -141,7 +140,7 @@ export function VersionView({
       if (input.op === "fetch") {
         const done = await fetchRemote({ workspaceDir, ticketId: checked.ticketId });
         return done.ok
-          ? { kind: "done" as const, detail: t(lang, "version.fetched", { remote: done.remote }) }
+          ? { kind: "done" as const, detail: t("version.fetched", { remote: done.remote }) }
           : { kind: "failed" as const, detail: `${failureTextOf(done.reason)}：${done.detail}` };
       }
       if (input.op === "pull") {
@@ -149,10 +148,10 @@ export function VersionView({
         if (!done.ok) return { kind: "failed" as const, detail: `${failureTextOf(done.reason)}：${done.detail}` };
         const text =
           done.mode === "fast-forward"
-            ? t(lang, "version.pulled", { sha: done.headAfter.slice(0, 7) })
+            ? t("version.pulled", { sha: done.headAfter.slice(0, 7) })
             : done.mode === "up-to-date"
-              ? t(lang, "version.upToDate")
-              : t(lang, "version.pullUnknown");
+              ? t("version.upToDate")
+              : t("version.pullUnknown");
         return { kind: "done" as const, detail: text };
       }
       const done = await push({ workspaceDir, ticketId: checked.ticketId });
@@ -160,8 +159,8 @@ export function VersionView({
       return {
         kind: "done" as const,
         detail: done.upToDate
-          ? t(lang, "version.pushUpToDate", { remote: done.remote, branch: done.branch })
-          : t(lang, "version.pushed", { branch: done.branch, remote: done.remote }),
+          ? t("version.pushUpToDate", { remote: done.remote, branch: done.branch })
+          : t("version.pushed", { branch: done.branch, remote: done.remote }),
       };
     },
     onSuccess: (result) => {
@@ -229,59 +228,59 @@ export function VersionView({
       <View style={styles.toolbar}>
         <Text style={styles.head}>
           {data
-            ? `${data.branch.name || t(lang, "version.detached")}${data.branch.upstream ? ` → ${data.branch.upstream}` : ""}`
-            : t(lang, "common.loading")}
+            ? `${data.branch.name || t("version.detached")}${data.branch.upstream ? ` → ${data.branch.upstream}` : ""}`
+            : t("common.loading")}
         </Text>
         {data && (data.branch.ahead || data.branch.behind) ? (
           <Text style={styles.meta}>
-            {t(lang, "version.ahead", { n: data.branch.ahead })} · {t(lang, "version.behind", { n: data.branch.behind })}
+            {t("version.ahead", { n: data.branch.ahead })} · {t("version.behind", { n: data.branch.behind })}
           </Text>
         ) : null}
         <View style={{ marginLeft: "auto" as const }} />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "common.refresh")}
+          accessibilityLabel={t("common.refresh")}
           style={styles.action}
           onPress={refresh}
         >
           <Text style={styles.actionText}>
-            {status.isFetching ? t(lang, "common.refreshing") : t(lang, "common.refresh")}
+            {status.isFetching ? t("common.refreshing") : t("common.refresh")}
           </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "version.fetch")}
+          accessibilityLabel={t("version.fetch")}
           style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "fetch" })}
         >
-          <Text style={styles.actionText}>{t(lang, "version.fetch")}</Text>
+          <Text style={styles.actionText}>{t("version.fetch")}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "version.pull")}
+          accessibilityLabel={t("version.pull")}
           style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "pull" })}
         >
-          <Text style={styles.actionText}>{t(lang, "version.pull")}</Text>
+          <Text style={styles.actionText}>{t("version.pull")}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "version.push")}
+          accessibilityLabel={t("version.push")}
           style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "push" })}
         >
-          <Text style={styles.actionText}>{t(lang, "version.push")}</Text>
+          <Text style={styles.actionText}>{t("version.push")}</Text>
         </Pressable>
       </View>
 
       {choices ? (
         <View style={styles.toolbar}>
-          <Text style={styles.meta}>{t(lang, "version.chooseRemote")}</Text>
+          <Text style={styles.meta}>{t("version.chooseRemote")}</Text>
           {choices.remotes.map((remote) => (
             <Pressable
               key={remote}
               accessibilityRole="button"
-              accessibilityLabel={t(lang, "version.chooseRemoteHint", { name: remote })}
+              accessibilityLabel={t("version.chooseRemoteHint", { name: remote })}
               style={styles.action}
               onPress={() => {
                 const picked = choices;
@@ -294,11 +293,11 @@ export function VersionView({
           ))}
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t(lang, "common.cancel")}
+            accessibilityLabel={t("common.cancel")}
             style={styles.action}
             onPress={() => setChoices(null)}
           >
-            <Text style={styles.actionText}>{t(lang, "common.cancel")}</Text>
+            <Text style={styles.actionText}>{t("common.cancel")}</Text>
           </Pressable>
         </View>
       ) : null}
@@ -314,22 +313,22 @@ export function VersionView({
         <View style={styles.toolbar}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t(lang, "version.stageAll")}
+            accessibilityLabel={t("version.stageAll")}
             style={styles.action}
             onPress={() => stageMutation.mutate({ paths: unstaged, stage: true })}
           >
-            <Text style={styles.actionText}>{t(lang, "version.stageAll")}</Text>
+            <Text style={styles.actionText}>{t("version.stageAll")}</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t(lang, "version.unstageAll")}
+            accessibilityLabel={t("version.unstageAll")}
             style={styles.action}
             onPress={() => stageMutation.mutate({ paths: staged, stage: false })}
           >
-            <Text style={styles.actionText}>{t(lang, "version.unstageAll")}</Text>
+            <Text style={styles.actionText}>{t("version.unstageAll")}</Text>
           </Pressable>
           <Text style={styles.meta}>
-            {t(lang, "version.staged", { n: staged.length })} · {t(lang, "version.unstaged", { n: unstaged.length })}
+            {t("version.staged", { n: staged.length })} · {t("version.unstaged", { n: unstaged.length })}
           </Text>
         </View>
       ) : null}
@@ -340,7 +339,7 @@ export function VersionView({
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 8 }}
         ListEmptyComponent={
           <Text style={styles.hint}>
-            {status.isPending ? t(lang, "common.loading") : data ? t(lang, "version.clean") : ""}
+            {status.isPending ? t("common.loading") : data ? t("version.clean") : ""}
           </Text>
         }
         renderItem={({ item }) => (
@@ -351,28 +350,28 @@ export function VersionView({
             </Text>
             {item.staged ? (
               <Text style={[styles.badge, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>
-                {t(lang, "version.stagedBadge")}
+                {t("version.stagedBadge")}
               </Text>
             ) : null}
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`${t(lang, "version.diff")} ${item.path}`}
+              accessibilityLabel={`${t("version.diff")} ${item.path}`}
               style={styles.action}
               onPress={() => {
                 setDiffStaged(item.staged);
                 setDiffPath(item.path);
               }}
             >
-              <Text style={styles.actionText}>{t(lang, "version.diff")}</Text>
+              <Text style={styles.actionText}>{t("version.diff")}</Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`${item.staged ? t(lang, "version.unstage") : t(lang, "version.stage")} ${item.path}`}
+              accessibilityLabel={`${item.staged ? t("version.unstage") : t("version.stage")} ${item.path}`}
               style={styles.action}
               onPress={() => stageMutation.mutate({ paths: [item.path], stage: !item.staged })}
             >
               <Text style={styles.actionText}>
-                {item.staged ? t(lang, "version.unstage") : t(lang, "version.stage")}
+                {item.staged ? t("version.unstage") : t("version.stage")}
               </Text>
             </Pressable>
           </View>
@@ -381,29 +380,29 @@ export function VersionView({
 
       <View style={{ gap: 6 }}>
         <TextInput
-          accessibilityLabel={t(lang, "version.messagePlaceholder")}
+          accessibilityLabel={t("version.messagePlaceholder")}
           style={styles.input}
           value={message}
           onChangeText={setMessage}
-          placeholder={t(lang, "version.messagePlaceholder")}
+          placeholder={t("version.messagePlaceholder")}
         />
         <View style={styles.toolbar}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t(lang, "version.commit")}
+            accessibilityLabel={t("version.commit")}
             style={styles.action}
             onPress={() => commitMutation.mutate()}
           >
             <Text style={styles.actionText}>
-              {commitMutation.isPending ? t(lang, "version.committing") : t(lang, "version.commit")}
+              {commitMutation.isPending ? t("version.committing") : t("version.commit")}
             </Text>
           </Pressable>
-          <Text style={styles.hint}>{t(lang, "version.hint")}</Text>
+          <Text style={styles.hint}>{t("version.hint")}</Text>
         </View>
       </View>
 
       <Modal
-        title={diffPath ? t(lang, "version.diffTitle", { path: diffPath }) : t(lang, "version.diff")}
+        title={diffPath ? t("version.diffTitle", { path: diffPath }) : t("version.diff")}
         open={diffPath !== null}
         onOpenChange={(open) => {
           if (!open) setDiffPath(null);
@@ -419,13 +418,13 @@ export function VersionView({
             ) : null}
             {diff.data?.ok ? (
               <>
-                {diff.data.truncated ? <Text style={styles.hint}>{t(lang, "version.diffTruncated")}</Text> : null}
+                {diff.data.truncated ? <Text style={styles.hint}>{t("version.diffTruncated")}</Text> : null}
                 <Markdown>
-                  {diff.data.diff ? `\`\`\`diff\n${diff.data.diff}\n\`\`\`` : t(lang, "version.diffEmpty")}
+                  {diff.data.diff ? `\`\`\`diff\n${diff.data.diff}\n\`\`\`` : t("version.diffEmpty")}
                 </Markdown>
               </>
             ) : diff.isPending ? (
-              <Text style={styles.hint}>{t(lang, "common.loading")}</Text>
+              <Text style={styles.hint}>{t("common.loading")}</Text>
             ) : null}
           </View>
         </Modal.Content>

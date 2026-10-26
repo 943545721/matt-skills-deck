@@ -5,9 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { labelsColorsRpc, labelsListRpc } from "../../shared/labels";
-import { failureText } from "./format";
-import type { Lang } from "./i18n";
-import { t } from "./i18n";
+import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 
 /** 只把改了颜色的标签发出去：整批发等于每点一次保存就重写几十条，白担限流的风险。 */
 function dirtyColor(next: Record<string, string>, original: { name: string; color: string }[]): Record<string, string> {
@@ -29,14 +27,13 @@ function dirtyColor(next: Record<string, string>, original: { name: string; colo
 export function LabelsView({
   theme,
   layout,
-  lang,
   workspaceDir,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
-  lang: Lang;
   workspaceDir: string;
 }) {
+  const { t } = useDeckText();
   const [edits, setEdits] = useState<Record<string, string>>({});
   const toast = useToast();
   const queryClient = useQueryClient();
@@ -54,17 +51,17 @@ export function LabelsView({
     mutationFn: (changes: { name: string; color: string }[]) => setColors({ workspaceDir, changes }),
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${failureText(lang, result.reason)}：${result.detail}`, { variant: "error" });
+        toast.show(`${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")}：${result.detail}`, { variant: "error" });
         return;
       }
       setEdits({});
       void queryClient.invalidateQueries({ queryKey: ["deck", "labels", workspaceDir] });
       void queryClient.invalidateQueries({ queryKey: ["deck", "issues", workspaceDir] });
       const summary = [
-        result.applied.length ? t(lang, "labels.done", { applied: result.applied.length }) : "",
-        result.failed.length ? t(lang, "labels.failedCount", { n: result.failed.length }) : "",
+        result.applied.length ? t("labels.done", { applied: result.applied.length }) : "",
+        result.failed.length ? t("labels.failedCount", { n: result.failed.length }) : "",
       ].filter(Boolean).join(" · ");
-      toast.show(summary || t(lang, "labels.nothing"), { variant: result.failed.length ? "warning" : "success" });
+      toast.show(summary || t("labels.nothing"), { variant: result.failed.length ? "warning" : "success" });
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
   });
@@ -119,10 +116,10 @@ export function LabelsView({
   return (
     <View style={styles.screen}>
       <View style={styles.toolbar}>
-        <Text style={styles.hint}>{labels.length ? t(lang, "labels.count", { n: labels.length }) : ""}</Text>
+        <Text style={styles.hint}>{labels.length ? t("labels.count", { n: labels.length }) : ""}</Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "labels.save")}
+          accessibilityLabel={t("labels.save")}
           style={styles.action}
           onPress={() =>
             save.mutate(Object.entries(pending).map(([name, color]) => ({ name, color })))
@@ -130,23 +127,23 @@ export function LabelsView({
         >
           <Text style={styles.actionText}>
             {save.isPending
-              ? t(lang, "labels.saving")
+              ? t("labels.saving")
               : Object.keys(pending).length
-                ? t(lang, "labels.saveN", { n: Object.keys(pending).length })
-                : t(lang, "labels.save")}
+                ? t("labels.saveN", { n: Object.keys(pending).length })
+                : t("labels.save")}
           </Text>
         </Pressable>
       </View>
 
-      <Text style={styles.hint}>{t(lang, "labels.hint")}</Text>
-      {failure ? <Text style={styles.error}>{failureText(lang, failure.reason)}：{failure.detail}</Text> : null}
+      <Text style={styles.hint}>{t("labels.hint")}</Text>
+      {failure ? <Text style={styles.error}>{staticText(t, FAILURE_KEYS[failure.reason] ?? "failure.read")}：{failure.detail}</Text> : null}
 
       <FlatList
         data={labels}
         keyExtractor={(item) => item.name}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>{list.isPending ? t(lang, "common.loading") : t(lang, "labels.empty")}</Text>
+          <Text style={styles.hint}>{list.isPending ? t("common.loading") : t("labels.empty")}</Text>
         }
         renderItem={({ item }) => {
           const value = edits[item.name] ?? item.color;
@@ -162,7 +159,7 @@ export function LabelsView({
                 {item.description}
               </Text>
               <TextInput
-                accessibilityLabel={t(lang, "labels.colorOf", { name: item.name })}
+                accessibilityLabel={t("labels.colorOf", { name: item.name })}
                 style={styles.input}
                 value={value}
                 onChangeText={(next) => setEdits((current) => ({ ...current, [item.name]: next }))}

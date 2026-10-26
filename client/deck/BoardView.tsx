@@ -5,9 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { issuesListRpc } from "../../shared/issues";
-import { failureText, readableText } from "./format";
-import type { Lang } from "./i18n";
-import { t } from "./i18n";
+import { readableText } from "./format";
+import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import { IssueModal } from "./IssueModal";
 import { NewIssueModal } from "./NewIssueModal";
 
@@ -20,19 +19,18 @@ import { NewIssueModal } from "./NewIssueModal";
 export function BoardView({
   theme,
   layout,
-  lang,
   workspaceDir,
   current,
   onBind,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
-  lang: Lang;
   workspaceDir: string;
   /** 当前票：绑在面板状态里，换工作区就换一张。 */
   current?: number;
   onBind(number: number | undefined): void;
 }) {
+  const { t } = useDeckText();
   const [includeClosed, setIncludeClosed] = useState(false);
   const [openNumber, setOpenNumber] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
@@ -98,48 +96,48 @@ export function BoardView({
       <View style={styles.toolbar}>
         <View style={styles.chip}>
           <Text style={styles.chipText} numberOfLines={1}>
-            {header ?? t(lang, "board.unbound")}
+            {header ?? t("board.unbound")}
           </Text>
         </View>
         <Text style={styles.chipText}>
           {list.data?.ok
-            ? t(lang, "board.count", { shown: list.data.issues.length, total: list.data.totalCount })
+            ? t("board.count", { shown: list.data.issues.length, total: list.data.totalCount })
             : ""}
         </Text>
         <View style={styles.spacer} />
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "board.new")}
+          accessibilityLabel={t("board.new")}
           style={styles.action}
           onPress={() => setCreating(true)}
         >
-          <Text style={styles.actionText}>{t(lang, "board.new")}</Text>
+          <Text style={styles.actionText}>{t("board.new")}</Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={includeClosed ? t(lang, "board.onlyOpenHint") : t(lang, "board.withClosedHint")}
+          accessibilityLabel={includeClosed ? t("board.onlyOpenHint") : t("board.withClosedHint")}
           style={[styles.action, includeClosed ? styles.actionActive : null]}
           onPress={() => setIncludeClosed((value) => !value)}
         >
           <Text style={styles.actionText}>
-            {includeClosed ? t(lang, "board.withClosed") : t(lang, "board.onlyOpen")}
+            {includeClosed ? t("board.withClosed") : t("board.onlyOpen")}
           </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "board.refreshHint")}
+          accessibilityLabel={t("board.refreshHint")}
           style={styles.action}
           onPress={() => void list.refetch()}
         >
           <Text style={styles.actionText}>
-            {list.isFetching ? t(lang, "common.refreshing") : t(lang, "common.refresh")}
+            {list.isFetching ? t("common.refreshing") : t("common.refresh")}
           </Text>
         </Pressable>
       </View>
 
       {failure ? (
         <View style={styles.row}>
-          <Text style={styles.error}>{failureText(lang, failure.reason)}</Text>
+          <Text style={styles.error}>{staticText(t, FAILURE_KEYS[failure.reason] ?? "failure.read")}</Text>
           <Text style={styles.hint}>{failure.detail}</Text>
         </View>
       ) : null}
@@ -152,10 +150,10 @@ export function BoardView({
         ListEmptyComponent={
           <Text style={styles.hint}>
             {list.isPending
-              ? t(lang, "common.loading")
+              ? t("common.loading")
               : failure
-                ? t(lang, "board.emptyAfterFailure")
-                : t(lang, "board.empty")}
+                ? t("board.emptyAfterFailure")
+                : t("board.empty")}
           </Text>
         }
         renderItem={({ item }) => (
@@ -169,17 +167,17 @@ export function BoardView({
               <Text style={styles.number}>#{item.number}</Text>
               {current === item.number ? (
                 <Text style={[styles.label, { backgroundColor: theme.colors.accent, color: "#000000" }]}>
-                  {t(lang, "board.current")}
+                  {t("board.current")}
                 </Text>
               ) : null}
               {item.isMap ? (
                 <Text style={[styles.label, { backgroundColor: theme.colors.surface2, color: theme.colors.foreground }]}>
-                  {t(lang, "board.map")}
+                  {t("board.map")}
                 </Text>
               ) : null}
               {item.state === "CLOSED" ? (
                 <Text style={[styles.label, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>
-                  {t(lang, "board.closed")}
+                  {t("board.closed")}
                 </Text>
               ) : null}
               <Text style={styles.title} numberOfLines={2}>
@@ -199,7 +197,7 @@ export function BoardView({
               </View>
             ) : null}
             {item.assignees.length ? (
-              <Text style={styles.meta}>{t(lang, "board.assignees", { names: item.assignees.join(", ") })}</Text>
+              <Text style={styles.meta}>{t("board.assignees", { names: item.assignees.join(", ") })}</Text>
             ) : null}
           </Pressable>
         )}
@@ -208,7 +206,6 @@ export function BoardView({
       {openNumber !== null ? (
         <IssueModal
           theme={theme}
-          lang={lang}
           workspaceDir={workspaceDir}
           number={openNumber}
           isCurrent={current === openNumber}
@@ -219,7 +216,6 @@ export function BoardView({
 
       <NewIssueModal
         theme={theme}
-        lang={lang}
         workspaceDir={workspaceDir}
         open={creating}
         onClose={() => setCreating(false)}

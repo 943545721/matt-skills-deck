@@ -5,30 +5,30 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { skillsInstallRpc, skillsListRpc, skillsReadRpc } from "../../shared/skills";
-import type { Lang } from "./i18n";
-import { t } from "./i18n";
+import { useDeckText } from "./i18n";
 
 type SkillState = "none" | "current" | "differs";
 
 /**
  * 技能页。
  *
- * 两个语言开关要分清：`lang` 是界面语言，`skillLang` 是技能包语言。
- * 它们默认一致，但可以分开——有人用中文界面读英文技能原文，这不该被强行绑在一起。
+ * 两个语言是两件事：界面文案跟随 App 语言（`useDeckText`），技能包语言是
+ * `skillLang`。它们默认一致，但可以分开——有人用中文界面读英文技能原文，
+ * 这不该被强行绑在一起。
  * 这里刻意不做「自动安装」：写入会改变用户仓库里的文件，必须由人按下按钮。
  */
 export function SkillsView({
   theme,
   layout,
-  lang,
   workspaceDir,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
-  lang: Lang;
   workspaceDir: string;
 }) {
-  const [skillLang, setSkillLang] = useState<Lang>(lang);
+  const { t, locale } = useDeckText();
+  /** 技能包语言默认跟随界面语言，之后用户可以单独切。 */
+  const [skillLang, setSkillLang] = useState<"zh" | "en">(locale.startsWith("zh") ? "zh" : "en");
   const [detailId, setDetailId] = useState<string | null>(null);
   const toast = useToast();
 
@@ -54,12 +54,12 @@ export function SkillsView({
       const touched = result.written.length + result.skipped.length + result.conflicts.length;
       toast.show(
         touched
-          ? t(lang, "skills.installSummary", {
+          ? t("skills.installSummary", {
               written: result.written.length,
               skipped: result.skipped.length,
               conflicts: result.conflicts.length,
             })
-          : t(lang, "skills.installNothing"),
+          : t("skills.installNothing"),
         { variant: result.conflicts.length ? "warning" : "success" },
       );
     },
@@ -106,9 +106,9 @@ export function SkillsView({
   );
 
   const stateLabel: Record<SkillState, string> = {
-    none: t(lang, "skills.state.none"),
-    current: t(lang, "skills.state.current"),
-    differs: t(lang, "skills.state.differs"),
+    none: t("skills.state.none"),
+    current: t("skills.state.current"),
+    differs: t("skills.state.differs"),
   };
 
   const badgeStyle = (state: SkillState) => [
@@ -126,35 +126,35 @@ export function SkillsView({
         <View style={styles.segmented}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t(lang, "skills.langZh")}
+            accessibilityLabel={t("skills.langZh")}
             style={[styles.segItem, skillLang === "zh" ? styles.segItemActive : null]}
             onPress={() => setSkillLang("zh")}
           >
-            <Text style={skillLang === "zh" ? styles.segTextActive : styles.segText}>{t(lang, "skills.langZh")}</Text>
+            <Text style={skillLang === "zh" ? styles.segTextActive : styles.segText}>{t("skills.langZh")}</Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t(lang, "skills.langEn")}
+            accessibilityLabel={t("skills.langEn")}
             style={[styles.segItem, skillLang === "en" ? styles.segItemActive : null]}
             onPress={() => setSkillLang("en")}
           >
-            <Text style={skillLang === "en" ? styles.segTextActive : styles.segText}>{t(lang, "skills.langEn")}</Text>
+            <Text style={skillLang === "en" ? styles.segTextActive : styles.segText}>{t("skills.langEn")}</Text>
           </Pressable>
         </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t(lang, "skills.installAll")}
+          accessibilityLabel={t("skills.installAll")}
           style={styles.action}
           onPress={() => install.mutate(undefined)}
         >
           <Text style={styles.actionText}>
-            {install.isPending ? t(lang, "skills.installing") : t(lang, "skills.installAll")}
+            {install.isPending ? t("skills.installing") : t("skills.installAll")}
           </Text>
         </Pressable>
       </View>
 
       <Text style={styles.hint}>
-        {t(lang, "skills.hint", { a: ".claude/skills", b: ".agents/skills" })}
+        {t("skills.hint", { a: ".claude/skills", b: ".agents/skills" })}
       </Text>
 
       {list.error ? <Text style={styles.error}>{list.error.message}</Text> : null}
@@ -164,7 +164,7 @@ export function SkillsView({
         keyExtractor={(item) => item.id}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>{list.isPending ? t(lang, "common.loading") : t(lang, "skills.empty")}</Text>
+          <Text style={styles.hint}>{list.isPending ? t("common.loading") : t("skills.empty")}</Text>
         }
         renderItem={({ item }) => (
           <Pressable
@@ -185,7 +185,7 @@ export function SkillsView({
       />
 
       <Modal
-        title={detailId ?? t(lang, "tabs.skills")}
+        title={detailId ?? t("tabs.skills")}
         open={detailId !== null}
         onOpenChange={(open) => {
           if (!open) setDetailId(null);
@@ -198,11 +198,11 @@ export function SkillsView({
             {detailId ? (
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={t(lang, "skills.installOne")}
+                accessibilityLabel={t("skills.installOne")}
                 style={styles.action}
                 onPress={() => install.mutate([detailId])}
               >
-                <Text style={styles.actionText}>{t(lang, "skills.installOne")}</Text>
+                <Text style={styles.actionText}>{t("skills.installOne")}</Text>
               </Pressable>
             ) : null}
           </View>

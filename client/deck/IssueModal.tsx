@@ -5,9 +5,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { issuesCommentRpc, issuesDetailRpc, issuesSetLabelsRpc } from "../../shared/issues";
-import { failureText, promptForIssue, readableText } from "./format";
-import type { Lang } from "./i18n";
-import { t } from "./i18n";
+import { readableText } from "./format";
+import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 
 /**
  * 票面详情。
@@ -17,7 +16,6 @@ import { t } from "./i18n";
  */
 export function IssueModal({
   theme,
-  lang,
   workspaceDir,
   number,
   isCurrent,
@@ -25,13 +23,13 @@ export function IssueModal({
   onClose,
 }: {
   theme: PluginTheme;
-  lang: Lang;
   workspaceDir: string;
   number: number;
   isCurrent: boolean;
   onBind(): void;
   onClose(): void;
 }) {
+  const { t } = useDeckText();
   const [comment, setComment] = useState("");
   const [labelDraft, setLabelDraft] = useState<string | null>(null);
   const toast = useToast();
@@ -56,13 +54,13 @@ export function IssueModal({
     mutationFn: () => writeComment({ workspaceDir, number, body: comment.trim() }),
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${t(lang, "issue.commentFailed")}：${failureText(lang, result.reason)} — ${result.detail}`, {
+        toast.show(`${t("issue.commentFailed")}：${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")} — ${result.detail}`, {
           variant: "error",
         });
         return;
       }
       setComment("");
-      toast.show(t(lang, "issue.commentDone"), { variant: "success" });
+      toast.show(t("issue.commentDone"), { variant: "success" });
       invalidate();
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
@@ -72,14 +70,14 @@ export function IssueModal({
     mutationFn: (labels: string[]) => setLabels({ workspaceDir, number, labels }),
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${t(lang, "issue.labelsFailed")}：${failureText(lang, result.reason)} — ${result.detail}`, {
+        toast.show(`${t("issue.labelsFailed")}：${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")} — ${result.detail}`, {
           variant: "error",
         });
         return;
       }
       setLabelDraft(null);
       toast.show(
-        t(lang, "issue.labelsDone", { names: result.labels.map((label) => label.name).join(", ") || "—" }),
+        t("issue.labelsDone", { names: result.labels.map((label) => label.name).join(", ") || "—" }),
         { variant: "success" },
       );
       invalidate();
@@ -88,6 +86,28 @@ export function IssueModal({
   });
 
   const issue = detail.data?.ok ? detail.data.issue : null;
+
+  /**
+   * 把票面拼成一段能直接粘进 Agent 输入框的文字。
+   *
+   * Paseo 没有「一键填入输入框」的接口，所以只产出文本、由用户粘到想粘的地方；
+   * 带上链接是因为 Agent 需要它去读全文，而不是靠这段可能被截断的正文猜。
+   * 文案走 `t`，所以同一张票在中文界面和英文界面复制出来的是对应语言。
+   */
+  const promptForIssue = (target: NonNullable<typeof issue>): string => {
+    const names = target.labels.map((label) => label.name).join(", ");
+    return [
+      t("issue.promptTitle", { number: target.number, title: target.title }),
+      target.url ? t("issue.promptLink", { url: target.url }) : "",
+      names ? t("issue.promptLabels", { names }) : "",
+      "",
+      target.body.trim() || t("issue.promptNoBody"),
+      "",
+      t("issue.promptAsk"),
+    ]
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n");
+  };
 
   const styles = useMemo(
     () => ({
@@ -131,20 +151,20 @@ export function IssueModal({
           {detail.error ? <Text style={styles.error}>{detail.error.message}</Text> : null}
           {detail.data && !detail.data.ok ? (
             <>
-              <Text style={styles.error}>{failureText(lang, detail.data.reason)}</Text>
+              <Text style={styles.error}>{staticText(t, FAILURE_KEYS[detail.data.reason] ?? "failure.read")}</Text>
               <Text style={styles.hint}>{detail.data.detail}</Text>
             </>
           ) : null}
-          {detail.isPending ? <Text style={styles.hint}>{t(lang, "common.loading")}</Text> : null}
+          {detail.isPending ? <Text style={styles.hint}>{t("common.loading")}</Text> : null}
 
           {issue ? (
             <>
               <Text style={styles.title}>{issue.title}</Text>
               <Text style={styles.meta}>
-                {issue.state === "OPEN" ? t(lang, "issue.open") : t(lang, "issue.closed")} ·{" "}
-                {t(lang, "issue.updatedAt", { date: issue.updatedAt.slice(0, 10) })}
+                {issue.state === "OPEN" ? t("issue.open") : t("issue.closed")} ·{" "}
+                {t("issue.updatedAt", { date: issue.updatedAt.slice(0, 10) })}
                 {issue.assignees.length
-                  ? ` · ${t(lang, "issue.assignedTo", { names: issue.assignees.join(", ") })}`
+                  ? ` · ${t("issue.assignedTo", { names: issue.assignees.join(", ") })}`
                   : ""}
               </Text>
               {issue.labels.length ? (
@@ -160,59 +180,59 @@ export function IssueModal({
                 </View>
               ) : null}
 
-              <Markdown>{issue.body || t(lang, "issue.noBody")}</Markdown>
+              <Markdown>{issue.body || t("issue.noBody")}</Markdown>
 
               <View style={styles.actions}>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={t(lang, "issue.copyPrompt")}
+                  accessibilityLabel={t("issue.copyPrompt")}
                   style={styles.action}
                   onPress={() => {
-                    void copyText(promptForIssue(lang, issue))
-                      .then(() => toast.show(t(lang, "issue.promptCopied"), { variant: "success" }))
-                      .catch(() => toast.error(t(lang, "common.copyFailed")));
+                    void copyText(promptForIssue(issue))
+                      .then(() => toast.show(t("issue.promptCopied"), { variant: "success" }))
+                      .catch(() => toast.error(t("common.copyFailed")));
                   }}
                 >
-                  <Text style={styles.actionText}>{t(lang, "issue.copyPrompt")}</Text>
+                  <Text style={styles.actionText}>{t("issue.copyPrompt")}</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={
                     isCurrent
-                      ? t(lang, "issue.unbindHint", { number })
-                      : t(lang, "issue.bindHint", { number })
+                      ? t("issue.unbindHint", { number })
+                      : t("issue.bindHint", { number })
                   }
                   style={[styles.action, isCurrent ? styles.actionActive : null]}
                   onPress={onBind}
                 >
                   <Text style={styles.actionText}>
-                    {isCurrent ? t(lang, "issue.bound") : t(lang, "issue.bind")}
+                    {isCurrent ? t("issue.bound") : t("issue.bind")}
                   </Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={t(lang, "issue.editLabels")}
+                  accessibilityLabel={t("issue.editLabels")}
                   style={styles.action}
                   onPress={() => setLabelDraft(issue.labels.map((label) => label.name).join(", "))}
                 >
-                  <Text style={styles.actionText}>{t(lang, "issue.editLabels")}</Text>
+                  <Text style={styles.actionText}>{t("issue.editLabels")}</Text>
                 </Pressable>
               </View>
 
               {labelDraft !== null ? (
                 <>
                   <TextInput
-                    accessibilityLabel={t(lang, "issue.editLabels")}
+                    accessibilityLabel={t("issue.editLabels")}
                     style={styles.input}
                     value={labelDraft}
                     onChangeText={setLabelDraft}
-                    placeholder={t(lang, "issue.labelsPlaceholder")}
+                    placeholder={t("issue.labelsPlaceholder")}
                     multiline
                   />
                   <View style={styles.actions}>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={t(lang, "issue.saveLabels")}
+                      accessibilityLabel={t("issue.saveLabels")}
                       style={styles.action}
                       onPress={() =>
                         labelMutation.mutate(
@@ -224,19 +244,19 @@ export function IssueModal({
                       }
                     >
                       <Text style={styles.actionText}>
-                        {labelMutation.isPending ? t(lang, "issue.savingLabels") : t(lang, "issue.saveLabels")}
+                        {labelMutation.isPending ? t("issue.savingLabels") : t("issue.saveLabels")}
                       </Text>
                     </Pressable>
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={t(lang, "issue.discardLabels")}
+                      accessibilityLabel={t("issue.discardLabels")}
                       style={styles.action}
                       onPress={() => setLabelDraft(null)}
                     >
-                      <Text style={styles.actionText}>{t(lang, "common.cancel")}</Text>
+                      <Text style={styles.actionText}>{t("common.cancel")}</Text>
                     </Pressable>
                   </View>
-                  <Text style={styles.hint}>{t(lang, "issue.labelsHint")}</Text>
+                  <Text style={styles.hint}>{t("issue.labelsHint")}</Text>
                 </>
               ) : null}
 
@@ -244,7 +264,7 @@ export function IssueModal({
                 ? detail.data.comments.map((item, index) => (
                     <View key={`${item.createdAt}-${index}`} style={styles.comment}>
                       <Text style={styles.meta}>
-                        {item.author || t(lang, "issue.unknownAuthor")} · {item.createdAt.slice(0, 10)}
+                        {item.author || t("issue.unknownAuthor")} · {item.createdAt.slice(0, 10)}
                       </Text>
                       <Markdown>{item.body}</Markdown>
                     </View>
@@ -252,25 +272,25 @@ export function IssueModal({
                 : null}
 
               <TextInput
-                accessibilityLabel={t(lang, "issue.submitComment")}
+                accessibilityLabel={t("issue.submitComment")}
                 style={styles.input}
                 value={comment}
                 onChangeText={setComment}
-                placeholder={t(lang, "issue.commentPlaceholder")}
+                placeholder={t("issue.commentPlaceholder")}
                 multiline
               />
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={t(lang, "issue.submitComment")}
+                accessibilityLabel={t("issue.submitComment")}
                 style={styles.action}
                 onPress={() => commentMutation.mutate()}
               >
                 <Text style={styles.actionText}>
                   {commentMutation.isPending
-                    ? t(lang, "issue.commenting")
+                    ? t("issue.commenting")
                     : comment.trim()
-                      ? t(lang, "issue.submitComment")
-                      : t(lang, "issue.commentEmpty")}
+                      ? t("issue.submitComment")
+                      : t("issue.commentEmpty")}
                 </Text>
               </Pressable>
             </>

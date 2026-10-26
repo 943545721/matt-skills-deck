@@ -5,9 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { issuesCreateRpc } from "../../shared/issues";
-import { failureText } from "./format";
-import type { Lang } from "./i18n";
-import { t } from "./i18n";
+import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 
 /**
  * 新建票。
@@ -17,17 +15,16 @@ import { t } from "./i18n";
  */
 export function NewIssueModal({
   theme,
-  lang,
   workspaceDir,
   open,
   onClose,
 }: {
   theme: PluginTheme;
-  lang: Lang;
   workspaceDir: string;
   open: boolean;
   onClose(): void;
 }) {
+  const { t } = useDeckText();
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [labels, setLabels] = useState("");
@@ -50,7 +47,7 @@ export function NewIssueModal({
       }),
     onSuccess: (result) => {
       if (!result.ok) {
-        toast.show(`${t(lang, "new.failed")}：${failureText(lang, result.reason)} — ${result.detail}`, {
+        toast.show(`${t("new.failed")}：${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")} — ${result.detail}`, {
           variant: "error",
         });
         return;
@@ -58,8 +55,8 @@ export function NewIssueModal({
       void queryClient.invalidateQueries({ queryKey: ["deck", "issues", workspaceDir] });
       toast.show(
         result.labelsFailed
-          ? t(lang, "new.doneLabelsFailed", { number: result.number })
-          : t(lang, "new.done", { number: result.number }),
+          ? t("new.doneLabelsFailed", { number: result.number })
+          : t("new.done", { number: result.number }),
         { variant: result.labelsFailed ? "warning" : "success" },
       );
       setTitle("");
@@ -111,63 +108,63 @@ export function NewIssueModal({
   );
 
   return (
-    <Modal title={t(lang, "new.title")} open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+    <Modal title={t("new.title")} open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <Modal.Content>
         <View style={styles.body}>
           <TextInput
-            accessibilityLabel={t(lang, "new.titleField")}
+            accessibilityLabel={t("new.titleField")}
             style={styles.input}
             value={title}
             onChangeText={setTitle}
-            placeholder={t(lang, "new.titleField")}
+            placeholder={t("new.titleField")}
           />
           <TextInput
-            accessibilityLabel={t(lang, "new.bodyField")}
+            accessibilityLabel={t("new.bodyField")}
             style={[styles.input, styles.inputBody]}
             value={body}
             onChangeText={setBody}
-            placeholder={t(lang, "new.bodyField")}
+            placeholder={t("new.bodyField")}
             multiline
           />
           <TextInput
-            accessibilityLabel={t(lang, "new.labelsField")}
+            accessibilityLabel={t("new.labelsField")}
             style={styles.input}
             value={labels}
             onChangeText={setLabels}
-            placeholder={t(lang, "new.labelsField")}
+            placeholder={t("new.labelsField")}
           />
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={t(lang, "new.markMap")}
+            accessibilityLabel={t("new.markMap")}
             style={[styles.toggle, isMap ? styles.toggleActive : null]}
             onPress={() => setIsMap((value) => !value)}
           >
             <Text style={isMap ? styles.toggleTextActive : styles.toggleText}>
-              {isMap ? t(lang, "new.markMapOn") : t(lang, "new.markMap")}
+              {isMap ? t("new.markMapOn") : t("new.markMap")}
             </Text>
           </Pressable>
 
           <View style={styles.actions}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={t(lang, "new.submit")}
+              accessibilityLabel={t("new.submit")}
               style={[styles.action, styles.actionPrimary]}
               onPress={() => create.mutate()}
             >
               <Text style={styles.actionText}>
-                {create.isPending ? t(lang, "new.submitting") : t(lang, "new.submit")}
+                {create.isPending ? t("new.submitting") : t("new.submit")}
               </Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={t(lang, "common.cancel")}
+              accessibilityLabel={t("common.cancel")}
               style={styles.action}
               onPress={onClose}
             >
-              <Text style={styles.actionText}>{t(lang, "common.cancel")}</Text>
+              <Text style={styles.actionText}>{t("common.cancel")}</Text>
             </Pressable>
           </View>
-          <Text style={styles.hint}>{t(lang, "new.hint")}</Text>
+          <Text style={styles.hint}>{t("new.hint")}</Text>
         </View>
       </Modal.Content>
     </Modal>
