@@ -1,8 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
 import { test } from "node:test";
+import { fakeGh } from "./helpers/fake-gh.mjs";
 import { createIssue, dedupeLabels, postComment, replaceLabels } from "../server/tracker/write.ts";
 
 /**
@@ -41,31 +39,6 @@ test("改标签：非法票号在本地就拒绝", async () => {
   assert.equal(result.reason, "invalid");
 });
 
-/** 假 gh：每次调用记一行「子命令|第二参数」，脚本体由调用方给（决定这次失败成什么样）。 */
-function fakeGh(body) {
-  const dir = mkdtempSync(path.join(tmpdir(), "deck-gh-"));
-  const bin = path.join(dir, "gh");
-  writeFileSync(bin, `#!/bin/sh\nprintf '%s|%s\\n' "$1" "$2" >> "$GH_LOG"\n${body}\n`, "utf8");
-  chmodSync(bin, 0o755);
-  const log = path.join(dir, "gh.log");
-  const previousPath = process.env.PATH;
-  const previousLog = process.env.GH_LOG;
-  process.env.PATH = `${dir}:${previousPath ?? ""}`;
-  process.env.GH_LOG = log;
-  return {
-    calls: () =>
-      existsSync(log)
-        ? readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((entry) => entry.split("|")[0])
-        : [],
-    restore: () => {
-      process.env.PATH = previousPath;
-      if (previousLog === undefined) delete process.env.GH_LOG;
-      else process.env.GH_LOG = previousLog;
-      rmSync(dir, { recursive: true, force: true });
-    },
-  };
-}
-
 test("评论：REST 失败但拿不到 HTTP 状态码时不再回落 CLI，避免写出重复评论", async () => {
   const gh = fakeGh('echo "error connecting to api.github.com" >&2\nexit 1');
   try {
@@ -77,6 +50,20 @@ test("评论：REST 失败但拿不到 HTTP 状态码时不再回落 CLI，避�
     assert.match(result.detail, /可能已经写进/);
   } finally {
     gh.restore();
+  }
+});
+
+test("评论：网关返回 502/504 不算「确定被拒」，不当成没写进去", async () => {
+  for (const status of ["502", "504", "408"]) {
+    const gh = fakeGh(`echo "gh: Server Error (HTTP ${status})" >&2\nexit 1`);
+    try {
+      const result = await postComment("acme", "deck", 7, "一条评论");
+      assert.equal(result.ok, false, `HTTP ${status} 不该回落`);
+      assert.deepEqual(gh.calls(), ["api"], `HTTP ${status} 仍然回落了 CLI`);
+      assert.match(result.detail, /可能已经写进/);
+    } finally {
+      gh.restore();
+    }
   }
 });
 

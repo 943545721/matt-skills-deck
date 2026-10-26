@@ -31,10 +31,11 @@ const positive = (value: number) => Number.isInteger(value) && value > 0;
 /**
  * 能不能确定「第一次写没写进去」。
  *
- * gh api 被服务端拒绝时，回包里带 HTTP 状态码；超时、断连、进程被杀则没有——
- * 那两种情况服务端可能已经把评论存下来了，此时回落 CLI 就是再发一条。
+ * 只认 4xx（408 除外）：那是服务端明确拒绝了这次请求。5xx 与超时、断连同属「可能已写入」——
+ * 网关的 502/504 恰恰是上游没回话，请求很可能已经落到后端并建好了评论；
+ * 408 是服务端等到自己超时，也不排除已经处理完。这几种情况下回落 CLI 就是再发一条。
  */
-const definitelyRejected = (failure: WriteFailure): boolean => /HTTP \d{3}/.test(failure.detail);
+const definitelyRejected = (failure: WriteFailure): boolean => /HTTP (4(?!08)\d{2})/.test(failure.detail);
 
 /**
  * 发一条评论。

@@ -5,6 +5,7 @@ import { routeFromIssues, suggestNextSteps } from "../tracker/map-route.ts";
 import { createIssue, postComment, replaceLabels } from "../tracker/write.ts";
 import { requireGithubRepo } from "../rpc/repo-gate.ts";
 import { sortIssues } from "../tracker/order.ts";
+import { assertLabelsReadable } from "../tracker/label-guard.ts";
 
 /**
  * 给 Agent 用的 deck_* 工具。
@@ -152,6 +153,7 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
           body: detail.issue.body,
           labels: detail.issue.labels.map((label) => label.name),
           // 标签是整体替换语义，所以「读到几个」和「一共几个」必须分开说清楚。
+          labelCount: detail.meta.labelCount,
           labelsTruncated: detail.meta.labelsTruncated,
           assignees: detail.issue.assignees,
           isMap: detail.issue.isMap,
@@ -299,16 +301,10 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
       const input = inputResult.data;
       const gate = await requireGithubRepo(context.workspaceDir, "labels");
       if (!gate.ok) return fail(gate.reason, gate.detail);
-      // PUT 是整体替换：若连当前标签全集都读不全，这次替换必然会删掉没读到的标签。
-      // 宁可拒绝并让人去面板/GitHub 改，也不做一次「成功」的静默数据丢失。
-      const current = await getIssue(gate.ref.owner, gate.ref.name, input.number);
-      if (!current.ok) return failureOf(current);
-      if (current.meta.labelsTruncated) {
-        return fail(
-          "labels-truncated",
-          `#${input.number} 的标签太多，本次只读到 ${current.issue.labels.length} 个（共 ${current.meta.labelCount} 个）；整体替换会删掉没读到的标签，请改用面板或 GitHub 网页修改`,
-        );
-      }
+      // PUT 是整体替换：读不全现有标签就拒绝。守卫放在领域层（面板 RPC 同一条），
+      // 宁可拒绝并让人去 GitHub 改，也不做一次「成功」的静默数据丢失。
+      const guard = await assertLabelsReadable(gate.ref.owner, gate.ref.name, input.number);
+      if (!guard.ok) return fail(guard.reason, guard.detail);
       const replaced = await replaceLabels(gate.ref.owner, gate.ref.name, input.number, input.labels);
       if (!replaced.ok) return failureOf(replaced);
       return ok({ ok: true, number: input.number, labels: replaced.labels.map((label) => label.name) });

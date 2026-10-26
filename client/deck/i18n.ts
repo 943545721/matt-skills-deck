@@ -49,4 +49,5 @@ export const FAILURE_KEYS: Record<string, DeckKey> = {
   "gh-failed": "failure.gh-failed",
   "not-found": "failure.not-found",
   invalid: "failure.invalid",
+  "labels-truncated": "failure.labels-truncated",
 };

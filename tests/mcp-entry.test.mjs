@@ -60,6 +60,31 @@ test("入口：安装路径带空格与非 ASCII 时照样启动，回包按行�
   assert.deepEqual(replies[1], { jsonrpc: "2.0", id: 2, result: {} });
 });
 
+test("入口：插件目录经符号链接访问时照样启动（~/.paseo 软链到别的盘）", () => {
+  const realDir = sandbox("deck real-");
+  copyPluginTo(realDir);
+  const linkParent = sandbox("deck link-");
+  const link = path.join(linkParent, "paseo");
+  symlinkSync(realDir, link, "dir");
+  const workspace = sandbox("deck ws-");
+
+  const result = spawnSync(process.execPath, [path.join(link, "server", "mcp", "main.ts"), "--workspace", workspace], {
+    input:
+      line({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } }) +
+      line({ jsonrpc: "2.0", id: 2, method: "ping" }),
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+
+  // 判定失败时进程会以 0 退出、stdout 全空并在 stderr 留一行——三条断言各自能抓住它。
+  assert.equal(result.status, 0, `stderr: ${result.stderr}`);
+  assert.equal(result.stderr, "");
+  const replies = result.stdout.split("\n").filter(Boolean).map((text) => JSON.parse(text));
+  assert.equal(replies.length, 2);
+  assert.equal(replies[0].result.protocolVersion, "2025-06-18");
+  assert.deepEqual(replies[1], { jsonrpc: "2.0", id: 2, result: {} });
+});
+
 test("启动参数：缺 --workspace、相对路径、目录不存在都以退出码 2 报人话", () => {
   const cases = [
     [[], /--workspace/],

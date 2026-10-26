@@ -45,6 +45,7 @@ export const en = {
     "gh-failed": "GitHub rejected this operation",
     "not-found": "That issue could not be found",
     invalid: "Input was rejected before sending",
+    "labels-truncated": "Labels could not be read in full",
     read: "Read failed",
   },
 
@@ -299,6 +300,7 @@ export const zh: SameShape<typeof en> = {
     "gh-failed": "GitHub 拒绝了这次操作",
     "not-found": "找不到这张票",
     invalid: "输入不合法，没有发出去",
+    "labels-truncated": "标签没有读全，不能整体替换",
     read: "读取失败",
   },
 

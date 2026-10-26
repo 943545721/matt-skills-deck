@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
-import { statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { handleMessage, needsSerialization } from "./protocol.ts";
 import { MCP_SERVER_NAME } from "./tools.ts";
 import type { ToolContext } from "./tools.ts";
@@ -105,8 +105,30 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   return exitCode;
 }
 
-if (pathToFileURL(process.argv[1] ?? "").href === import.meta.url) {
+/**
+ * 这一份代码是不是被当作入口在跑。
+ *
+ * 两侧都取 realpath 再比：`import.meta.url` 是 Node 解析符号链接后的真路径，而 `argv[1]`
+ * 是用户敲的那个字面路径。只比字面路径的话，插件装在软链目录下（`~/.paseo` 被软链到别的盘、
+ * 包管理器把版本目录软链成固定名、macOS 的 `/tmp` → `/private/tmp`）会永远判不等，
+ * 进程 exit 0 且 stdout/stderr 全空——客户端看到的是「服务器握手时消失」。
+ */
+function isEntryPoint(): boolean {
+  const entryFile = process.argv[1];
+  if (!entryFile) return false;
+  try {
+    return realpathSync(entryFile) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   void main().then((code) => {
     process.exitCode = code;
   });
+} else if ((process.argv[1] ?? "").endsWith("main.ts")) {
+  // 只有在「argv 明明指着 main.ts，判定却失败」时才会到这里（例如被转译器包了一层）。
+  // 打一行到 stderr，别再出现进程开着却永不响应、两边都全空的静默失败。
+  process.stderr.write(`[${MCP_SERVER_NAME}] 入口判定失败：${process.argv[1]}\n`);
 }

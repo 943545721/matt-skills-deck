@@ -8,6 +8,7 @@ import type {
 } from "../../shared/issues.ts";
 import { getIssue, listIssues } from "../tracker/github.ts";
 import { sortIssues } from "../tracker/order.ts";
+import { assertLabelsReadable } from "../tracker/label-guard.ts";
 import { createIssue, postComment, replaceLabels } from "../tracker/write.ts";
 import { record } from "../logs.ts";
 import { requireGithubRepo } from "./repo-gate.ts";
@@ -108,6 +109,13 @@ export async function createIssueHandler(input: CreateInput): Promise<RpcOutput<
 export async function setIssueLabelsHandler(input: SetLabelsInput): Promise<RpcOutput<typeof issuesSetLabelsRpc>> {
   const gate = await requireGithubRepo(input.workspaceDir, "改标签");
   if (!gate.ok) return gate;
+
+  // 与 MCP 出口同一条不变量：PUT 是整体替换，读不全现有标签就不许改。
+  const guard = await assertLabelsReadable(gate.ref.owner, gate.ref.name, input.number);
+  if (!guard.ok) {
+    record("warn", "issues.labels", `#${input.number} 拒绝改标签：${guard.detail.slice(0, 200)}`);
+    return guard;
+  }
 
   const result = await replaceLabels(gate.ref.owner, gate.ref.name, input.number, input.labels);
   if (!result.ok) {

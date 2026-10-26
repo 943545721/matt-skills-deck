@@ -33,7 +33,16 @@ const issueSummary = z.object({
  */
 const failure = z.object({
   ok: z.literal(false),
-  reason: z.enum(["no-repo", "unsupported-host", "gh-missing", "gh-failed", "not-found", "invalid"]),
+  reason: z.enum([
+    "no-repo",
+    "unsupported-host",
+    "gh-missing",
+    "gh-failed",
+    "not-found",
+    "invalid",
+    /** 现有标签读不全：整体替换会删掉没读到的标签，所以拒绝。 */
+    "labels-truncated",
+  ]),
   detail: z.string(),
 });
 

@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { test } from "node:test";
+import { resolveRepo } from "../server/rpc/repo-gate.ts";
 import { mapCommentNodes, mapIssueNodes } from "../server/tracker/github.ts";
 import { sortIssues } from "../server/tracker/order.ts";
-import { parseRemoteUrl } from "../server/tracker/remote.ts";
+import { parseRemoteUrl, readRemoteUrl } from "../server/tracker/remote.ts";
 
 test("远端地址：GitHub 的常见四种写法都认", () => {
   const expected = { host: "github", owner: "acme", name: "deck" };
@@ -88,4 +93,41 @@ test("排序：地图优先 → 未关闭优先 → 最近更新优先，且不�
     input.map((issue) => issue.number),
     snapshot,
   );
+});
+
+/**
+ * 读远端失败的三种原因必须分得开：它们的下手处不同（关联远端 / 换目录 / 装 git），
+ * 混成一句「没有仓库」会让人往错的方向排查。
+ */
+test("读远端失败：不是 git 仓库、没有远端、没有 git 命令，三种原因各自报清楚", async () => {
+  const plain = mkdtempSync(path.join(tmpdir(), "deck-plain-"));
+  const notRepo = await readRemoteUrl(plain);
+  assert.equal(notRepo.ok, false);
+  assert.equal(notRepo.reason, "not-a-repo");
+  const gate = await resolveRepo(plain);
+  assert.equal(gate.ok, false);
+  assert.equal(gate.reason, "no-repo");
+  assert.match(gate.detail, /不是可读的 git 仓库/);
+
+  if (spawnSync("git", ["--version"]).status === 0) {
+    const repo = mkdtempSync(path.join(tmpdir(), "deck-repo-"));
+    assert.equal(spawnSync("git", ["init", "-q", repo]).status, 0);
+    const noRemote = await readRemoteUrl(repo);
+    assert.equal(noRemote.ok, false);
+    assert.equal(noRemote.reason, "no-remote");
+  }
+
+  // PATH 里没有 git：三种失败里最容易误报成「没有远端」的一种。
+  const previousPath = process.env.PATH;
+  process.env.PATH = mkdtempSync(path.join(tmpdir(), "deck-nogit-"));
+  try {
+    const missing = await readRemoteUrl(plain);
+    assert.equal(missing.ok, false);
+    assert.equal(missing.reason, "git-missing");
+    const missingGate = await resolveRepo(plain);
+    assert.equal(missingGate.ok, false);
+    assert.match(missingGate.detail, /git/);
+  } finally {
+    process.env.PATH = previousPath;
+  }
 });
