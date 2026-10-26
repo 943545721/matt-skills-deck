@@ -6,24 +6,34 @@ import { Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { statusRpc } from "../../shared/status";
 import { BoardView } from "./BoardView";
+import { LabelsView } from "./LabelsView";
 import { SkillsView } from "./SkillsView";
 
 /**
  * 面板内的视图状态由 Paseo 持久化（关掉标签页、重启应用后仍在），
- * 所以这里只存「看哪一页」，不存数据本身——数据永远现取，避免陈旧快照被当成事实。
+ * 所以这里只存「看哪一页」和「当前票是哪张」，不存数据本身——数据永远现取，
+ * 避免陈旧快照被当成事实。
  */
-const tabSchema = z.object({ view: z.enum(["board", "skills", "about"]) });
+const tabSchema = z.object({
+  view: z.enum(["board", "skills", "labels", "about"]),
+  /** 当前票：绑定在「这个工作区」上，换工作区就换一张，符合人的心智。 */
+  current: z.number().int().min(1).optional(),
+});
 type TabState = z.infer<typeof tabSchema>;
 const DEFAULT_TAB_STATE: TabState = { view: "board" };
 
+const TABS = [
+  { key: "board" as const, label: "任务板", hint: "查看任务板" },
+  { key: "skills" as const, label: "技能", hint: "查看技能" },
+  { key: "labels" as const, label: "标签", hint: "查看标签配色" },
+  { key: "about" as const, label: "环境", hint: "查看环境" },
+];
+
 /**
- * 任务板的工作区面板（P0 骨架版）。
+ * 任务板工作区面板。
  *
- * 现阶段只做三件事，用来验证宿主契约全部打通：
- * 1. 从工作区快照拿到名字与目录（证明 useWorkspace 可用）；
- * 2. 通过 RPC 向 daemon 取环境读数（证明 server 半与 RPC 通道可用）；
- * 3. 记住用户停在哪一页（证明 tab state 持久化可用）。
- * 真正的票面与地图在 P2 接入，届时把 BoardPlaceholder 换成列表与详情。
+ * 四页各管一件事：票、技能、标签配色、环境读数。这里只做装配与导航，
+ * 每页自己的逻辑都在自己文件里——面板是最容易被加料的地方，先立好边界。
  */
 export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePanelProps) {
   const workspace = useWorkspace(workspaceId, (snapshot) => ({
@@ -49,9 +59,19 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
         gap: 12,
       },
       header: { gap: 2 },
+      titleRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, flexWrap: "wrap" as const },
       title: { color: theme.colors.foreground, fontSize: layout.compact ? 16 : 18, fontWeight: "600" as const },
       subtitle: { color: theme.colors.foregroundMuted, fontSize: 12 },
-      tabs: { flexDirection: "row" as const, gap: 8 },
+      binding: {
+        paddingVertical: 2,
+        paddingHorizontal: 8,
+        borderRadius: 999,
+        borderWidth: 1,
+        borderColor: theme.colors.accent,
+        backgroundColor: theme.colors.surface1,
+      },
+      bindingText: { color: theme.colors.foreground, fontSize: 11 },
+      tabs: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const },
       tab: {
         paddingVertical: 4,
         paddingHorizontal: 10,
@@ -82,42 +102,47 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
   return (
     <View style={styles.screen}>
       <View style={styles.header}>
-        <Text style={styles.title}>{workspace?.name ?? "任务板"}</Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.title}>{workspace?.name ?? "任务板"}</Text>
+          {state.current ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`解除当前票 #${state.current}`}
+              style={styles.binding}
+              onPress={() => setState({ ...state, current: undefined })}
+            >
+              <Text style={styles.bindingText}>当前票 #{state.current} ✕</Text>
+            </Pressable>
+          ) : null}
+        </View>
         <Text style={styles.subtitle} numberOfLines={1}>
           {workspace?.directory ?? "工作区目录未知"}
         </Text>
       </View>
 
       <View style={styles.tabs}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="查看任务板"
-          style={[styles.tab, state.view === "board" ? styles.tabActive : null]}
-          onPress={() => setState({ view: "board" })}
-        >
-          <Text style={state.view === "board" ? styles.tabTextActive : styles.tabText}>任务板</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="查看技能"
-          style={[styles.tab, state.view === "skills" ? styles.tabActive : null]}
-          onPress={() => setState({ view: "skills" })}
-        >
-          <Text style={state.view === "skills" ? styles.tabTextActive : styles.tabText}>技能</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="查看环境"
-          style={[styles.tab, state.view === "about" ? styles.tabActive : null]}
-          onPress={() => setState({ view: "about" })}
-        >
-          <Text style={state.view === "about" ? styles.tabTextActive : styles.tabText}>环境</Text>
-        </Pressable>
+        {TABS.map((item) => (
+          <Pressable
+            key={item.key}
+            accessibilityRole="button"
+            accessibilityLabel={item.hint}
+            style={[styles.tab, state.view === item.key ? styles.tabActive : null]}
+            onPress={() => setState({ ...state, view: item.key })}
+          >
+            <Text style={state.view === item.key ? styles.tabTextActive : styles.tabText}>{item.label}</Text>
+          </Pressable>
+        ))}
       </View>
 
       {state.view === "board" ? (
         workspace ? (
-          <BoardView theme={theme} layout={layout} workspaceDir={workspace.directory} />
+          <BoardView
+            theme={theme}
+            layout={layout}
+            workspaceDir={workspace.directory}
+            current={state.current}
+            onBind={(number) => setState({ ...state, current: number })}
+          />
         ) : (
           <Text style={styles.notice}>工作区目录未知，暂时读不到票面。</Text>
         )
@@ -126,6 +151,12 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
           <SkillsView theme={theme} layout={layout} workspaceDir={workspace.directory} />
         ) : (
           <Text style={styles.notice}>工作区目录未知，暂时无法安装技能。</Text>
+        )
+      ) : state.view === "labels" ? (
+        workspace ? (
+          <LabelsView theme={theme} layout={layout} workspaceDir={workspace.directory} />
+        ) : (
+          <Text style={styles.notice}>工作区目录未知，暂时读不到标签。</Text>
         )
       ) : (
         <View style={styles.card}>

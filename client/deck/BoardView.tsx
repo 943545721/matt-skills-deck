@@ -19,10 +19,15 @@ export function BoardView({
   theme,
   layout,
   workspaceDir,
+  current,
+  onBind,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
   workspaceDir: string;
+  /** 当前票：绑在面板状态里，换工作区就换一张。 */
+  current?: number;
+  onBind(number: number | undefined): void;
 }) {
   const [includeClosed, setIncludeClosed] = useState(false);
   const [openNumber, setOpenNumber] = useState<number | null>(null);
@@ -152,6 +157,9 @@ export function BoardView({
           >
             <View style={styles.rowHead}>
               <Text style={styles.number}>#{item.number}</Text>
+              {current === item.number ? (
+                <Text style={[styles.label, { backgroundColor: theme.colors.accent, color: "#000000" }]}>当前</Text>
+              ) : null}
               {item.isMap ? (
                 <Text style={[styles.label, { backgroundColor: theme.colors.surface2, color: theme.colors.foreground }]}>地图</Text>
               ) : null}
@@ -184,6 +192,8 @@ export function BoardView({
           theme={theme}
           workspaceDir={workspaceDir}
           number={openNumber}
+          isCurrent={current === openNumber}
+          onBind={() => onBind(current === openNumber ? undefined : openNumber)}
           onClose={() => setOpenNumber(null)}
         />
       ) : null}

@@ -6,6 +6,7 @@ import {
   listIssuesHandler,
   setIssueLabelsHandler,
 } from "./server/rpc/issues.ts";
+import { listLabelsHandler, setLabelColorsHandler } from "./server/rpc/labels.ts";
 import { listSkills, installSkillsHandler, readSkill } from "./server/rpc/skills.ts";
 import { readStatus } from "./server/status.ts";
 import {
@@ -15,6 +16,7 @@ import {
   issuesListRpc,
   issuesSetLabelsRpc,
 } from "./shared/issues.ts";
+import { labelsColorsRpc, labelsListRpc } from "./shared/labels.ts";
 import { skillsInstallRpc, skillsListRpc, skillsReadRpc } from "./shared/skills.ts";
 import { statusRpc } from "./shared/status.ts";
 
@@ -34,5 +36,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(issuesCommentRpc, commentIssueHandler);
   server.handle(issuesCreateRpc, createIssueHandler);
   server.handle(issuesSetLabelsRpc, setIssueLabelsHandler);
+  server.handle(labelsListRpc, listLabelsHandler);
+  server.handle(labelsColorsRpc, setLabelColorsHandler);
   return () => {};
 }

@@ -17,11 +17,15 @@ export function IssueModal({
   theme,
   workspaceDir,
   number,
+  isCurrent,
+  onBind,
   onClose,
 }: {
   theme: PluginTheme;
   workspaceDir: string;
   number: number;
+  isCurrent: boolean;
+  onBind(): void;
   onClose(): void;
 }) {
   const [comment, setComment] = useState("");
@@ -93,6 +97,7 @@ export function IssueModal({
         borderWidth: 1,
         borderColor: theme.colors.border,
       },
+      actionActive: { borderColor: theme.colors.accent },
       actionText: { color: theme.colors.foreground, fontSize: 12 },
       input: {
         borderWidth: 1,
@@ -155,6 +160,14 @@ export function IssueModal({
                   }}
                 >
                   <Text style={styles.actionText}>复制提示词</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={isCurrent ? `取消当前票 #${number}` : `把票 #${number} 设为当前票`}
+                  style={[styles.action, isCurrent ? styles.actionActive : null]}
+                  onPress={onBind}
+                >
+                  <Text style={styles.actionText}>{isCurrent ? "✓ 当前票" : "设为当前票"}</Text>
                 </Pressable>
                 <Pressable
                   accessibilityRole="button"
