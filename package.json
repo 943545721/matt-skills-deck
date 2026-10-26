@@ -18,7 +18,8 @@
     "client/",
     "server/",
     "shared/",
-    "templates/"
+    "templates/",
+    "docs/"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.server.json",

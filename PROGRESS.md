@@ -12,7 +12,7 @@
 | P3 | 写入与动作：评论、标签配色、绑定与切换、复制提示词 | **完成** | 21 条测试全绿（含 3 条配色归一/拒绝用例）；插件 reload 后 running；写命令未联网实测（本机无 gh） |
 | P4 | 周边页：版本管理、环境检查、诊断日志、设置、双语 | **完成**：版本管理 10 条 RPC + 页面、诊断页（环境读数 + 操作日志）、日志缓冲、zh/en 双语全量切换（走 SDK `defineTranslations` + `useTranslation`，语言跟随 App；键/占位符一致性由 3 条测试兜底） | 31 条测试全绿；两端 typecheck 通过；插件 reload 后 running 且日志无错；版本管理在临时仓库实测：暂存→预检→提交成功、同票重放被拒、提交后工作区干净；无暂存/无远端/非法路径三条拦截均给出人话；`en` 表被标成 `Record<MessageKey, string>`，少一条键编译不过 |
 | P5 | 地图详情、工作路线、deck 工具 MCP 注入、像素风 | **完成**：地图页（五区块 + 工作路线 + 下一步建议，`deck.map` 一条 RPC 一次读完）；7 个 `deck_*` MCP 工具 + 协议层 + `before agent.create` 自动挂载；像素风牌面（直角 + 2px 描边 + 右下 3px 硬投影 + 等宽数字）铺满任务板 / 地图 / 票详情 / 标签栏，其余表单页用同款直角与描边的扁平变体 | 54 条测试全绿（新增 9 条地图、8 条 MCP 协议/注入用例）；地图正文解析照抄源仓库口径，含「标题粘行」「加粗决策」「字面 \\n 还原」；stdio 冒烟实测：`initialize` 回显 2025-06-18、`tools/list` 出 7 个工具、`tools/call` 走通失败分支、缺 `--workspace`/目录不存在均以退出码 2 报人话；两端 typecheck 通过，reload 后 running、日志无错 |
-| P6 | 移动端适配、注册表发布、文档收口 | 未开始 | — |
+| P6 | 移动端适配、注册表发布、文档收口 | **完成（代码侧）**：触屏端按钮抬到 40pt、触屏判定走 `Platform.OS`（弹窗拿不到 layout）；三处注册标题改用 `deckMessages.message`，英文界面不会再出现中文标题；README / OVERVIEW 双语重写；新增 `docs/port-diff.md`（与 DSH 逐项对照）与 `docs/publishing.md`（注册表条款，逐条来自 CLI 与 protocol 源码） | `docs/` 已进 `package.json` 的 `files`；typecheck 与 54 条测试全绿；reload 后 running、日志无错。**仍需人到场**：仓库还没有公开远端、注册表 `media` 为空（此环境截不了 UI 图）、注册表提交入口在受限网络下未能核实 |
 
 ## 已定决策
 
@@ -40,7 +40,8 @@
 
 ## 已知硬约束
 
-- Paseo 无常驻右侧栏、无全局状态栏 → 面板落工作区标签页，计数落 composer pill。
+- Paseo 无常驻右侧栏、无全局状态栏 → 面板落工作区标签页。DSH 的对话框胶囊栏（composer pill）没做：
+  `addComposerPill` 必须按 `agentId` 注册，而插件客户端拿不到 agent 列表，也没有「新会话」事件可订阅。
 - 客户端无任意网络、无 DOM → 图片走服务端 data URL，样式只用 RN + theme token。
 - 插件 API 处于实验期 → `requirements.paseo` 钉 `>=0.13.0 <0.14.0`。
 - 服务端无沙箱 → 命令白名单只放 `gh` / `glab` / `git`，路径必须落在工作区内。
