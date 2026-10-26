@@ -9,7 +9,7 @@
 | P0 | 骨架：manifest、双 tsconfig、工作区面板 + 整页界面 + 侧栏行、`deck.status` RPC | **完成** | `paseo plugin ls` = running；`paseo plugin logs` 无错误；两端 typecheck 通过 |
 | P1 | 技能包：27×2 技能入库、技能页、按工作区安装按钮 | **完成** | 27/27 中英齐；安装写入 `.claude/skills` 与 `.agents/skills`；重复安装跳过、内容不同判冲突不覆盖；8 条测试全绿 |
 | P2 | 只读任务板：`tracker` 领域逻辑迁移、GitHub 后端、列表 + 详情 | **完成（只读部分）** | 远端解析 6 种写法、映射容错、排序不变性共 6 条测试全绿；插件 reload 后 running；`gh` 缺失路径实测给出可执行提示；本机无 gh 与 GitHub 凭据，联网读取未实测（见下） |
-| P3 | 写入与动作：评论、标签配色、绑定与切换、复制提示词 | 未开始 | — |
+| P3 | 写入与动作：评论、标签配色、绑定与切换、复制提示词 | **进行中**：评论 / 建票 / 改标签 / 复制提示词已通；标签配色与绑定待做 | 4 条写校验测试（空评论、非法票号、空标题、超长标题）全绿；插件 reload 后 running；写命令未联网实测（本机无 gh） |
 | P4 | 周边页：版本管理、环境检查、诊断日志、设置、双语 | 未开始 | — |
 | P5 | 地图详情、工作路线、deck 工具 MCP 注入、像素风 | 未开始 | — |
 | P6 | 移动端适配、注册表发布、文档收口 | 未开始 | — |
@@ -37,6 +37,8 @@
 - 客户端无任意网络、无 DOM → 图片走服务端 data URL，样式只用 RN + theme token。
 - 插件 API 处于实验期 → `requirements.paseo` 钉 `>=0.13.0 <0.14.0`。
 - 服务端无沙箱 → 命令白名单只放 `gh` / `glab` / `git`，路径必须落在工作区内。
+- RPC 方法名只能是小写：校验正则是 `^[a-z][a-z0-9._-]*$`，写成 `deck.issues.setLabels` 会让整个插件
+  加载失败（报 `Invalid plugin RPC method`，且 `plugin reload` 也一起失败）。所以改成 `deck.issues.labels.replace`。
 - 服务端相对导入一律写 `.ts` 扩展名：测试直接用 `node --test` 跑 TypeScript（Node 自带类型剥离），
   不带扩展名会在测试阶段报 `ERR_MODULE_NOT_FOUND`，而 tsc 不报。`allowImportingTsExtensions` 已开。
 - 插件运行时的自身目录只能从 `$PASEO_HOME/config.json` 读（实测 `import.meta` 为空、cwd 为 `/`）。
