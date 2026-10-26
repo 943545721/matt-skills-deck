@@ -44,6 +44,21 @@ test("通知不回包：notifications/initialized 与未知通知都返回 null"
   assert.equal(await call({ jsonrpc: "2.0", method: "notifications/cancelled", params: {} }), null);
 });
 
+test("通知一律不回包：连 initialize / ping / tools/list 这种请求型方法也不回", async () => {
+  assert.equal(await call({ jsonrpc: "2.0", method: "ping" }), null);
+  assert.equal(await call({ jsonrpc: "2.0", method: "tools/list" }), null);
+  assert.equal(
+    await call({ jsonrpc: "2.0", method: "initialize", params: { protocolVersion: "2025-06-18" } }),
+    null,
+  );
+});
+
+test("非法 id 回 -32600，而不是拿 null 冒充一个新请求的编号", async () => {
+  const response = await call({ jsonrpc: "2.0", id: { nested: 1 }, method: "ping" });
+  assert.equal(response.error.code, -32600);
+  assert.equal(response.id, null);
+});
+
 test("ping 立刻回空结果", async () => {
   const response = await call({ jsonrpc: "2.0", id: 7, method: "ping" });
   assert.deepEqual(response, { jsonrpc: "2.0", id: 7, result: {} });
@@ -78,6 +93,19 @@ test("工具调用：参数不合法时按工具错误回，而不是协议错�
   assert.equal(payload.ok, false);
   assert.equal(payload.reason, "invalid");
   assert.match(payload.detail, /number/);
+});
+
+test("工具入参：多给的键被拒绝，而不是静默丢弃后当成「已过滤」", async () => {
+  const response = await call({
+    jsonrpc: "2.0",
+    id: 11,
+    method: "tools/call",
+    params: { name: "deck_issues_list", arguments: { state: "open", label: "wayfinder:map" } },
+  });
+  const payload = JSON.parse(response.result.content[0].text);
+  assert.equal(response.result.isError, true);
+  assert.equal(payload.reason, "invalid");
+  assert.match(payload.detail, /label/);
 });
 
 test("工具调用：工作区没有 git 远端时回 no-repo", async () => {

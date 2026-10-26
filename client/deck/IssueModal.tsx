@@ -87,6 +87,10 @@ export function IssueModal({
   });
 
   const issue = detail.data?.ok ? detail.data.issue : null;
+  // 只读到一部分标签时不许改标签：PUT 是整体替换，会把没读到的标签一起删掉。
+  const labelsTruncated = issue ? issue.labelCount > issue.labels.length : false;
+  const commentsTruncated =
+    detail.data?.ok ? detail.data.commentCount > detail.data.comments.length : false;
 
   /**
    * 把票面拼成一段能直接粘进 Agent 输入框的文字。
@@ -198,9 +202,16 @@ export function IssueModal({
                 <PixelButton
                   skin={skin}
                   label={t("issue.editLabels")}
+                  disabled={labelsTruncated}
                   onPress={() => setLabelDraft(issue.labels.map((label) => label.name).join(", "))}
                 />
               </View>
+
+              {labelsTruncated ? (
+                <Text style={styles.hint}>
+                  {t("issue.labelsTruncated", { total: issue.labelCount, shown: issue.labels.length })}
+                </Text>
+              ) : null}
 
               {labelDraft !== null ? (
                 <>
@@ -230,6 +241,12 @@ export function IssueModal({
                   </View>
                   <Text style={styles.hint}>{t("issue.labelsHint")}</Text>
                 </>
+              ) : null}
+
+              {commentsTruncated && detail.data?.ok ? (
+                <Text style={styles.hint}>
+                  {t("issue.commentsTruncated", { shown: detail.data.comments.length, total: detail.data.commentCount })}
+                </Text>
               ) : null}
 
               {detail.data?.ok

@@ -22,10 +22,13 @@ export interface Issue {
 
 const MAP_LABEL = "wayfinder:map";
 
-const LIST_QUERY = `query($owner:String!,$name:String!,$first:Int!){
+function listQuery(state?: "OPEN" | "CLOSED"): string {
+  const states = state ? `, states: [${state}]` : "";
+  return `query($owner:String!,$name:String!,$first:Int!){
   repository(owner:$owner,name:$name){
-    issues(first:$first, orderBy:{field:UPDATED_AT,direction:DESC}){
+    issues(first:$first${states}, orderBy:{field:UPDATED_AT,direction:DESC}){
       totalCount
+      pageInfo { hasNextPage }
       nodes{
         number title state url updatedAt
         labels(first:20){nodes{name color}}
@@ -34,6 +37,7 @@ const LIST_QUERY = `query($owner:String!,$name:String!,$first:Int!){
     }
   }
 }`;
+}
 
 interface RawIssueNode {
   number?: unknown;
@@ -41,8 +45,18 @@ interface RawIssueNode {
   state?: unknown;
   url?: unknown;
   updatedAt?: unknown;
-  labels?: { nodes?: Array<{ name?: unknown; color?: unknown }> };
+  labels?: { totalCount?: unknown; nodes?: Array<{ name?: unknown; color?: unknown }> };
   assignees?: { nodes?: Array<{ login?: unknown }> };
+}
+
+interface PageInfo {
+  hasNextPage?: unknown;
+}
+
+interface RawIssueConnection {
+  totalCount?: unknown;
+  pageInfo?: PageInfo;
+  nodes?: RawIssueNode[];
 }
 
 const asString = (value: unknown, fallback = ""): string => (typeof value === "string" ? value : fallback);
@@ -92,9 +106,9 @@ const DETAIL_QUERY = `query($owner:String!,$name:String!,$number:Int!){
   repository(owner:$owner,name:$name){
     issue(number:$number){
       number title state url updatedAt body
-      labels(first:20){nodes{name color}}
+      labels(first:20){totalCount nodes{name color}}
       assignees(first:5){nodes{login}}
-      comments(first:100){nodes{author{login} createdAt body}}
+      comments(first:100){totalCount nodes{author{login} createdAt body}}
     }
   }
 }`;
@@ -103,6 +117,19 @@ interface RawCommentNode {
   author?: { login?: unknown } | null;
   createdAt?: unknown;
   body?: unknown;
+}
+
+export interface IssueDetailMeta {
+  labelCount: number;
+  labelsTruncated: boolean;
+  commentCount: number;
+  commentsTruncated: boolean;
+}
+
+export interface IssueDetail {
+  issue: Issue & { body: string };
+  comments: IssueComment[];
+  meta: IssueDetailMeta;
 }
 
 export interface IssueComment {
@@ -121,7 +148,7 @@ export function mapCommentNodes(nodes: readonly RawCommentNode[] | undefined): I
 }
 
 export type IssueDetailResult =
-  | { ok: true; issue: Issue & { body: string }; comments: IssueComment[] }
+  | { ok: true; issue: Issue & { body: string }; comments: IssueComment[]; meta: IssueDetailMeta }
   | { ok: false; reason: "not-found" | "gh-missing" | "gh-failed"; detail: string };
 
 /**
@@ -136,9 +163,11 @@ export async function getIssue(owner: string, name: string, number: number): Pro
     "graphql",
     "-f",
     `query=${DETAIL_QUERY}`,
-    "-F",
+    // 字符串变量走 `-f`（原样字符串）：`-F` 会按类型推断并把 `@` 当成读文件，
+    // 仓库名恰好是 true / 123 或 owner 以 @ 开头时会变成看不懂的 GraphQL 类型错误。
+    "-f",
     `owner=${owner}`,
-    "-F",
+    "-f",
     `name=${name}`,
     "-F",
     `number=${number}`,
@@ -148,7 +177,11 @@ export async function getIssue(owner: string, name: string, number: number): Pro
     const payload = JSON.parse(stdout) as {
       data?: {
         repository?: {
-          issue?: RawIssueNode & { body?: unknown; comments?: { nodes?: RawCommentNode[] } };
+          issue?: RawIssueNode & {
+            body?: unknown;
+            labels?: { totalCount?: unknown; nodes?: Array<{ name?: unknown; color?: unknown }> };
+            comments?: { totalCount?: unknown; nodes?: RawCommentNode[] };
+          };
         } | null;
       };
       errors?: Array<{ message?: string }>;
@@ -166,10 +199,19 @@ export async function getIssue(owner: string, name: string, number: number): Pro
     if (!mapped) {
       return { ok: false, reason: "gh-failed", detail: `#${number} 的数据缺少编号` };
     }
+    const comments = mapCommentNodes(node.comments?.nodes);
+    const labelCount = typeof node.labels?.totalCount === "number" ? node.labels.totalCount : mapped.labels.length;
+    const commentCount = typeof node.comments?.totalCount === "number" ? node.comments.totalCount : comments.length;
     return {
       ok: true,
       issue: { ...mapped, body: asString(node.body) },
-      comments: mapCommentNodes(node.comments?.nodes),
+      comments,
+      meta: {
+        labelCount,
+        labelsTruncated: labelCount > mapped.labels.length,
+        commentCount,
+        commentsTruncated: commentCount > comments.length,
+      },
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -181,7 +223,7 @@ export async function getIssue(owner: string, name: string, number: number): Pro
 }
 
 export type ListIssuesResult =
-  | { ok: true; issues: Issue[]; totalCount: number; fetchedAt: string }
+  | { ok: true; issues: Issue[]; totalCount: number; hasMore: boolean; fetchedAt: string }
   | { ok: false; reason: "gh-missing" | "gh-failed"; detail: string };
 
 /**
@@ -194,15 +236,16 @@ export async function listIssues(
   owner: string,
   name: string,
   limit = 100,
+  state?: "OPEN" | "CLOSED",
 ): Promise<ListIssuesResult> {
   const args = [
     "api",
     "graphql",
     "-f",
-    `query=${LIST_QUERY}`,
-    "-F",
+    `query=${listQuery(state)}`,
+    "-f",
     `owner=${owner}`,
-    "-F",
+    "-f",
     `name=${name}`,
     "-F",
     `first=${Math.min(Math.max(limit, 1), 100)}`,
@@ -210,7 +253,7 @@ export async function listIssues(
   try {
     const { stdout } = await execFileAsync("gh", args, { timeout: 20_000, maxBuffer: 8 << 20 });
     const payload = JSON.parse(stdout) as {
-      data?: { repository?: { issues?: { totalCount?: unknown; nodes?: RawIssueNode[] } } };
+      data?: { repository?: { issues?: RawIssueConnection } };
       errors?: Array<{ message?: string }>;
     };
     const issuesNode = payload.data?.repository?.issues;
@@ -222,6 +265,7 @@ export async function listIssues(
       ok: true,
       issues: mapIssueNodes(issuesNode.nodes),
       totalCount: typeof issuesNode.totalCount === "number" ? issuesNode.totalCount : 0,
+      hasMore: issuesNode.pageInfo?.hasNextPage === true,
       fetchedAt: new Date().toISOString(),
     };
   } catch (error) {

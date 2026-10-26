@@ -1,4 +1,5 @@
 import type { PluginBeforeRequests, PluginServerContext } from "@getpaseo/plugin/server";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { record } from "./logs.ts";
 import { MCP_SERVER_NAME, PREAPPROVED_TOOL_NAMES } from "./mcp/tools.ts";
@@ -53,20 +54,57 @@ export function mcpEntryPath(root: string): string {
   return path.join(root, "server", "mcp", "main.ts");
 }
 
+/** 当前进程的 `process.features`（Node 的类型能力标志就在里面）。 */
+export function runtimeFeatures(): unknown {
+  return (process as { features?: unknown }).features;
+}
+
+/**
+ * 当前 Node 能不能直接跑 `.ts`。
+ *
+ * 22.18+ 默认剥离类型（`process.features.typescript === "strip"`）。更老的版本挂上去只会得到
+ * 「server failed to start」——而且每个新会话都会重演，所以宁可明确跳过并说明原因。
+ *
+ * 参数显式传入（而不是默认读 `process.features`），测试才能确定性地覆盖两种能力。
+ */
+export function typescriptSupported(features: unknown): boolean {
+  const value = (features as { typescript?: unknown } | undefined)?.typescript;
+  return value === "strip" || value === "transform";
+}
+
+/**
+ * 注入前的前置检查：返回该跳过并记录的原因，`null` 表示可以注入。
+ *
+ * 纯函数便于单测：这两条一旦漏掉，用户看到的是「装了插件但 Agent 没有工具」，日志里却什么都没有。
+ */
+export function injectionProblem(input: { entry: string; entryPresent: boolean; typescript: boolean }): string | null {
+  if (!input.typescript) return "当前 Node 不支持直接运行 TypeScript（需要 22.18+），跳过 deck 工具注入";
+  if (!input.entryPresent) return `找不到 MCP 入口文件，跳过 deck 工具注入：${input.entry}`;
+  return null;
+}
+
 export function registerHooks(server: PluginServerContext): void {
   server.before("agent.create", async ({ request }) => {
     try {
       const gate = await resolveRepo(request.config.cwd);
       if (!gate.ok || gate.ref.host !== "github") {
         // 不是「出错」，是「这个工作区没有票可读」，所以不注入也不报错，只留一行日志便于排查。
-        const why = gate.ok ? `远端是 ${gate.ref.host}` : gate.reason;
+        // 日志带上实际原因（没有远端 / 不是仓库 / 没有 git），别一律写成「没有远端」。
+        const why = gate.ok ? `远端是 ${gate.ref.host}` : gate.detail;
         record("info", SCOPE, `未注入 deck 工具（${why}）：${request.config.cwd}`);
         return request;
       }
-      return injectDeckTools(request, {
-        entry: mcpEntryPath(pluginRoot()),
-        workspaceDir: request.config.cwd,
+      const entry = mcpEntryPath(pluginRoot());
+      const problem = injectionProblem({
+        entry,
+        entryPresent: existsSync(entry),
+        typescript: typescriptSupported(runtimeFeatures()),
       });
+      if (problem) {
+        record("warn", SCOPE, problem);
+        return request;
+      }
+      return injectDeckTools(request, { entry, workspaceDir: request.config.cwd });
     } catch (error) {
       // 注入失败不该拦住用户开会话：原样放行，日志里留下原因。
       record("warn", SCOPE, `注入 deck 工具失败：${error instanceof Error ? error.message : String(error)}`);

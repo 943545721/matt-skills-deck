@@ -24,16 +24,20 @@ export async function listIssuesHandler(input: ListInput): Promise<RpcOutput<typ
   const gate = await requireGithubRepo(input.workspaceDir, "任务板");
   if (!gate.ok) return gate;
 
-  const result = await listIssues(gate.ref.owner, gate.ref.name, input.limit ?? 100);
+  // 状态过滤下推到查询：只取「最近 100 条（开+关）」再本地筛 open，会在关闭票更新频繁时
+  // 把 open 视图显示成只剩几条，而 totalCount 还是全仓库的数——两个数对不上，谁都不敢信。
+  const result = await listIssues(
+    gate.ref.owner,
+    gate.ref.name,
+    input.limit ?? 100,
+    input.includeClosed ? undefined : "OPEN",
+  );
   if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail };
 
-  const visible = input.includeClosed
-    ? result.issues
-    : result.issues.filter((issue) => issue.state === "OPEN");
   return {
     ok: true,
     repo: gate.repo,
-    issues: sortIssues(visible),
+    issues: sortIssues(result.issues),
     totalCount: result.totalCount,
     fetchedAt: result.fetchedAt,
   };
@@ -51,7 +55,13 @@ export async function getIssueHandler(input: DetailInput): Promise<RpcOutput<typ
       detail: result.detail,
     };
   }
-  return { ok: true, repo: gate.repo, issue: result.issue, comments: result.comments };
+  return {
+    ok: true,
+    repo: gate.repo,
+    issue: { ...result.issue, labelCount: result.meta.labelCount },
+    comments: result.comments,
+    commentCount: result.meta.commentCount,
+  };
 }
 
 export async function commentIssueHandler(input: CommentInput): Promise<RpcOutput<typeof issuesCommentRpc>> {

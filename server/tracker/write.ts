@@ -29,11 +29,22 @@ async function runGh(args: string[], timeoutMs = 20_000): Promise<{ ok: true; st
 const positive = (value: number) => Number.isInteger(value) && value > 0;
 
 /**
+ * 能不能确定「第一次写没写进去」。
+ *
+ * gh api 被服务端拒绝时，回包里带 HTTP 状态码；超时、断连、进程被杀则没有——
+ * 那两种情况服务端可能已经把评论存下来了，此时回落 CLI 就是再发一条。
+ */
+const definitelyRejected = (failure: WriteFailure): boolean => /HTTP \d{3}/.test(failure.detail);
+
+/**
  * 发一条评论。
  *
- * 主路走 REST（`gh api POST .../comments`），失败再回落 `gh issue comment`：
+ * 主路走 REST（`gh api POST .../comments`），**确认被服务端拒绝**时才回落 `gh issue comment`：
  * 两条路都能成，差别只在回包。回落时拿不到服务端的真实时间戳，就按当前时间乐观回填，
  * 让界面立刻能看到自己的评论——而不是等一次刷新才发现写成功了。
+ *
+ * 超时/断连不回落：那种情况下评论可能已经在服务端建好了，再发一次就是重复评论。
+ * 宁可报「可能已写入，先刷新确认」，也不替用户制造一条删不掉的重复评论。
  */
 export async function postComment(owner: string, repo: string, issue: number, body: string): Promise<{ ok: true; comment: Comment } | WriteFailure> {
   if (!positive(issue)) return { ok: false, reason: "invalid", detail: "票号必须是正整数" };
@@ -53,6 +64,13 @@ export async function postComment(owner: string, repo: string, issue: number, bo
     return { ok: true, comment: parseComment(rest.stdout, body) };
   }
   if (rest.reason === "gh-missing") return rest;
+  if (!definitelyRejected(rest)) {
+    return {
+      ok: false,
+      reason: "gh-failed",
+      detail: `评论可能已经写进去了（${rest.detail.slice(0, 300)}）；先刷新确认，不要直接重发，否则会出现重复评论`,
+    };
+  }
 
   const cli = await runGh(["issue", "comment", String(issue), "--repo", `${owner}/${repo}`, "--body", body]);
   if (!cli.ok) return cli;

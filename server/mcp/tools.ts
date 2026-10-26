@@ -4,6 +4,7 @@ import { parseMapBody } from "../tracker/map-body.ts";
 import { routeFromIssues, suggestNextSteps } from "../tracker/map-route.ts";
 import { createIssue, postComment, replaceLabels } from "../tracker/write.ts";
 import { requireGithubRepo } from "../rpc/repo-gate.ts";
+import { sortIssues } from "../tracker/order.ts";
 
 /**
  * 给 Agent 用的 deck_* 工具。
@@ -45,38 +46,37 @@ function failureOf(result: { reason: string; detail: string }): ToolResult {
   return fail(result.reason, result.detail);
 }
 
-const listSchema = z.object({
+const listSchema = z.strictObject({
   state: z.enum(["open", "closed", "all"]).optional(),
   limit: z.number().int().min(1).max(100).optional(),
 });
 
-const numberSchema = z.object({ number: z.number().int().min(1) });
+const numberSchema = z.strictObject({ number: z.number().int().min(1) });
 
-const commentSchema = z.object({
+const commentSchema = z.strictObject({
   number: z.number().int().min(1),
   body: z.string().min(1).max(60_000),
 });
 
-const createSchema = z.object({
+const createSchema = z.strictObject({
   title: z.string().min(1).max(256),
   body: z.string().max(60_000).optional(),
   labels: z.array(z.string().min(1)).optional(),
   isMap: z.boolean().optional(),
 });
 
-const labelsSchema = z.object({
+const labelsSchema = z.strictObject({
   number: z.number().int().min(1),
   labels: z.array(z.string().min(1)),
 });
 
-const asInput = <T>(schema: z.ZodType<T>, args: unknown): T | { error: string } => {
-  const parsed = schema.safeParse(args ?? {});
-  if (parsed.success) return parsed.data;
-  return { error: parsed.error.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; ") };
-};
+type InputResult<T> = { ok: true; data: T } | { ok: false; error: string };
 
-const isInvalid = <T>(value: T | { error: string }): value is { error: string } =>
-  typeof value === "object" && value !== null && "error" in value;
+const asInput = <T>(schema: z.ZodType<T>, args: unknown): InputResult<T> => {
+  const parsed = schema.safeParse(args ?? {});
+  if (parsed.success) return { ok: true, data: parsed.data };
+  return { ok: false, error: parsed.error.issues.map((issue) => `${issue.path.join(".") || "input"}: ${issue.message}`).join("; ") };
+};
 
 export const MCP_SERVER_NAME = "matt-skills-deck";
 
@@ -94,18 +94,24 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     async run(args, context) {
-      const input = asInput(listSchema, args);
-      if (isInvalid(input)) return fail("invalid", input.error);
+      const inputResult = asInput(listSchema, args);
+      if (!inputResult.ok) return fail("invalid", inputResult.error);
+      const input = inputResult.data;
       const gate = await requireGithubRepo(context.workspaceDir, "issues");
       if (!gate.ok) return fail(gate.reason, gate.detail);
-      const listed = await listIssues(gate.ref.owner, gate.ref.name, input.limit ?? 100);
-      if (!listed.ok) return failureOf(listed);
       const state = input.state ?? "open";
-      const issues = state === "all" ? listed.issues : listed.issues.filter((issue) => issue.state === (state === "open" ? "OPEN" : "CLOSED"));
+      // 状态下推到查询：先取 100 条混合状态再本地过滤，会把「最近更新的都是已关闭的票」错当成
+      // 「仓库里只剩几条 open」，Agent 据此得出「没活可干」的结论。
+      const listed = await listIssues(gate.ref.owner, gate.ref.name, input.limit ?? 100, state === "all" ? undefined : state === "open" ? "OPEN" : "CLOSED");
+      if (!listed.ok) return failureOf(listed);
+      const issues = sortIssues(listed.issues);
       return ok({
         ok: true,
         repo: `${gate.ref.owner}/${gate.ref.name}`,
+        // totalCount 是「这个状态下的总数」，returned 是本次真正给到的条数。
         totalCount: listed.totalCount,
+        returned: issues.length,
+        hasMore: listed.totalCount > issues.length || listed.hasMore,
         issues: issues.map((issue) => ({
           number: issue.number,
           title: issue.title,
@@ -120,7 +126,7 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
   {
     name: "deck_issue_get",
     description:
-      "Read one issue in full: body, labels, assignees and its comments (oldest first). Call this before commenting or changing labels so you edit what actually exists.",
+      "Read one issue in full: body, labels, assignees and its comments (oldest first). Call this before commenting or changing labels so you edit what actually exists. When labelsTruncated is true the label list is incomplete: do not pass it to deck_issue_labels.",
     inputSchema: {
       type: "object",
       properties: { number: { type: "number", description: "Issue number." } },
@@ -128,8 +134,9 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     async run(args, context) {
-      const input = asInput(numberSchema, args);
-      if (isInvalid(input)) return fail("invalid", input.error);
+      const inputResult = asInput(numberSchema, args);
+      if (!inputResult.ok) return fail("invalid", inputResult.error);
+      const input = inputResult.data;
       const gate = await requireGithubRepo(context.workspaceDir, "issue");
       if (!gate.ok) return fail(gate.reason, gate.detail);
       const detail = await getIssue(gate.ref.owner, gate.ref.name, input.number);
@@ -144,10 +151,14 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
           url: detail.issue.url,
           body: detail.issue.body,
           labels: detail.issue.labels.map((label) => label.name),
+          // 标签是整体替换语义，所以「读到几个」和「一共几个」必须分开说清楚。
+          labelsTruncated: detail.meta.labelsTruncated,
           assignees: detail.issue.assignees,
           isMap: detail.issue.isMap,
         },
         comments: detail.comments,
+        commentCount: detail.meta.commentCount,
+        commentsTruncated: detail.meta.commentsTruncated,
       });
     },
   },
@@ -162,8 +173,9 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     async run(args, context) {
-      const input = asInput(numberSchema, args);
-      if (isInvalid(input)) return fail("invalid", input.error);
+      const inputResult = asInput(numberSchema, args);
+      if (!inputResult.ok) return fail("invalid", inputResult.error);
+      const input = inputResult.data;
       const gate = await requireGithubRepo(context.workspaceDir, "map");
       if (!gate.ok) return fail(gate.reason, gate.detail);
       const detail = await getIssue(gate.ref.owner, gate.ref.name, input.number);
@@ -191,8 +203,9 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     async run(args, context) {
-      const input = asInput(numberSchema, args);
-      if (isInvalid(input)) return fail("invalid", input.error);
+      const inputResult = asInput(numberSchema, args);
+      if (!inputResult.ok) return fail("invalid", inputResult.error);
+      const input = inputResult.data;
       const gate = await requireGithubRepo(context.workspaceDir, "map");
       if (!gate.ok) return fail(gate.reason, gate.detail);
       const detail = await getIssue(gate.ref.owner, gate.ref.name, input.number);
@@ -219,8 +232,9 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     async run(args, context) {
-      const input = asInput(commentSchema, args);
-      if (isInvalid(input)) return fail("invalid", input.error);
+      const inputResult = asInput(commentSchema, args);
+      if (!inputResult.ok) return fail("invalid", inputResult.error);
+      const input = inputResult.data;
       const gate = await requireGithubRepo(context.workspaceDir, "comment");
       if (!gate.ok) return fail(gate.reason, gate.detail);
       const written = await postComment(gate.ref.owner, gate.ref.name, input.number, input.body);
@@ -244,8 +258,9 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     async run(args, context) {
-      const input = asInput(createSchema, args);
-      if (isInvalid(input)) return fail("invalid", input.error);
+      const inputResult = asInput(createSchema, args);
+      if (!inputResult.ok) return fail("invalid", inputResult.error);
+      const input = inputResult.data;
       const gate = await requireGithubRepo(context.workspaceDir, "create issue");
       if (!gate.ok) return fail(gate.reason, gate.detail);
       const labels = [...(input.labels ?? [])];
@@ -268,7 +283,7 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
   {
     name: "deck_issue_labels",
     description:
-      "Replace the full label set of an issue (not a merge). Empty array clears all labels. Requires user approval.",
+      "Replace the full label set of an issue (not a merge). Empty array clears all labels. Refuses when the current label set cannot be read in full, because replacing would silently drop the labels we never saw. Requires user approval.",
     inputSchema: {
       type: "object",
       properties: {
@@ -279,10 +294,21 @@ export const MCP_TOOLS: readonly ToolDefinition[] = [
       additionalProperties: false,
     },
     async run(args, context) {
-      const input = asInput(labelsSchema, args);
-      if (isInvalid(input)) return fail("invalid", input.error);
+      const inputResult = asInput(labelsSchema, args);
+      if (!inputResult.ok) return fail("invalid", inputResult.error);
+      const input = inputResult.data;
       const gate = await requireGithubRepo(context.workspaceDir, "labels");
       if (!gate.ok) return fail(gate.reason, gate.detail);
+      // PUT 是整体替换：若连当前标签全集都读不全，这次替换必然会删掉没读到的标签。
+      // 宁可拒绝并让人去面板/GitHub 改，也不做一次「成功」的静默数据丢失。
+      const current = await getIssue(gate.ref.owner, gate.ref.name, input.number);
+      if (!current.ok) return failureOf(current);
+      if (current.meta.labelsTruncated) {
+        return fail(
+          "labels-truncated",
+          `#${input.number} 的标签太多，本次只读到 ${current.issue.labels.length} 个（共 ${current.meta.labelCount} 个）；整体替换会删掉没读到的标签，请改用面板或 GitHub 网页修改`,
+        );
+      }
       const replaced = await replaceLabels(gate.ref.owner, gate.ref.name, input.number, input.labels);
       if (!replaced.ok) return failureOf(replaced);
       return ok({ ok: true, number: input.number, labels: replaced.labels.map((label) => label.name) });

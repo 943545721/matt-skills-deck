@@ -69,26 +69,36 @@ export function pickPrimaryRemote(names: readonly string[]): string | null {
   return names[0] ?? null;
 }
 
+export type RemoteFailure = { ok: false; reason: "no-remote" | "not-a-repo" | "git-missing"; detail: string };
+
 /**
  * 读工作区的主远端地址。
  *
- * 没有 remote、不是 git 仓库、或者 git 不可用，一律返回 null：
- * 这三种情况对界面的意义相同（这个工作区暂时没有可读的票），没必要分成三种错误码。
+ * 三种失败分开报，而不是一律 null：它们对用户是三种不同的下手处（关联远端 / 换目录 / 装 git），
+ * 混成一句「这个工作区没有票」会让人往错的方向排查——尤其是「PATH 里没有 git」，
+ * 那时所有会话都静默拿不到工具，日志却说是「没有远端」。
  */
-export async function readRemoteUrl(workspaceDir: string): Promise<string | null> {
+export async function readRemoteUrl(workspaceDir: string): Promise<{ ok: true; url: string } | RemoteFailure> {
   try {
     const { stdout: listing } = await execFileAsync("git", ["-C", workspaceDir, "remote"], {
       timeout: 5_000,
       maxBuffer: 1 << 20,
     });
     const name = pickPrimaryRemote(listing.split("\n").map((line) => line.trim()).filter(Boolean));
-    if (!name) return null;
+    if (!name) return { ok: false, reason: "no-remote", detail: `这个仓库没有配置远端（origin / upstream）：${workspaceDir}` };
     const { stdout } = await execFileAsync("git", ["-C", workspaceDir, "remote", "get-url", name], {
       timeout: 5_000,
       maxBuffer: 1 << 20,
     });
-    return stdout.trim() || null;
-  } catch {
-    return null;
+    const url = stdout.trim();
+    if (!url) return { ok: false, reason: "no-remote", detail: `远端 ${name} 没有地址：${workspaceDir}` };
+    return { ok: true, url };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { ok: false, reason: "git-missing", detail: "没有找到 git 命令：装好 git 并确认它在 PATH 里" };
+    }
+    const stderr = (error as { stderr?: unknown }).stderr;
+    const detail = typeof stderr === "string" && stderr.trim() ? stderr.trim().slice(0, 300) : error instanceof Error ? error.message : String(error);
+    return { ok: false, reason: "not-a-repo", detail: `读不到 git 远端（${detail.slice(0, 200)}）` };
   }
 }

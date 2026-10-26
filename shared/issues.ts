@@ -69,8 +69,12 @@ export const issuesDetailRpc = defineRpc({
     z.object({
       ok: z.literal(true),
       repo,
-      issue: issueSummary.extend({ body: z.string() }),
+      // labelCount 是远端这张票的标签总数：大于 labels.length 说明我们只读到一部分，
+      // 界面必须禁止「整体替换」（PUT 会把没读到的标签一起删掉）。
+      issue: issueSummary.extend({ body: z.string(), labelCount: z.number().int() }),
       comments: z.array(comment),
+      /** 评论总数：大于 comments.length 说明只给了最早的 100 条。 */
+      commentCount: z.number().int(),
     }),
     failure,
   ]),

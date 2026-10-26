@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { injectDeckTools, mcpEntryPath } from "../server/hooks.ts";
+import {
+  injectDeckTools,
+  injectionProblem,
+  mcpEntryPath,
+  runtimeFeatures,
+  typescriptSupported,
+} from "../server/hooks.ts";
 import { MCP_SERVER_NAME, MCP_TOOLS, PREAPPROVED_TOOL_NAMES } from "../server/mcp/tools.ts";
 
 /** 注入器是纯函数：不碰 daemon、不碰文件，所以可以直接拿一份配置试。 */
@@ -62,4 +68,25 @@ test("注入：保留别处已有的 MCP 服务与预授权，不重复追加自
 
 test("入口路径固定在插件目录下的 server/mcp/main.ts", () => {
   assert.equal(mcpEntryPath("/plugins/deck"), "/plugins/deck/server/mcp/main.ts");
+});
+
+test("注入前置检查：Node 太老或入口缺失都要跳过，并说清是哪一个原因", () => {
+  assert.match(
+    injectionProblem({ entry: "/e/main.ts", entryPresent: true, typescript: false }) ?? "",
+    /22\.18/,
+  );
+  assert.match(
+    injectionProblem({ entry: "/e/main.ts", entryPresent: false, typescript: true }) ?? "",
+    /\/e\/main\.ts/,
+  );
+  assert.equal(injectionProblem({ entry: "/e/main.ts", entryPresent: true, typescript: true }), null);
+});
+
+test("Node 类型剥离能力判定：只认 strip / transform", () => {
+  assert.equal(typescriptSupported({ typescript: "strip" }), true);
+  assert.equal(typescriptSupported({ typescript: "transform" }), true);
+  assert.equal(typescriptSupported({}), false);
+  assert.equal(typescriptSupported(undefined), false);
+  // 本机（跑测试的这台）必须支持，否则插件自己就跑不起来。
+  assert.equal(typescriptSupported(runtimeFeatures()), true);
 });
