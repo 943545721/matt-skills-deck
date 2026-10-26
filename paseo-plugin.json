@@ -1,0 +1,9 @@
+{
+  "id": "matt-skills-deck",
+  "name": "MattSkillsDeck",
+  "description": "Matt Pocock 技能套件与 issue 任务板：27 个工程技能，加上 GitHub、GitLab 与本地 Markdown 三种后端的工作票面与地图。",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.13.0 <0.14.0"
+  }
+}
