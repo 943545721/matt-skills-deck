@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { after, test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /**
  * 真起子进程测入口，而不是只测纯函数。
@@ -83,6 +83,24 @@ test("入口：插件目录经符号链接访问时照样启动（~/.paseo 软�
   assert.equal(replies.length, 2);
   assert.equal(replies[0].result.protocolVersion, "2025-06-18");
   assert.deepEqual(replies[1], { jsonrpc: "2.0", id: 2, result: {} });
+});
+
+test("入口：判定失败时以退出码 1 退出并留下原因，不做「安静消失」", () => {
+  // 模拟「被包了一层」：argv[1] 是一个叫 main.ts 的包装文件，真正的 main.ts 是被 import 进来的。
+  // 这时判定必然失败——服务不可能起来，所以必须让人看出来：stderr 有原因，退出码非零。
+  const wrapper = path.join(sandbox("deck wrapper-"), "main.ts");
+  writeFileSync(wrapper, `await import(${JSON.stringify(pathToFileURL(entry).href)});\n`, "utf8");
+  const workspace = sandbox("deck ws-");
+
+  const result = spawnSync(process.execPath, [wrapper, "--workspace", workspace], {
+    input: "",
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+
+  assert.equal(result.stdout, "");
+  assert.equal(result.status, 1, `stderr: ${result.stderr}`);
+  assert.match(result.stderr, /入口判定失败/);
 });
 
 test("启动参数：缺 --workspace、相对路径、目录不存在都以退出码 2 报人话", () => {

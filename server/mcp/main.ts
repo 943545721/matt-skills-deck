@@ -131,4 +131,7 @@ if (isEntryPoint()) {
   // 只有在「argv 明明指着 main.ts，判定却失败」时才会到这里（例如被转译器包了一层）。
   // 打一行到 stderr，别再出现进程开着却永不响应、两边都全空的静默失败。
   process.stderr.write(`[${MCP_SERVER_NAME}] 入口判定失败：${process.argv[1]}\n`);
+  // 这个进程已经不可能提供服务了。非零退出码让客户端把「服务器异常退出」和
+  // 「服务器安静消失」区分开，日志里也好搜。
+  process.exitCode = 1;
 }
