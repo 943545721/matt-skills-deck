@@ -3,7 +3,7 @@
 把 [dsh-mattpocock-skills-deck](https://github.com/FeatherHunter/dsh-mattpocock-skills-deck) 移植成 Paseo 插件：
 27 个 Matt Pocock 工程技能，加上 GitHub 工作票面、地图与一组给 Agent 用的 `deck_*` 工具。
 
-当前状态：**功能对齐 DSH 版**（P0–P5 完成，文档收口在 P6），逐阶段证据见 `PROGRESS.md`。
+当前状态：**功能对齐 DSH 版**（P0–P6 完成；注册表发布还差截图与公开远端），逐阶段证据见 `PROGRESS.md`。
 
 ## 能做什么
 
