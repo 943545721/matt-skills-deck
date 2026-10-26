@@ -57,3 +57,5 @@
    本机没能核实具体入口（默认注册表 `https://plugins.paseo.sh` 在受限网络下打不开）。发布前应到该站点确认当前提交方式。
 4. **版本号**：`package.json` 仍是 `0.1.0`、`paseo-plugin.json` 没有版本字段（版本随包走），
    首次对外发布前定版本并打 tag，`--ref vX.Y.Z` 才有意义。
+5. **`package.json` 现在带 `"private": true`**：这是故意的，防手滑发到 npm。真要走 npm 产物时，
+   先去掉这个字段、补 `license` / `repository` 字段，再 `npm publish`。

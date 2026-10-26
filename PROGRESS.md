@@ -44,7 +44,7 @@
   `addComposerPill` 必须按 `agentId` 注册，而插件客户端拿不到 agent 列表，也没有「新会话」事件可订阅。
 - 客户端无任意网络、无 DOM → 图片走服务端 data URL，样式只用 RN + theme token。
 - 插件 API 处于实验期 → `requirements.paseo` 钉 `>=0.13.0 <0.14.0`。
-- 服务端无沙箱 → 命令白名单只放 `gh` / `glab` / `git`，路径必须落在工作区内。
+- 服务端无沙箱 → 命令白名单只放 `gh` / `git`（GitLab 的 `glab` 未接，别提前放行），路径必须落在工作区内。
 - RPC 方法名只能是小写：校验正则是 `^[a-z][a-z0-9._-]*$`，写成 `deck.issues.setLabels` 会让整个插件
   加载失败（报 `Invalid plugin RPC method`，且 `plugin reload` 也一起失败）。所以改成 `deck.issues.labels.replace`。
 - 服务端相对导入一律写 `.ts` 扩展名：测试直接用 `node --test` 跑 TypeScript（Node 自带类型剥离），
