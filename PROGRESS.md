@@ -12,7 +12,8 @@
 | P3 | 写入与动作：评论、标签配色、绑定与切换、复制提示词 | **完成** | 21 条测试全绿（含 3 条配色归一/拒绝用例）；插件 reload 后 running；写命令未联网实测（本机无 gh） |
 | P4 | 周边页：版本管理、环境检查、诊断日志、设置、双语 | **完成**：版本管理 10 条 RPC + 页面、诊断页（环境读数 + 操作日志）、日志缓冲、zh/en 双语全量切换（走 SDK `defineTranslations` + `useTranslation`，语言跟随 App；键/占位符一致性由 3 条测试兜底） | 31 条测试全绿；两端 typecheck 通过；插件 reload 后 running 且日志无错；版本管理在临时仓库实测：暂存→预检→提交成功、同票重放被拒、提交后工作区干净；无暂存/无远端/非法路径三条拦截均给出人话；`en` 表被标成 `Record<MessageKey, string>`，少一条键编译不过 |
 | P5 | 地图详情、工作路线、deck 工具 MCP 注入、像素风 | **完成**：地图页（五区块 + 工作路线 + 下一步建议，`deck.map` 一条 RPC 一次读完）；7 个 `deck_*` MCP 工具 + 协议层 + `before agent.create` 自动挂载；像素风牌面（直角 + 2px 描边 + 右下 3px 硬投影 + 等宽数字）铺满任务板 / 地图 / 票详情 / 标签栏，其余表单页用同款直角与描边的扁平变体 | 54 条测试全绿（新增 9 条地图、8 条 MCP 协议/注入用例）；地图正文解析照抄源仓库口径，含「标题粘行」「加粗决策」「字面 \\n 还原」；stdio 冒烟实测：`initialize` 回显 2025-06-18、`tools/list` 出 7 个工具、`tools/call` 走通失败分支、缺 `--workspace`/目录不存在均以退出码 2 报人话；两端 typecheck 通过，reload 后 running、日志无错 |
-| P6 | 移动端适配、注册表发布、文档收口 | **完成（代码侧）**：触屏端按钮抬到 40pt、触屏判定走 `Platform.OS`（弹窗拿不到 layout）；三处注册标题改用 `deckMessages.message`，英文界面不会再出现中文标题；README / OVERVIEW 双语重写；新增 `docs/port-diff.md`（与 DSH 逐项对照）与 `docs/publishing.md`（注册表条款，逐条来自 CLI 与 protocol 源码） | `docs/` 已进 `package.json` 的 `files`；typecheck 与 54 条测试全绿；reload 后 running、日志无错。**仍需人到场**：仓库还没有公开远端、注册表 `media` 为空（此环境截不了 UI 图）、注册表提交入口在受限网络下未能核实 |
+| P6 | 移动端适配、注册表发布、文档收口 | **完成（代码侧）**：触屏端按钮抬到 40pt、触屏判定走 `Platform.OS`（弹窗拿不到 layout）；三处注册标题改用 `deckMessages.message`，英文界面不会再出现中文标题；README / OVERVIEW 双语重写；新增 `docs/port-diff.md`（与 DSH 逐项对照）与 `docs/publishing.md`（注册表条款，逐条来自 CLI 与 protocol 源码） | `docs/` 已进 `package.json` 的 `files`；typecheck 与 54 条测试全绿（复审后增至 64 条，见下一行）；reload 后 running、日志无错。**仍需人到场**：仓库还没有公开远端、注册表 `media` 为空（此环境截不了 UI 图）、注册表提交入口在受限网络下未能核实 |
+| P5–P6 复审 | `code-reviewer` 复审 MCP 链路后按结论修的 9 处：入口判定在含空格/非 ASCII 的安装路径下会静默不启动（`file://` 拼字符串 vs 百分号编码）；`process.exit()` 砍掉大于 64KB 的回包尾巴（改为等写入回调 + `process.exitCode`）；状态过滤发生在 100 条混合状态窗口之后，导致 open 视图少票；标签/评论被静默截断却仍允许「整体替换」；工具入参多余键被静默丢弃；通知被回包、非法 id 冒充 null；注入前不检查 Node 版本与入口文件；写评论超时后回落 CLI 造成重复评论 | 64 条测试全绿（新增 10 条：入口含空格/中文路径、慢读端下 128KB 回包完整、`--workspace` 三种非法入参、严格入参、通知与非法 id、注入前置检查、写回落的两条分支）；两端 typecheck 通过；reload 后 running 且日志无错。截断与入口判定两条都先复现后修复：把旧写法临时贴回去，用例 3 只收到 65536 字节且 JSON 不合法 |
 
 ## 已定决策
 
@@ -55,4 +56,9 @@
   `{kind:"mcp",server,tool}` 会被映射成 Claude 的 `allowedTools: ["mcp__<server>__<tool>"]`（自动放行），
   因此名单里的工具必须真的存在，写错名字不会报错、只会静默变成每次都要确认。
 - 注入的 MCP 进程用 `process.execPath` 直接跑 `server/mcp/main.ts`：Node 22.18+ 默认剥离类型，
-  不必另找解释器、也不必预先编译出 `.js`。
+  不必另找解释器、也不必预先编译出 `.js`。注入前会自检 `process.features.typescript` 与入口文件是否存在，
+  不满足就跳过注入并在日志里说明原因——不挂一个每次开会话都起不来的服务。
+- MCP 服务名固定为 `matt-skills-deck`：`toolPolicy.preapproved` 按「服务名 + 工具名」映射到 Claude 的
+  `allowedTools`，所以用户不能在工作区里自建同名服务（会被插件的注入覆盖）。
+- 回包一律等 stdout 写入回调再返回，退出用 `process.exitCode`：`process.exit()` 会砍掉仍在管道里排队的字节，
+  大于 64KB 的回包（长票 + 多条长评论）会被截成半截 JSON。

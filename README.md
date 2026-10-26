@@ -75,6 +75,9 @@ templates/skills/    随包的 27 个技能（中英双语）
 ## 已知限制
 
 - 本机验证只到「编译 / 单测 / reload / 失败分支」；真实 GitHub 读写与 MCP 注入需要在有 `gh` 登录态的环境里跑一遍。
+- Agent 工具要求 daemon 跑在 Node 22.18+（插件直接用当前 Node 跑 `server/mcp/main.ts`）。版本不满足或入口文件缺失时，
+  插件会跳过注入并在 `paseo plugin logs` 里说明，不会挂一个起不来的服务。
+- MCP 服务名固定 `matt-skills-deck`（预授权名单按服务名映射），不要在工作区里自建同名服务。
 - 像素风外观没有截图验证：这个环境起不了 Paseo 桌面端窗口。
 - 插件 API 处于实验期，`requirements.paseo` 钉在 0.13.x。
 
