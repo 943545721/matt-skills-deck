@@ -1,6 +1,7 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { labelsColorsRpc, labelsListRpc } from "../../shared/labels.ts";
 import { listLabels, setLabelColors } from "../tracker/labels.ts";
+import { record } from "../logs.ts";
 import { requireGithubRepo } from "./repo-gate.ts";
 
 type ListInput = RpcInput<typeof labelsListRpc>;
@@ -20,6 +21,14 @@ export async function setLabelColorsHandler(input: ColorsInput): Promise<RpcOutp
   if (!gate.ok) return gate;
 
   const result = await setLabelColors(gate.ref.owner, gate.ref.name, input.changes);
-  if (!result.ok) return result;
+  if (!result.ok) {
+    record("error", "labels.colors", `改色失败：${result.detail.slice(0, 200)}`);
+    return result;
+  }
+  record(
+    result.failed.length ? "warn" : "info",
+    "labels.colors",
+    `改色 ${result.applied.length} 个成功、${result.failed.length} 个失败`,
+  );
   return { ok: true, applied: result.applied, failed: result.failed };
 }

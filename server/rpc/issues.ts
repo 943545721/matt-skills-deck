@@ -9,6 +9,7 @@ import type {
 import { getIssue, listIssues } from "../tracker/github.ts";
 import { sortIssues } from "../tracker/order.ts";
 import { createIssue, postComment, replaceLabels } from "../tracker/write.ts";
+import { record } from "../logs.ts";
 import { requireGithubRepo } from "./repo-gate.ts";
 
 type ListInput = RpcInput<typeof issuesListRpc>;
@@ -58,7 +59,11 @@ export async function commentIssueHandler(input: CommentInput): Promise<RpcOutpu
   if (!gate.ok) return gate;
 
   const result = await postComment(gate.ref.owner, gate.ref.name, input.number, input.body);
-  if (!result.ok) return result;
+  if (!result.ok) {
+    record("error", "issues.comment", `#${input.number} 失败：${result.detail.slice(0, 200)}`);
+    return result;
+  }
+  record("info", "issues.comment", `#${input.number} 已评论`);
   return { ok: true, comment: result.comment };
 }
 
@@ -76,7 +81,11 @@ export async function createIssueHandler(input: CreateInput): Promise<RpcOutput<
     body: input.body ?? "",
     labels,
   });
-  if (!result.ok) return result;
+  if (!result.ok) {
+    record("error", "issues.create", `新建失败：${result.detail.slice(0, 200)}`);
+    return result;
+  }
+  record(result.labelsFailed ? "warn" : "info", "issues.create", `#${result.number} 已建${result.labelsFailed ? "（标签未挂上）" : ""}`);
   return {
     ok: true,
     number: result.number,
@@ -91,6 +100,10 @@ export async function setIssueLabelsHandler(input: SetLabelsInput): Promise<RpcO
   if (!gate.ok) return gate;
 
   const result = await replaceLabels(gate.ref.owner, gate.ref.name, input.number, input.labels);
-  if (!result.ok) return result;
+  if (!result.ok) {
+    record("error", "issues.labels", `#${input.number} 改标签失败：${result.detail.slice(0, 200)}`);
+    return result;
+  }
+  record("info", "issues.labels", `#${input.number} 标签改为 ${result.labels.map((label) => label.name).join("、") || "空"}`);
   return { ok: true, labels: result.labels };
 }
