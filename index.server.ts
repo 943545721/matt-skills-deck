@@ -1,6 +1,8 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { getIssueHandler, listIssuesHandler } from "./server/rpc/issues.ts";
 import { listSkills, installSkillsHandler, readSkill } from "./server/rpc/skills.ts";
 import { readStatus } from "./server/status.ts";
+import { issuesDetailRpc, issuesListRpc } from "./shared/issues.ts";
 import { skillsInstallRpc, skillsListRpc, skillsReadRpc } from "./shared/skills.ts";
 import { statusRpc } from "./shared/status.ts";
 
@@ -15,5 +17,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(skillsListRpc, listSkills);
   server.handle(skillsInstallRpc, installSkillsHandler);
   server.handle(skillsReadRpc, readSkill);
+  server.handle(issuesListRpc, listIssuesHandler);
+  server.handle(issuesDetailRpc, getIssueHandler);
   return () => {};
 }

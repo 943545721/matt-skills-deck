@@ -71,7 +71,8 @@ export function DeckHome({ theme, layout, host }: PluginScreenProps) {
       </View>
 
       <Text style={styles.body}>
-        当前为 P1 版本：27 个中英技能已随包分发，可在工作区的「技能」页逐个查看与安装；票面与地图在 P2 接入。
+        当前为 P2 版本：27 个中英技能可查看与安装；任务板能读到工作区所在 GitHub 仓库的票面与评论（只读）。
+        写操作、地图详情与环境页在后续阶段接入。
       </Text>
     </View>
   );

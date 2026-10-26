@@ -2,6 +2,7 @@
   "name": "matt-skills-deck",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "license": "MIT",
   "description": "Matt Pocock 技能套件与 issue 任务板的 Paseo 插件",
   "files": [

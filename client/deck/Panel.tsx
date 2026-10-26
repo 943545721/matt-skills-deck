@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
 import { z } from "zod";
 import { statusRpc } from "../../shared/status";
+import { BoardView } from "./BoardView";
 import { SkillsView } from "./SkillsView";
 
 /**
@@ -115,14 +116,11 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
       </View>
 
       {state.view === "board" ? (
-        <View style={styles.card}>
-          <Text style={styles.notice}>
-            「技能」页已可用：27 个中英技能可逐个查看原文，并按工作区安装到 .claude/skills 与 .agents/skills。
-          </Text>
-          <Text style={styles.notice}>
-            票面列表、地图详情与三后端（GitHub / GitLab / 本地 Markdown）在 P2 接入。
-          </Text>
-        </View>
+        workspace ? (
+          <BoardView theme={theme} layout={layout} workspaceDir={workspace.directory} />
+        ) : (
+          <Text style={styles.notice}>工作区目录未知，暂时读不到票面。</Text>
+        )
       ) : state.view === "skills" ? (
         workspace ? (
           <SkillsView theme={theme} layout={layout} workspaceDir={workspace.directory} />
