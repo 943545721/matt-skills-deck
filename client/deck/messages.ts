@@ -213,7 +213,9 @@ export const en = {
     promptCopied: "Prompt copied",
     kind: {
       research: "research",
-      prototype: "prototype",
+      // 不能写成 `prototype`：SDK 的 flatten 把 prototype / constructor / __proto__ 当保留键，
+      // 命中就在模块加载时抛错，整个客户端面板起不来（实测报 Invalid translation key）。
+      prototypeKind: "prototype",
       grilling: "discussion",
       task: "task",
     },
@@ -468,7 +470,8 @@ export const zh: SameShape<typeof en> = {
     promptCopied: "提示词已复制",
     kind: {
       research: "研究",
-      prototype: "原型",
+      // 同 en：键名避开 SDK 的保留字（prototype / constructor / __proto__）。
+      prototypeKind: "原型",
       grilling: "讨论",
       task: "任务",
     },

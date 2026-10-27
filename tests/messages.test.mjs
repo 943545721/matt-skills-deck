@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { defineTranslations } from "@getpaseo/plugin/client";
 import { en, zh } from "../client/deck/messages.ts";
 
 /**
  * locales 的键与占位符必须一致。
  *
- * `defineTranslations` 只在插件客户端模块加载时校验，一旦不一致整块面板就白了；
- * 而那一步跑在 Paseo 里，不在测试里。所以这里复刻同一条规则，把失败前移到 CI：
- * 键少一条、占位符差一个，测试先红。
+ * `defineTranslations` 在插件客户端模块加载时校验，一旦不过整块面板就起不来（界面里只显示
+ * 「失败」和一行原因）。SDK 本身能在 Node 里 import，所以这里直接调真身，别复刻规则——
+ * 之前复刻漏了「保留键」那条，`map.kind.prototype` 一路混到线上，插件在 Paseo 里加载失败。
  */
 
 function flatten(resource, prefix = "") {
@@ -28,6 +29,10 @@ function placeholders(value) {
 
 const english = flatten(en);
 const chinese = flatten(zh);
+
+test("资源能通过 SDK 自己的校验（保留键、语言代码、键集合、占位符）", () => {
+  assert.doesNotThrow(() => defineTranslations({ resources: { en, zh } }));
+});
 
 test("中文与英文的键集合一致", () => {
   const missing = [...english.keys()].filter((key) => !chinese.has(key));

@@ -16,7 +16,7 @@ type SuggestionResult = { reason: string; prompt: string };
 
 const KIND_KEY: Record<RouteKind, DeckKey> = {
   research: "map.kind.research",
-  prototype: "map.kind.prototype",
+  prototype: "map.kind.prototypeKind",
   grilling: "map.kind.grilling",
   task: "map.kind.task",
 };
