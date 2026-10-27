@@ -42,6 +42,7 @@ export const en = {
     "no-repo": "No recognizable GitHub remote in this workspace",
     "unsupported-host": "The current remote is not GitHub",
     "gh-missing": "The gh CLI was not found",
+    "gh-unauth": "The gh CLI is not logged in to GitHub",
     "gh-failed": "GitHub rejected this operation",
     "not-found": "That issue could not be found",
     invalid: "Input was rejected before sending",
@@ -299,6 +300,8 @@ export const zh: SameShape<typeof en> = {
     "no-repo": "这个工作区没有可识别的 GitHub 远端",
     "unsupported-host": "当前远端不是 GitHub",
     "gh-missing": "没有找到 gh 命令",
+    // 和下面一条分开：请求没发出去（没登录）和远端明确拒绝，解法完全不同。
+    "gh-unauth": "gh 还没有登录 GitHub",
     "gh-failed": "GitHub 拒绝了这次操作",
     "not-found": "找不到这张票",
     invalid: "输入不合法，没有发出去",

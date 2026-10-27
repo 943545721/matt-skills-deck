@@ -18,13 +18,7 @@ export async function mapHandler(input: MapInput): Promise<RpcOutput<typeof mapR
   if (!gate.ok) return gate;
 
   const detail = await getIssue(gate.ref.owner, gate.ref.name, input.number);
-  if (!detail.ok) {
-    return {
-      ok: false,
-      reason: detail.reason === "gh-missing" ? "gh-missing" : detail.reason === "not-found" ? "not-found" : "gh-failed",
-      detail: detail.detail,
-    };
-  }
+  if (!detail.ok) return { ok: false, reason: detail.reason, detail: detail.detail };
 
   const board = await listIssues(gate.ref.owner, gate.ref.name, 100);
   if (!board.ok) return { ok: false, reason: board.reason, detail: board.detail };

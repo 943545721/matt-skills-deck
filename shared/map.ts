@@ -48,7 +48,7 @@ const suggestion = z.object({
 
 const failure = z.object({
   ok: z.literal(false),
-  reason: z.enum(["no-repo", "unsupported-host", "gh-missing", "gh-failed", "not-found", "invalid"]),
+  reason: z.enum(["no-repo", "unsupported-host", "gh-missing", "gh-unauth", "gh-failed", "not-found", "invalid"]),
   detail: z.string(),
 });
 

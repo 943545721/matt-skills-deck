@@ -37,6 +37,8 @@ const failure = z.object({
     "no-repo",
     "unsupported-host",
     "gh-missing",
+    /** 装了 gh 但没有登录态：请求根本没到 GitHub，不能跟「远端拒绝」混成一句话。 */
+    "gh-unauth",
     "gh-failed",
     "not-found",
     "invalid",
@@ -44,6 +46,12 @@ const failure = z.object({
     "labels-truncated",
   ]),
   detail: z.string(),
+  /**
+   * 已经解析出来的仓库。失败时也带上：界面顶栏靠它显示「owner/name」，
+   * 只因为读列表失败就退回「未关联仓库」，会让用户以为远端没认出来。
+   * 远端本身就没解析出来（no-repo / unsupported-host）时没有这个字段。
+   */
+  repo: repo.optional(),
 });
 
 export const issuesListRpc = defineRpc({

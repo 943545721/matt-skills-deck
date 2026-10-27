@@ -1,8 +1,9 @@
 import { getIssue } from "./github.ts";
+import type { GhFailureReason } from "./gh-error.ts";
 
 export type LabelGuardResult =
   | { ok: true }
-  | { ok: false; reason: "labels-truncated" | "not-found" | "gh-missing" | "gh-failed"; detail: string };
+  | { ok: false; reason: "labels-truncated" | "not-found" | GhFailureReason; detail: string };
 
 /**
  * 「整体替换标签」之前的不变量：这张票的现有标签必须读得全。

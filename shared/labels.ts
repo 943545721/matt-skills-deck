@@ -12,7 +12,7 @@ const labelInfo = z.object({
 
 const failure = z.object({
   ok: z.literal(false),
-  reason: z.enum(["no-repo", "unsupported-host", "gh-missing", "gh-failed", "invalid"]),
+  reason: z.enum(["no-repo", "unsupported-host", "gh-missing", "gh-unauth", "gh-failed", "invalid"]),
   detail: z.string(),
 });
 

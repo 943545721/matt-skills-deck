@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { classifyGhError, type GhFailureReason } from "./gh-error.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -15,27 +16,14 @@ export interface LabelColorChange {
   color: string;
 }
 
-type LabelFailure = { ok: false; reason: "gh-missing" | "gh-failed" | "invalid"; detail: string };
+type LabelFailure = { ok: false; reason: GhFailureReason | "invalid"; detail: string };
 
 async function runGh(args: string[], timeoutMs = 20_000): Promise<{ ok: true; stdout: string } | LabelFailure> {
   try {
     const { stdout } = await execFileAsync("gh", args, { timeout: timeoutMs, maxBuffer: 16 << 20 });
     return { ok: true, stdout };
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return { ok: false, reason: "gh-missing", detail: "没有找到 gh 命令：装好后执行 gh auth login 再试" };
-    }
-    const stderr = (error as { stderr?: unknown }).stderr;
-    return {
-      ok: false,
-      reason: "gh-failed",
-      detail: typeof stderr === "string" && stderr.trim()
-        ? stderr.trim().slice(0, 800)
-        : error instanceof Error
-          ? error.message
-          : String(error),
-    };
+    return { ok: false, ...classifyGhError(error, "试") };
   }
 }
 
@@ -107,7 +95,8 @@ export async function setLabelColors(
       `color=${color}`,
     ]);
     if (!result.ok) {
-      if (result.reason === "gh-missing") return result;
+      // 没装 / 没登录是整条链路的问题，不必逐个标签重试。
+      if (result.reason === "gh-missing" || result.reason === "gh-unauth") return result;
       failed.push({ name, detail: result.detail });
       continue;
     }

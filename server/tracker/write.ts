@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { classifyGhError, type GhFailureReason } from "./gh-error.ts";
 
 const execFileAsync = promisify(execFile);
 
-export type WriteFailure = { ok: false; reason: "gh-missing" | "gh-failed" | "invalid"; detail: string };
+export type WriteFailure = { ok: false; reason: GhFailureReason | "invalid"; detail: string };
 
 export interface Comment {
   author: string;
@@ -16,13 +17,7 @@ async function runGh(args: string[], timeoutMs = 20_000): Promise<{ ok: true; st
     const { stdout } = await execFileAsync("gh", args, { timeout: timeoutMs, maxBuffer: 8 << 20 });
     return { ok: true, stdout };
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return { ok: false, reason: "gh-missing", detail: "没有找到 gh 命令：装好后执行 gh auth login 再试" };
-    }
-    const stderr = (error as { stderr?: unknown }).stderr;
-    const detail = typeof stderr === "string" && stderr.trim() ? stderr.trim().slice(0, 800) : error instanceof Error ? error.message : String(error);
-    return { ok: false, reason: "gh-failed", detail };
+    return { ok: false, ...classifyGhError(error, "试") };
   }
 }
 
@@ -64,7 +59,8 @@ export async function postComment(owner: string, repo: string, issue: number, bo
   if (rest.ok) {
     return { ok: true, comment: parseComment(rest.stdout, body) };
   }
-  if (rest.reason === "gh-missing") return rest;
+  // 没装 / 没登录都意味着请求根本没发出去，不存在「可能已写入」，别拿重复评论的风险吓人。
+  if (rest.reason === "gh-missing" || rest.reason === "gh-unauth") return rest;
   if (!definitelyRejected(rest)) {
     return {
       ok: false,

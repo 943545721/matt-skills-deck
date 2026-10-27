@@ -39,6 +39,20 @@ test("改标签：非法票号在本地就拒绝", async () => {
   assert.equal(result.reason, "invalid");
 });
 
+test("评论：没登录时请求根本没发出去，报 gh-unauth 且不回落 CLI", async () => {
+  const gh = fakeGh('echo "To get started with GitHub CLI, please run:  gh auth login" >&2\nexit 4');
+  try {
+    const result = await postComment("acme", "deck", 7, "一条评论");
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "gh-unauth");
+    // 不能落进「可能已经写进去了」那段：命令被 gh 在本地拦下，云端不会有重复评论。
+    assert.doesNotMatch(result.detail, /可能已经写进/);
+    assert.deepEqual(gh.calls(), ["api"]);
+  } finally {
+    gh.restore();
+  }
+});
+
 test("评论：REST 失败但拿不到 HTTP 状态码时不再回落 CLI，避免写出重复评论", async () => {
   const gh = fakeGh('echo "error connecting to api.github.com" >&2\nexit 1');
   try {

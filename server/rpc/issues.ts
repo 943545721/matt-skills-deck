@@ -33,7 +33,8 @@ export async function listIssuesHandler(input: ListInput): Promise<RpcOutput<typ
     input.limit ?? 100,
     input.includeClosed ? undefined : "OPEN",
   );
-  if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail };
+  // 失败也带上仓库：顶栏据此显示 owner/name，只有远端没解析出来时才退回「未关联仓库」。
+  if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail, repo: gate.repo };
 
   return {
     ok: true,
@@ -49,13 +50,7 @@ export async function getIssueHandler(input: DetailInput): Promise<RpcOutput<typ
   if (!gate.ok) return gate;
 
   const result = await getIssue(gate.ref.owner, gate.ref.name, input.number);
-  if (!result.ok) {
-    return {
-      ok: false,
-      reason: result.reason === "gh-missing" ? "gh-missing" : result.reason === "not-found" ? "not-found" : "gh-failed",
-      detail: result.detail,
-    };
-  }
+  if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail, repo: gate.repo };
   return {
     ok: true,
     repo: gate.repo,

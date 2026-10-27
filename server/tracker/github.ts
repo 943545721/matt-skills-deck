@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { classifyGhError, type GhFailureReason } from "./gh-error.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -149,7 +150,7 @@ export function mapCommentNodes(nodes: readonly RawCommentNode[] | undefined): I
 
 export type IssueDetailResult =
   | { ok: true; issue: Issue & { body: string }; comments: IssueComment[]; meta: IssueDetailMeta }
-  | { ok: false; reason: "not-found" | "gh-missing" | "gh-failed"; detail: string };
+  | { ok: false; reason: "not-found" | GhFailureReason; detail: string };
 
 /**
  * 读单张票的正文与评论。
@@ -214,17 +215,13 @@ export async function getIssue(owner: string, name: string, number: number): Pro
       },
     };
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return { ok: false, reason: "gh-missing", detail: "没有找到 gh 命令：装好后执行 gh auth login 再刷新" };
-    }
-    return { ok: false, reason: "gh-failed", detail: error instanceof Error ? error.message : String(error) };
+    return { ok: false, ...classifyGhError(error, "刷新") };
   }
 }
 
 export type ListIssuesResult =
   | { ok: true; issues: Issue[]; totalCount: number; hasMore: boolean; fetchedAt: string }
-  | { ok: false; reason: "gh-missing" | "gh-failed"; detail: string };
+  | { ok: false; reason: GhFailureReason; detail: string };
 
 /**
  * 用 gh 命令读仓库的 issue 列表。
@@ -269,10 +266,6 @@ export async function listIssues(
       fetchedAt: new Date().toISOString(),
     };
   } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      return { ok: false, reason: "gh-missing", detail: "没有找到 gh 命令：装好后执行 gh auth login 再刷新" };
-    }
-    return { ok: false, reason: "gh-failed", detail: error instanceof Error ? error.message : String(error) };
+    return { ok: false, ...classifyGhError(error, "刷新") };
   }
 }

@@ -46,6 +46,7 @@ export const FAILURE_KEYS: Record<string, DeckKey> = {
   "no-repo": "failure.no-repo",
   "unsupported-host": "failure.unsupported-host",
   "gh-missing": "failure.gh-missing",
+  "gh-unauth": "failure.gh-unauth",
   "gh-failed": "failure.gh-failed",
   "not-found": "failure.not-found",
   invalid: "failure.invalid",

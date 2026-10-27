@@ -78,7 +78,10 @@ export function BoardView({
     [theme, skin],
   );
 
-  const header = list.data?.ok ? `${list.data.repo.owner}/${list.data.repo.name}` : null;
+  // 失败时也显示仓库名：能读列表失败，说明远端已经解析出来了（RPC 会把它带回来）。
+  // 只有远端本身没认出来（no-repo / unsupported-host）才退回「未关联仓库」。
+  const repo = list.data?.ok ? list.data.repo : list.data?.repo;
+  const header = repo ? `${repo.owner}/${repo.name}` : null;
   const failure = list.data && !list.data.ok ? list.data : null;
   const issues = list.data?.ok ? list.data.issues : [];
 
