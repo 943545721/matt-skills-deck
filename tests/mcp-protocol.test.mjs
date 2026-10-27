@@ -108,12 +108,16 @@ test("工具入参：多给的键被拒绝，而不是静默丢弃后当成「�
   assert.match(payload.detail, /label/);
 });
 
-test("工具调用：工作区没有 git 远端时回 no-repo", async () => {
+test("工具调用：工作区没有 git 远端时退回本地后端，给空板而不是 no-repo", async () => {
   const response = await handleMessage(
     JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "deck_issues_list", arguments: {} } }),
     { workspaceDir: "/nonexistent-deck-workspace" },
   );
   const payload = JSON.parse(response.result.content[0].text);
-  assert.equal(payload.reason, "no-repo");
-  assert.equal(response.result.isError, true);
+  // 没有远端不等于「没活可干」：本地后端仍然可读，只是板子为空。
+  assert.equal(payload.ok, true);
+  assert.equal(payload.source, "local");
+  assert.equal(payload.totalCount, 0);
+  assert.deepEqual(payload.issues, []);
+  assert.equal(response.result.isError, undefined);
 });

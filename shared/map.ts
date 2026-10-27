@@ -14,6 +14,23 @@ const routeItem = z.object({
   title: z.string(),
   state: z.enum(["OPEN", "CLOSED"]),
   kind: z.enum(["research", "prototype", "grilling", "task"]),
+  readiness: z.enum(["ready", "claimed", "blocked", "closed"]),
+  blockedBy: z.array(z.number().int()),
+});
+
+/** 四个分组永远都在，空数组表示这一组确实没有票。 */
+const routeGroup = z.object({
+  readiness: z.enum(["ready", "claimed", "blocked", "closed"]),
+  numbers: z.array(z.number().int()),
+});
+
+/** 层级由路线内部的阻塞边推导；closed / open 是这一层的进度。 */
+const routeLevel = z.object({
+  level: z.number().int().min(1),
+  numbers: z.array(z.number().int()),
+  total: z.number().int(),
+  closed: z.number().int(),
+  open: z.number().int(),
 });
 
 const decision = z.object({
@@ -48,7 +65,19 @@ const suggestion = z.object({
 
 const failure = z.object({
   ok: z.literal(false),
-  reason: z.enum(["no-repo", "unsupported-host", "gh-missing", "gh-unauth", "gh-failed", "not-found", "invalid"]),
+  reason: z.enum([
+    "no-repo",
+    "unsupported-host",
+    "gh-missing",
+    "gh-unauth",
+    "gh-failed",
+    "not-found",
+    "invalid",
+    "local-failed",
+    "glab-missing",
+    "glab-unauth",
+    "glab-failed",
+  ]),
   detail: z.string(),
 });
 
@@ -70,6 +99,8 @@ export const mapRpc = defineRpc({
       }),
       map: mapBody,
       route: z.array(routeItem),
+      groups: z.array(routeGroup),
+      levels: z.array(routeLevel),
       suggestions: z.array(suggestion),
     }),
     failure,

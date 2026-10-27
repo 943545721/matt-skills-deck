@@ -51,4 +51,8 @@ export const FAILURE_KEYS: Record<string, DeckKey> = {
   "not-found": "failure.not-found",
   invalid: "failure.invalid",
   "labels-truncated": "failure.labels-truncated",
+  "local-failed": "failure.local-failed",
+  "glab-missing": "failure.glab-missing",
+  "glab-unauth": "failure.glab-unauth",
+  "glab-failed": "failure.glab-failed",
 };

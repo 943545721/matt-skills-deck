@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeBody, parseDecisionLine, parseMapBody, truncateGist } from "../server/tracker/map-body.ts";
-import { routeFromIssues, routeKindOf, suggestNextSteps } from "../server/tracker/map-route.ts";
+import { groupRoute, routeFromIssues, routeKindOf, routeLevels, suggestNextSteps } from "../server/tracker/map-route.ts";
 
 const MAP_BODY = `<!-- wayfinder map -->
 ## Destination
@@ -83,7 +83,7 @@ test("决策那句话：超长时退到完整词再补省略号", () => {
   assert.ok(Array.from(out).length <= 241);
 });
 
-const issue = (number, names, state = "OPEN") => ({
+const issue = (number, names, state = "OPEN", extra = {}) => ({
   number,
   title: `票 ${number}`,
   state,
@@ -92,6 +92,7 @@ const issue = (number, names, state = "OPEN") => ({
   labels: names.map((name) => ({ name, color: "cccccc" })),
   assignees: [],
   isMap: names.includes("wayfinder:map"),
+  ...extra,
 });
 
 test("路线：只收 wayfinder 子类型，剔除地图票自己，开着的排前面", () => {
@@ -137,4 +138,65 @@ test("建议：路线全关掉时说明「都完成了」，没有路线票时�
 
   const empty = suggestNextSteps({ map: parseMapBody("## Destination\n\n目标明确"), route: [] });
   assert.deepEqual(empty.map((item) => item.code), ["no-route"]);
+});
+
+test("子票分组：四个桶恒在，口径与任务板同一份 readiness", () => {
+  const route = routeFromIssues([
+    issue(1, ["wayfinder:task"]),
+    issue(2, ["wayfinder:task"], "OPEN", { assignees: ["me"] }),
+    issue(3, ["wayfinder:task"], "OPEN", {
+      blockedBy: [{ number: 1, title: "前置", state: "OPEN", kind: "issue" }],
+    }),
+    issue(4, ["wayfinder:task"], "CLOSED"),
+  ]);
+  const groups = groupRoute(route);
+  assert.deepEqual(
+    groups.map((group) => [group.readiness, group.numbers]),
+    [
+      ["ready", [1]],
+      ["claimed", [2]],
+      ["blocked", [3]],
+      ["closed", [4]],
+    ],
+  );
+  assert.deepEqual(groupRoute([]).map((group) => group.readiness), ["ready", "claimed", "blocked", "closed"]);
+});
+
+test("层级：按路线内部的阻塞边分层，层进度同时给总数与关闭数", () => {
+  const route = routeFromIssues([
+    issue(1, ["wayfinder:task"]),
+    issue(2, ["wayfinder:task"], "OPEN", {
+      blockedBy: [{ number: 1, title: "前置", state: "OPEN", kind: "issue" }],
+    }),
+    issue(3, ["wayfinder:task"], "OPEN", {
+      blockedBy: [{ number: 2, title: "前置", state: "OPEN", kind: "issue" }],
+    }),
+    // 地图外的前置不该把票推深：999 不在路线里，按第 1 层算。
+    issue(4, ["wayfinder:research"], "OPEN", {
+      blockedBy: [{ number: 999, title: "外部", state: "OPEN", kind: "issue" }],
+    }),
+    issue(5, ["wayfinder:task"], "CLOSED"),
+  ]);
+  assert.deepEqual(
+    routeLevels(route).map((level) => [level.level, level.numbers, level.total, level.closed, level.open]),
+    [
+      [1, [1, 4, 5], 3, 1, 2],
+      [2, [2], 1, 0, 1],
+      [3, [3], 1, 0, 1],
+    ],
+  );
+});
+
+test("层级：互相阻塞的数据成环时不死循环，给同一层", () => {
+  const route = routeFromIssues([
+    issue(1, ["wayfinder:task"], "OPEN", {
+      blockedBy: [{ number: 2, title: "前置", state: "OPEN", kind: "issue" }],
+    }),
+    issue(2, ["wayfinder:task"], "OPEN", {
+      blockedBy: [{ number: 1, title: "前置", state: "OPEN", kind: "issue" }],
+    }),
+  ]);
+  const levels = routeLevels(route);
+  assert.equal(levels.length, 1);
+  assert.deepEqual(levels[0].numbers, [1, 2]);
 });

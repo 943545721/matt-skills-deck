@@ -21,3 +21,15 @@ export const logsRpc = defineRpc({
     ),
   }),
 });
+
+/**
+ * 清空日志。
+ *
+ * 清空是不可撤销的，但影响面只有这份内存缓冲：误点之后下一次操作会重新积累记录，
+ * 所以不做二次确认弹窗——那只会让「刚清完想再看一眼」多一步。
+ */
+export const logsClearRpc = defineRpc({
+  name: "deck.logs.clear",
+  input: z.object({}),
+  output: z.object({ cleared: z.number().int() }),
+});

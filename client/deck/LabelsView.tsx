@@ -1,6 +1,6 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
-import { FlatList, TextInput, useToast } from "@getpaseo/plugin/client/ui";
+import { copyText, FlatList, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -59,9 +59,13 @@ export function LabelsView({
       void queryClient.invalidateQueries({ queryKey: ["deck", "issues", workspaceDir] });
       const summary = [
         result.applied.length ? t("labels.done", { applied: result.applied.length }) : "",
+        result.verified.length ? t("labels.verified", { n: result.verified.length }) : "",
         result.failed.length ? t("labels.failedCount", { n: result.failed.length }) : "",
+        result.mismatched.length ? t("labels.mismatched", { n: result.mismatched.length }) : "",
+        result.readbackFailed ? t("labels.readbackFailed") : "",
       ].filter(Boolean).join(" · ");
-      toast.show(summary || t("labels.nothing"), { variant: result.failed.length ? "warning" : "success" });
+      const troubled = result.failed.length + result.mismatched.length > 0 || result.readbackFailed;
+      toast.show(summary || t("labels.nothing"), { variant: troubled ? "warning" : "success" });
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
   });
@@ -69,6 +73,21 @@ export function LabelsView({
   const labels = list.data?.ok ? list.data.labels : [];
   const failure = list.data && !list.data.ok ? list.data : null;
   const pending = dirtyColor(edits, labels);
+
+  /**
+   * 配色提示词：只给现状与要求，不预设答案。
+   *
+   * 颜色由模型按整体协调性提，但「不直接改」写死在提示词里——否则一次复制粘贴
+   * 就可能让 Agent 在没有复核的情况下批量 PATCH 几十个标签。
+   */
+  const copyPalette = () => {
+    const listing = labels
+      .map((label) => `- ${label.name}: #${label.color || "??????"}${label.description ? ` — ${label.description}` : ""}`)
+      .join("\n");
+    void copyText(t("labels.palettePrompt", { labels: listing }))
+      .then(() => toast.show(t("labels.paletteCopied"), { variant: "success" }))
+      .catch(() => toast.error(t("common.copyFailed")));
+  };
 
   const styles = useMemo(
     () => ({
@@ -114,6 +133,14 @@ export function LabelsView({
     <View style={styles.screen}>
       <View style={styles.toolbar}>
         <Text style={styles.hint}>{labels.length ? t("labels.count", { n: labels.length }) : ""}</Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("labels.copyPalette")}
+          style={[styles.action, { marginLeft: 8 }]}
+          onPress={copyPalette}
+        >
+          <Text style={styles.actionText}>{t("labels.copyPalette")}</Text>
+        </Pressable>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={t("labels.save")}

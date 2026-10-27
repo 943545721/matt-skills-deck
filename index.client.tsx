@@ -2,8 +2,9 @@ import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plug
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { DeckHome } from "./client/deck/Home";
 import { DeckPanel } from "./client/deck/Panel";
+import { DeckSettingsScreen } from "./client/deck/SettingsView";
 import { deckMessages } from "./client/deck/i18n";
-import { DECK_PANEL_ID, DECK_SCREEN_ID, DECK_SIDEBAR_ID } from "./client/deck/ids";
+import { DECK_PANEL_ID, DECK_SCREEN_ID, DECK_SETTINGS_ID, DECK_SIDEBAR_ID } from "./client/deck/ids";
 
 /**
  * 客户端入口：只注册「面」，不放实现。
@@ -19,6 +20,7 @@ import { DECK_PANEL_ID, DECK_SCREEN_ID, DECK_SIDEBAR_ID } from "./client/deck/id
  * 由它在渲染时按 App 语言解析，所以英文界面里的标签页标题不会突然变成中文。
  */
 const BOARD_TITLE = deckMessages.message("tabs.board");
+const SETTINGS_TITLE = deckMessages.message("settings.title");
 function DeckSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
   return (
     <SidebarRow
@@ -38,6 +40,12 @@ export default function contribute(client: PluginClientContext) {
     Component: DeckPanel,
   });
   client.addScreen({ id: DECK_SCREEN_ID, title: BOARD_TITLE, Component: DeckHome });
+  client.addSettingsScreen({
+    id: DECK_SETTINGS_ID,
+    title: SETTINGS_TITLE,
+    icon: "Settings",
+    Component: DeckSettingsScreen,
+  });
   client.addSidebarHeaderItem({ id: DECK_SIDEBAR_ID, title: BOARD_TITLE, Component: DeckSidebarItem });
   return () => {};
 }

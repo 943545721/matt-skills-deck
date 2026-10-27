@@ -5,6 +5,7 @@ import {
   injectionProblem,
   mcpEntryPath,
   runtimeFeatures,
+  shouldInjectDeckTools,
   typescriptSupported,
 } from "../server/hooks.ts";
 import { MCP_SERVER_NAME, MCP_TOOLS, PREAPPROVED_TOOL_NAMES } from "../server/mcp/tools.ts";
@@ -40,7 +41,15 @@ test("注入：只把只读工具放进 preapproved，写工具一个都不放",
   );
   assert.ok(preapproved.every((ref) => ref.kind === "mcp" && ref.server === MCP_SERVER_NAME));
 
-  const writeTools = ["deck_issue_comment", "deck_issue_create", "deck_issue_labels"];
+  const writeTools = [
+    "deck_issue_comment",
+    "deck_issue_create",
+    "deck_issue_labels",
+    "deck_issue_patch",
+    "deck_issue_report",
+    "deck_map_link",
+    "deck_map_plan_create",
+  ];
   for (const tool of writeTools) {
     assert.ok(!preapproved.some((ref) => ref.tool === tool), `${tool} 不该被预授权`);
   }
@@ -64,6 +73,17 @@ test("注入：保留别处已有的 MCP 服务与预授权，不重复追加自
   assert.deepEqual(Object.keys(twice.config.mcpServers).sort(), [MCP_SERVER_NAME, "other"].sort());
   assert.equal(twice.config.mcpServers.other.command, "other-mcp");
   assert.equal(twice.config.toolPolicy.preapproved.length, 1 + PREAPPROVED_TOOL_NAMES.length);
+});
+
+test("注入判定：GitHub / GitLab 远端一定注入；本地后端只在已有 .deck/ 或用户明确选 local 时注入", () => {
+  const github = { ok: true, kind: "github", ref: { host: "github" }, repo: {} };
+  const gitlab = { ok: true, kind: "gitlab", ref: { host: "gitlab" }, repo: {} };
+  const local = { ok: true, kind: "local", workspaceDir: "/work/deck", repo: {} };
+  assert.equal(shouldInjectDeckTools(github, false), true);
+  assert.equal(shouldInjectDeckTools(gitlab, false), true);
+  assert.equal(shouldInjectDeckTools(local, false), false);
+  assert.equal(shouldInjectDeckTools(local, true), true);
+  assert.equal(shouldInjectDeckTools({ ok: false, reason: "no-repo", detail: "x" }, true), false);
 });
 
 test("入口路径固定在插件目录下的 server/mcp/main.ts", () => {

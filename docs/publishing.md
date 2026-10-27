@@ -61,7 +61,7 @@
   （`1 record(s) match their pinned artifacts`）。
 - **包元数据**：补了 `repository` / `homepage` / `bugs` / `keywords` / `engines`，`files` 带上 `assets/`。
 - **图标**：`assets/icon.png`（512×512 像素风），清单里以 `icon` 引用；`media` 仍为空数组。
-- **CI**：`.github/workflows/ci.yml` 在 Node 22 上跑 `npm ci` + 两套 typecheck + 71 条测试。
+- **CI**：`.github/workflows/ci.yml` 在 Node 22 上跑 `npm ci` + 两套 typecheck + 全部 `node --test` 用例（当前 147 条）。
 
 还差的，需要人到场处理：
 

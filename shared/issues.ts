@@ -4,24 +4,55 @@ import { z } from "zod";
 const workspaceDirSchema = z.string().min(1);
 
 const repo = z.object({
-  host: z.enum(["github", "gitlab", "other"]),
+  host: z.enum(["github", "gitlab", "local", "other"]),
   owner: z.string(),
   name: z.string(),
-  /** 只在能推断出来时给：GitHub 是 https://github.com/owner/name。 */
+  /** 只在能推断出来时给：GitHub 是 https://github.com/owner/name，本地后端为 null。 */
   webUrl: z.string().nullable(),
 });
 
 const label = z.object({ name: z.string(), color: z.string() });
 
+/** issue 与 pull request 在 GitHub 上共用编号空间，但它们是两张不同的票。 */
+const itemKind = z.enum(["issue", "pull-request"]);
+const itemState = z.enum(["OPEN", "CLOSED"]);
+
+/**
+ * 阻塞引用。
+ *
+ * 只收编号、标题、状态：界面要能说「被 #12 阻塞」并让人点过去，
+ * 不需要把阻塞者的整份正文再取一遍（那是详情页的事）。
+ */
+const blocker = z.object({
+  number: z.number().int(),
+  title: z.string(),
+  state: itemState,
+  kind: itemKind,
+});
+
+/**
+ * 一票的处置状态，由服务端按同一口径算好再下发。
+ *
+ * 客户端不重算：面板、MCP、地图页三处都读这一个字段，
+ * 否则「可接」在三个地方可能给出不同答案。
+ */
+const readiness = z.enum(["ready", "claimed", "blocked", "closed"]);
+
 const issueSummary = z.object({
   number: z.number().int(),
   title: z.string(),
-  state: z.enum(["OPEN", "CLOSED"]),
+  state: itemState,
   url: z.string(),
   updatedAt: z.string(),
+  createdAt: z.string(),
   labels: z.array(label),
   assignees: z.array(z.string()),
   isMap: z.boolean(),
+  kind: itemKind,
+  /** PR 专用：合并后 state 仍是 CLOSED，靠这一位区分「关了」和「合了」。 */
+  merged: z.boolean(),
+  blockedBy: z.array(blocker),
+  readiness,
 });
 
 /**
@@ -44,6 +75,13 @@ const failure = z.object({
     "invalid",
     /** 现有标签读不全：整体替换会删掉没读到的标签，所以拒绝。 */
     "labels-truncated",
+    /** 本地后端写文件失败（权限、磁盘、非法的票号路径）。 */
+    "local-failed",
+    /** 装了 glab 但没有登录态。 */
+    "glab-missing",
+    "glab-unauth",
+    /** glab 请求本身失败（非登录问题）。 */
+    "glab-failed",
   ]),
   detail: z.string(),
   /**
@@ -54,12 +92,39 @@ const failure = z.object({
   repo: repo.optional(),
 });
 
+const listView = z.enum(["all", "open", "closed", "ready", "blocked", "merged"]);
+const sortKey = z.enum(["updated", "created", "number", "title"]);
+
+/**
+ * 计数块。
+ *
+ * 它描述的是「本次读到的窗口」（默认最多各 100 条），不是全仓统计——
+ * 界面上必须把窗口一起说清楚，否则用户会拿一个局部数字做全仓判断。
+ */
+const counts = z.object({
+  total: z.number().int(),
+  open: z.number().int(),
+  closed: z.number().int(),
+  ready: z.number().int(),
+  claimed: z.number().int(),
+  blocked: z.number().int(),
+  merged: z.number().int(),
+  issues: z.number().int(),
+  pullRequests: z.number().int(),
+});
+
 export const issuesListRpc = defineRpc({
   name: "deck.issues.list",
   input: z.object({
     workspaceDir: workspaceDirSchema,
+    /** 兼容旧入口：等价于 view=open / all。 */
     includeClosed: z.boolean().optional(),
     limit: z.number().int().min(1).max(100).optional(),
+    view: listView.optional(),
+    /** 只看某一种票：任务列表页签给 issue，拉取请求页签给 pull-request。 */
+    kind: itemKind.optional(),
+    label: z.string().min(1).optional(),
+    sort: sortKey.optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({
@@ -68,6 +133,18 @@ export const issuesListRpc = defineRpc({
       issues: z.array(issueSummary),
       totalCount: z.number().int(),
       fetchedAt: z.string(),
+      /** 远端还有更多票没取：界面要提示「这是最近 N 条」。 */
+      hasMore: z.boolean(),
+      counts,
+      /** GraphQL 被限流时回退 REST；界面据此提示「本页缺阻塞关系」。 */
+      source: z.enum(["graphql", "rest", "local", "gitlab"]),
+      rateLimit: z
+        .object({
+          limit: z.number().int(),
+          remaining: z.number().int(),
+          resetAt: z.string(),
+        })
+        .nullable(),
     }),
     failure,
   ]),
@@ -81,7 +158,12 @@ const comment = z.object({
 
 export const issuesDetailRpc = defineRpc({
   name: "deck.issues.detail",
-  input: z.object({ workspaceDir: workspaceDirSchema, number: z.number().int().min(1) }),
+  input: z.object({
+    workspaceDir: workspaceDirSchema,
+    number: z.number().int().min(1),
+    /** 不传按 issue 处理；拉取请求页签传 pull-request。编号空间共用，不能靠猜。 */
+    kind: itemKind.optional(),
+  }),
   output: z.discriminatedUnion("ok", [
     z.object({
       ok: z.literal(true),
@@ -110,6 +192,8 @@ export const issuesCommentRpc = defineRpc({
     workspaceDir: workspaceDirSchema,
     number: z.number().int().min(1),
     body: z.string().min(1).max(60_000),
+    /** PR 的评论在 DSH 里是只读的；传 pull-request 会被明确拒绝，而不是悄悄写到同号 issue。 */
+    kind: itemKind.optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), comment }),
@@ -147,9 +231,45 @@ export const issuesSetLabelsRpc = defineRpc({
     number: z.number().int().min(1),
     /** 整体替换语义：这里就是「这张票应该有的标签全集」。 */
     labels: z.array(z.string().min(1)),
+    kind: itemKind.optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), labels: z.array(label) }),
     failure,
   ]),
 });
+
+/** 接管 / 放手：把自己加进（或移出）指派人。 */
+export const issuesAssignRpc = defineRpc({
+  name: "deck.issues.assign",
+  input: z.object({
+    workspaceDir: workspaceDirSchema,
+    number: z.number().int().min(1),
+    take: z.boolean(),
+  }),
+  output: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true), login: z.string(), assignees: z.array(z.string()) }),
+    failure,
+  ]),
+});
+
+/** 关闭 / 重开：源仓库的「完成」动作在 Paseo 里落成一次真实的状态写。 */
+export const issuesStateRpc = defineRpc({
+  name: "deck.issues.state",
+  input: z.object({
+    workspaceDir: workspaceDirSchema,
+    number: z.number().int().min(1),
+    state: z.enum(["open", "closed"]),
+  }),
+  output: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true), state: itemState }),
+    failure,
+  ]),
+});
+
+export type IssueSummary = z.infer<typeof issueSummary>;
+export type BlockerRef = z.infer<typeof blocker>;
+export type Readiness = z.infer<typeof readiness>;
+export type ListView = z.infer<typeof listView>;
+export type SortKey = z.infer<typeof sortKey>;
+export type ItemKind = z.infer<typeof itemKind>;

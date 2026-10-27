@@ -10,6 +10,7 @@
 export const DECK_PANEL_ID = "deck-board";
 export const DECK_SCREEN_ID = "deck-home";
 export const DECK_SIDEBAR_ID = "deck";
+export const DECK_SETTINGS_ID = "deck-settings";
 
 /** 全部会交给客户端校验的 id，测试逐条比对规则。 */
-export const DECK_CONTRIBUTION_IDS = [DECK_PANEL_ID, DECK_SCREEN_ID, DECK_SIDEBAR_ID] as const;
+export const DECK_CONTRIBUTION_IDS = [DECK_PANEL_ID, DECK_SCREEN_ID, DECK_SIDEBAR_ID, DECK_SETTINGS_ID] as const;

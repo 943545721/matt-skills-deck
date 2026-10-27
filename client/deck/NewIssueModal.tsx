@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { issuesCreateRpc } from "../../shared/issues";
+import { buildRequirementBody, requirementLabels, type RequirementMode } from "../../shared/requirement";
 import { PixelButton, usePixel } from "./pixel";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 
@@ -30,23 +31,28 @@ export function NewIssueModal({
   const [body, setBody] = useState("");
   const [labels, setLabels] = useState("");
   const [isMap, setIsMap] = useState(false);
+  /** issue = 普通票；其余两种先铺六步骨架，探索与实施的章节不同。 */
+  const [mode, setMode] = useState<"issue" | RequirementMode>("issue");
   const toast = useToast();
   const queryClient = useQueryClient();
   const skin = usePixel(theme);
 
   const createIssue = useRpc(issuesCreateRpc);
   const create = useMutation({
-    mutationFn: () =>
-      createIssue({
+    mutationFn: () => {
+      const parsed = labels
+        .split(/[,，]/)
+        .map((name) => name.trim())
+        .filter(Boolean);
+      const wanted = mode === "issue" ? parsed : [...parsed, ...requirementLabels()];
+      return createIssue({
         workspaceDir,
         title: title.trim(),
-        body,
-        labels: labels
-          .split(/[,，]/)
-          .map((name) => name.trim())
-          .filter(Boolean),
+        body: mode === "issue" ? body : buildRequirementBody(mode, body),
+        labels: [...new Set(wanted)],
         isMap,
-      }),
+      });
+    },
     onSuccess: (result) => {
       if (!result.ok) {
         toast.show(`${t("new.failed")}：${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")} — ${result.detail}`, {
@@ -65,6 +71,7 @@ export function NewIssueModal({
       setBody("");
       setLabels("");
       setIsMap(false);
+      setMode("issue");
       onClose();
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
@@ -114,6 +121,13 @@ export function NewIssueModal({
             onChangeText={setLabels}
             placeholder={t("new.labelsField")}
           />
+          <View style={styles.actions}>
+            <Text style={styles.hint}>{t("new.modeLabel")}</Text>
+            <PixelButton skin={skin} label={t("new.modeIssue")} active={mode === "issue"} onPress={() => setMode("issue")} />
+            <PixelButton skin={skin} label={t("new.modeExplore")} active={mode === "explore"} onPress={() => setMode("explore")} />
+            <PixelButton skin={skin} label={t("new.modeImplement")} active={mode === "implement"} onPress={() => setMode("implement")} />
+          </View>
+          {mode === "issue" ? null : <Text style={styles.hint}>{t("new.modeHint")}</Text>}
           <View style={styles.actions}>
             <PixelButton
               skin={skin}

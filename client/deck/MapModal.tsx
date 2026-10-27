@@ -3,7 +3,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { copyText, Modal, useToast } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { mapRpc } from "../../shared/map";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import type { DeckKey } from "./i18n";
@@ -21,6 +21,13 @@ const KIND_KEY: Record<RouteKind, DeckKey> = {
   task: "map.kind.task",
 };
 
+const GROUP_KEY: Record<"ready" | "claimed" | "blocked" | "closed", DeckKey> = {
+  ready: "map.groupReady",
+  claimed: "map.groupClaimed",
+  blocked: "map.groupBlocked",
+  closed: "map.groupClosed",
+};
+
 /** 列表行里的 `- ` 只是 Markdown 记号，渲染成一行一条时剥掉更清爽（解析层保持原样）。 */
 const stripBullet = (line: string) => line.replace(/^[-*]\s+/, "");
 
@@ -36,12 +43,15 @@ export function MapModal({
   workspaceDir,
   number,
   open,
+  onOpenIssue,
   onClose,
 }: {
   theme: PluginTheme;
   workspaceDir: string;
   number: number;
   open: boolean;
+  /** 路线票可以点开：地图里看到一张票，下一步通常是看它的正文，而不是关掉地图再回列表找。 */
+  onOpenIssue?(number: number): void;
   onClose(): void;
 }) {
   const { t } = useDeckText();
@@ -143,6 +153,38 @@ export function MapModal({
   const data = query.data?.ok ? query.data : null;
   const failure = query.data && !query.data.ok ? query.data : null;
 
+  /** 分组与层里只有票号；标题从同一份 route 里查，避免再发一次请求。 */
+  const titleOf = (target: number): string =>
+    data?.route.find((item) => item.number === target)?.title ?? `#${target}`;
+
+  const ticketRow = (target: number) => {
+    const item = data?.route.find((entry) => entry.number === target);
+    const body = (
+      <View style={styles.row}>
+        <Text style={[styles.text, styles.grow]} numberOfLines={1}>
+          #{target} {titleOf(target)}
+        </Text>
+        {item?.blockedBy.length ? (
+          <Text style={styles.meta} numberOfLines={1}>
+            {t("map.blockedBy", { list: item.blockedBy.map((blocker) => `#${blocker}`).join("、") })}
+          </Text>
+        ) : null}
+        {onOpenIssue ? <Text style={styles.badge}>{t("map.openIssue", { number: target })}</Text> : null}
+      </View>
+    );
+    if (!onOpenIssue) return <View key={target}>{body}</View>;
+    return (
+      <Pressable
+        key={target}
+        accessibilityRole="button"
+        accessibilityLabel={t("map.openIssue", { number: target })}
+        onPress={() => onOpenIssue(target)}
+      >
+        {body}
+      </Pressable>
+    );
+  };
+
   return (
     <Modal title={t("map.title", { number })} open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <Modal.Content>
@@ -199,6 +241,25 @@ export function MapModal({
 
               <PixelCard skin={skin} style={styles.cardBody}>
                 <PixelHead skin={skin} style={styles.head}>
+                  {t("map.groups")}
+                </PixelHead>
+                {data.groups.map((group) => (
+                  <View key={group.readiness} style={styles.item}>
+                    <View style={styles.row}>
+                      <Text style={styles.badge}>{staticText(t, GROUP_KEY[group.readiness])}</Text>
+                      <Text style={styles.meta}>{group.numbers.length}</Text>
+                    </View>
+                    {group.numbers.length ? (
+                      group.numbers.map((target) => ticketRow(target))
+                    ) : (
+                      <Text style={styles.hint}>{t("map.groupEmpty")}</Text>
+                    )}
+                  </View>
+                ))}
+              </PixelCard>
+
+              <PixelCard skin={skin} style={styles.cardBody}>
+                <PixelHead skin={skin} style={styles.head}>
                   {t("map.route")}
                 </PixelHead>
                 {data.route.length === 0 ? (
@@ -213,6 +274,25 @@ export function MapModal({
                       <Text style={styles.meta}>
                         {item.state === "OPEN" ? t("issue.open") : t("issue.closed")}
                       </Text>
+                    </View>
+                  ))
+                )}
+              </PixelCard>
+
+              <PixelCard skin={skin} style={styles.cardBody}>
+                <PixelHead skin={skin} style={styles.head}>
+                  {t("map.levels")}
+                </PixelHead>
+                {data.levels.length === 0 ? (
+                  <Text style={styles.hint}>{t("map.levelEmpty")}</Text>
+                ) : (
+                  data.levels.map((level) => (
+                    <View key={level.level} style={styles.item}>
+                      <View style={styles.row}>
+                        <Text style={styles.badge}>{t("map.level", { level: level.level })}</Text>
+                        <Text style={styles.meta}>{t("map.levelProgress", { closed: level.closed, total: level.total })}</Text>
+                      </View>
+                      {level.numbers.map((target) => ticketRow(target))}
                     </View>
                   ))
                 )}

@@ -1,6 +1,6 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
-import { FlatList, Markdown, Modal, TextInput, useToast } from "@getpaseo/plugin/client/ui";
+import { copyText, FlatList, Markdown, Modal, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
@@ -9,6 +9,7 @@ import {
   gitCommitRpc,
   gitDiffRpc,
   gitFetchRpc,
+  gitLogRpc,
   gitPullRpc,
   gitPushRpc,
   gitStageRpc,
@@ -52,6 +53,7 @@ export function VersionView({
   const [message, setMessage] = useState("");
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [diffStaged, setDiffStaged] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   /** 多远端时让用户点一个：不替人选，也不让人手打远端名。 */
   const [choices, setChoices] = useState<{ op: Exclude<Op, "commit">; remotes: string[] } | null>(null);
   const toast = useToast();
@@ -66,6 +68,7 @@ export function VersionView({
   const fetchRemote = useRpc(gitFetchRpc);
   const push = useRpc(gitPushRpc);
   const readDiff = useRpc(gitDiffRpc);
+  const readLog = useRpc(gitLogRpc);
 
   const failureTextOf = (reason: string) => staticText(t, GIT_FAILURE_KEYS[reason] ?? "version.failure.git-failed");
 
@@ -81,8 +84,16 @@ export function VersionView({
     enabled: diffPath !== null,
   });
 
+  const history = useQuery({
+    queryKey: ["deck", "git-log", workspaceDir],
+    queryFn: () => readLog({ workspaceDir, limit: 20 }),
+    enabled: historyOpen,
+    staleTime: 10_000,
+  });
+
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: ["deck", "git", workspaceDir] });
+    void queryClient.invalidateQueries({ queryKey: ["deck", "git-log", workspaceDir] });
   };
 
   /** 记住最后一次点的远端操作，选完远端后按同一个操作重跑。 */
@@ -220,6 +231,32 @@ export function VersionView({
   const staged = data?.files.filter((file) => file.staged).map((file) => file.path) ?? [];
   const unstaged = data?.files.filter((file) => !file.staged).map((file) => file.path) ?? [];
 
+  /**
+   * AI 交接：把「现在仓库是什么状态」写成一段可以直接粘给 Agent 的上下文。
+   *
+   * 历史按需拉取：只在用户按下按钮时才跑 `git log`，不给每次打开版本页都加一次子进程。
+   * 拉不到历史也照样给交接（标注为空），不让一个次要读取失败挡掉主要信息。
+   */
+  const copyHandoff = async () => {
+    let commits = history.data?.ok ? history.data.commits : [];
+    if (!history.data) {
+      const fresh = await history.refetch();
+      commits = fresh.data?.ok ? fresh.data.commits : [];
+    }
+    const branch = data
+      ? `${data.branch.name || t("version.detached")}${data.branch.upstream ? ` → ${data.branch.upstream}` : ""}`
+      : t("version.detached");
+    const files = data?.files.length
+      ? data.files.map((file) => `- ${file.code} ${file.path}${file.staged ? " (staged)" : ""}`).join("\n")
+      : t("version.clean");
+    const commitText = commits.length
+      ? commits.map((entry) => `- ${entry.short} ${entry.subject}`).join("\n")
+      : t("version.historyEmpty");
+    await copyText(t("version.handoffPrompt", { branch, files, commits: commitText }))
+      .then(() => toast.show(t("version.handoffCopied"), { variant: "success" }))
+      .catch(() => toast.error(t("common.copyFailed")));
+  };
+
   return (
     <View style={styles.screen}>
       <View style={styles.toolbar}>
@@ -267,6 +304,22 @@ export function VersionView({
           onPress={() => remoteMutation.mutate({ op: "push" })}
         >
           <Text style={styles.actionText}>{t("version.push")}</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("version.history")}
+          style={styles.action}
+          onPress={() => setHistoryOpen(true)}
+        >
+          <Text style={styles.actionText}>{t("version.history")}</Text>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={t("version.handoff")}
+          style={styles.action}
+          onPress={() => void copyHandoff()}
+        >
+          <Text style={styles.actionText}>{t("version.handoff")}</Text>
         </Pressable>
       </View>
 
@@ -397,6 +450,44 @@ export function VersionView({
           <Text style={styles.hint}>{t("version.hint")}</Text>
         </View>
       </View>
+
+      <Modal
+        title={t("version.historyTitle")}
+        open={historyOpen}
+        onOpenChange={(open) => {
+          if (!open) setHistoryOpen(false);
+        }}
+      >
+        <Modal.Content>
+          <View style={styles.modalBody}>
+            {history.error ? <Text style={styles.error}>{history.error.message}</Text> : null}
+            {history.data && !history.data.ok ? (
+              <Text style={styles.error}>{failureTextOf(history.data.reason)}：{history.data.detail}</Text>
+            ) : null}
+            {history.data?.ok ? (
+              history.data.commits.length ? (
+                history.data.commits.map((entry) => (
+                  <View key={entry.oid} style={styles.row}>
+                    <Text style={styles.code}>{entry.short}</Text>
+                    <View style={{ flexShrink: 1 }}>
+                      <Text style={styles.path} numberOfLines={2}>
+                        {entry.subject}
+                      </Text>
+                      <Text style={styles.meta}>
+                        {entry.author} · {entry.date.slice(0, 10)}
+                      </Text>
+                    </View>
+                  </View>
+                ))
+              ) : (
+                <Text style={styles.hint}>{t("version.historyEmpty")}</Text>
+              )
+            ) : history.isPending ? (
+              <Text style={styles.hint}>{t("common.loading")}</Text>
+            ) : null}
+          </View>
+        </Modal.Content>
+      </Modal>
 
       <Modal
         title={diffPath ? t("version.diffTitle", { path: diffPath }) : t("version.diff")}

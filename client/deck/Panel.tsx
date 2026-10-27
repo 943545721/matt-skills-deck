@@ -152,7 +152,7 @@ export function DeckPanel({ theme, layout, workspaceId, tab }: PluginWorkspacePa
           <Text style={styles.notice}>{staticText(t, NO_WORKSPACE.version)}</Text>
         )
       ) : (
-        <DiagnosticsView theme={theme} layout={layout} />
+        <DiagnosticsView theme={theme} layout={layout} workspaceDir={workspace?.directory} />
       )}
     </View>
   );

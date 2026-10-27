@@ -150,6 +150,110 @@ export async function createIssue(
   return { ok: true, number, url, labels: labelled.labels.map((label) => label.name), labelsFailed: false };
 }
 
+/**
+ * 关闭或重开一张票。
+ *
+ * 「完成」在 DSH 里是注入 /implement 提示词后由 Agent 收尾；Paseo 里没有输入框可注入，
+ * 所以落成一次用户明确点过的真实状态写：点了「完成」就是关票，不存在「以为关了其实没关」。
+ */
+export async function setIssueState(
+  owner: string,
+  repo: string,
+  issue: number,
+  state: "open" | "closed",
+): Promise<{ ok: true; state: "OPEN" | "CLOSED" } | WriteFailure> {
+  if (!positive(issue)) return { ok: false, reason: "invalid", detail: "票号必须是正整数" };
+  const action = state === "closed" ? "close" : "reopen";
+  const result = await runGh(["issue", action, String(issue), "--repo", `${owner}/${repo}`]);
+  if (!result.ok) return result;
+  return { ok: true, state: state === "closed" ? "CLOSED" : "OPEN" };
+}
+
+/**
+ * 改标题 / 正文 / 状态。
+ *
+ * 只发用户明确给出的字段：REST PATCH 里没出现的字段保持原值，这正是「局部修改」
+ * 需要的语义；把读到的全文再写回去反而会把并发编辑覆盖掉。
+ * 返回读回值，界面与 Agent 都能确认识别到的是新内容。
+ */
+export async function patchIssue(
+  owner: string,
+  repo: string,
+  issue: number,
+  patch: { title?: string; body?: string; state?: "open" | "closed" },
+): Promise<{ ok: true; title: string; body: string; state: "OPEN" | "CLOSED" } | WriteFailure> {
+  if (!positive(issue)) return { ok: false, reason: "invalid", detail: "票号必须是正整数" };
+  const title = patch.title?.trim();
+  if (title !== undefined && !title) return { ok: false, reason: "invalid", detail: "标题不能为空" };
+  if (title !== undefined && title.length > 256) return { ok: false, reason: "invalid", detail: "标题过长（上限 256 字）" };
+  if (title === undefined && patch.body === undefined && patch.state === undefined) {
+    return { ok: false, reason: "invalid", detail: "至少给一个要改的字段（title / body / state）" };
+  }
+
+  const args = ["api", `repos/${owner}/${repo}/issues/${issue}`, "--method", "PATCH", "--jq", "."];
+  if (title !== undefined) args.push("-f", `title=${title}`);
+  if (patch.body !== undefined) args.push("-f", `body=${patch.body}`);
+  if (patch.state !== undefined) args.push("-f", `state=${patch.state}`);
+
+  const result = await runGh(args);
+  if (!result.ok) return result;
+  try {
+    const parsed: unknown = JSON.parse(result.stdout);
+    const record = (Array.isArray(parsed) ? parsed[0] : parsed) as
+      | { title?: unknown; body?: unknown; state?: unknown }
+      | null;
+    return {
+      ok: true,
+      title: typeof record?.title === "string" ? record.title : (title ?? ""),
+      body: typeof record?.body === "string" ? record.body : (patch.body ?? ""),
+      state: record?.state === "closed" ? "CLOSED" : "OPEN",
+    };
+  } catch {
+    return { ok: true, title: title ?? "", body: patch.body ?? "", state: patch.state === "closed" ? "CLOSED" : "OPEN" };
+  }
+}
+
+/**
+ * 接手 / 放手：把当前登录账号加进或移出指派人。
+ *
+ * 登录名从 `gh api user` 读，不要求用户手打；读不到就明确失败——猜一个名字写上去
+ * 等于把票指派给了别人。
+ */
+export async function takeIssue(
+  owner: string,
+  repo: string,
+  issue: number,
+  take: boolean,
+): Promise<{ ok: true; login: string; assignees: string[] } | WriteFailure> {
+  if (!positive(issue)) return { ok: false, reason: "invalid", detail: "票号必须是正整数" };
+  const me = await runGh(["api", "user", "--jq", ".login"]);
+  if (!me.ok) return me;
+  const login = me.stdout.trim();
+  if (!login) return { ok: false, reason: "gh-failed", detail: "gh 没有返回当前登录账号，无法接手这张票" };
+
+  const edited = await runGh([
+    "issue",
+    "edit",
+    String(issue),
+    "--repo",
+    `${owner}/${repo}`,
+    take ? "--add-assignee" : "--remove-assignee",
+    login,
+  ]);
+  if (!edited.ok) return edited;
+
+  // 写成功但读不回指派列表时，至少把「已经加/移了谁」如实回给界面，不让整件事看起来失败。
+  const read = await runGh(["issue", "view", String(issue), "--repo", `${owner}/${repo}`, "--json", "assignees", "--jq", "[.assignees[].login]"]);
+  if (!read.ok) return { ok: true, login, assignees: take ? [login] : [] };
+  try {
+    const parsed: unknown = JSON.parse(read.stdout);
+    const assignees = Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : [];
+    return { ok: true, login, assignees };
+  } catch {
+    return { ok: true, login, assignees: take ? [login] : [] };
+  }
+}
+
 export function dedupeLabels(labels: readonly string[]): string[] {
   const seen = new Set<string>();
   const out: string[] = [];

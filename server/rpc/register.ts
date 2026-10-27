@@ -1,15 +1,21 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
+  issuesAssignRpc,
   issuesCommentRpc,
   issuesCreateRpc,
   issuesDetailRpc,
   issuesListRpc,
   issuesSetLabelsRpc,
+  issuesStateRpc,
 } from "../../shared/issues.ts";
 import { labelsColorsRpc, labelsListRpc } from "../../shared/labels.ts";
 import { mapRpc } from "../../shared/map.ts";
-import { logsRpc } from "../../shared/logs.ts";
-import { listLogs } from "../logs.ts";
+import { logsClearRpc, logsRpc } from "../../shared/logs.ts";
+import { envCheckRpc } from "../../shared/env.ts";
+import { envCheckHandler } from "./env.ts";
+import { updateCheckRpc } from "../../shared/update.ts";
+import { checkForUpdate } from "../update.ts";
+import { listLogs, resetLogs } from "../logs.ts";
 import { skillsInstallRpc, skillsListRpc, skillsReadRpc } from "../../shared/skills.ts";
 import { statusRpc } from "../../shared/status.ts";
 import {
@@ -25,11 +31,13 @@ import {
   gitUnstageRpc,
 } from "../../shared/git.ts";
 import {
+  assignIssueHandler,
   commentIssueHandler,
   createIssueHandler,
   getIssueHandler,
   listIssuesHandler,
   setIssueLabelsHandler,
+  setIssueStateHandler,
 } from "./issues.ts";
 import { listLabelsHandler, setLabelColorsHandler } from "./labels.ts";
 import { mapHandler } from "./map.ts";
@@ -66,6 +74,8 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(issuesCommentRpc, commentIssueHandler);
   server.handle(issuesCreateRpc, createIssueHandler);
   server.handle(issuesSetLabelsRpc, setIssueLabelsHandler);
+  server.handle(issuesAssignRpc, assignIssueHandler);
+  server.handle(issuesStateRpc, setIssueStateHandler);
 
   server.handle(mapRpc, mapHandler);
 
@@ -84,4 +94,12 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(gitPushRpc, gitPushHandler);
 
   server.handle(logsRpc, (input) => ({ entries: listLogs(input.limit) }));
+  server.handle(logsClearRpc, () => {
+    // 先数再清：界面要能说「清掉了 N 条」，否则用户不确定那一下有没有生效。
+    const cleared = listLogs(200).length;
+    resetLogs();
+    return { cleared };
+  });
+  server.handle(envCheckRpc, envCheckHandler);
+  server.handle(updateCheckRpc, () => checkForUpdate());
 }

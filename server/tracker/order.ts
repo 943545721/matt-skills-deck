@@ -1,17 +1,8 @@
-import type { Issue } from "./github.ts";
-
 /**
- * 列表排序：地图票优先 → 未关闭优先 → 最近更新优先。
+ * 列表排序的旧入口。
  *
- * 为什么地图在前：源仓库把地图当成「这张地图有哪些票」的容器，用户打开任务板
- * 第一眼要找的是地图，而不是某个细节票。这条排序只表达意图，不改变数据。
+ * 排序本体已合并到 `readiness.ts`：可接/阻塞的判定与排序必须看同一份 fields，
+ * 分成两个文件迟早会出现「列表说它可接、地图说它阻塞」。这里只保留原函数名，
+ * 免得 MCP 与既有测试跟着改一圈。
  */
-export function sortIssues(issues: readonly Issue[]): Issue[] {
-  const rank = (issue: Issue) => (issue.isMap ? 0 : 1);
-  const openRank = (issue: Issue) => (issue.state === "OPEN" ? 0 : 1);
-  return [...issues].sort((left, right) => {
-    if (rank(left) !== rank(right)) return rank(left) - rank(right);
-    if (openRank(left) !== openRank(right)) return openRank(left) - openRank(right);
-    return right.updatedAt.localeCompare(left.updatedAt);
-  });
-}
+export { sortBoard as sortIssues } from "./readiness.ts";

@@ -1,3 +1,5 @@
+import { getSettings } from "./settings.ts";
+
 export type LogLevel = "info" | "warn" | "error";
 
 export interface LogEntry {
@@ -18,6 +20,8 @@ const MAX_ENTRIES = 200;
 const entries: LogEntry[] = [];
 
 export function record(level: LogLevel, scope: string, message: string): void {
+  // 设置里关掉调试日志后就不再累积；已有条目保留，用户仍可导出后清空。
+  if (!getSettings().debugLogging) return;
   entries.push({ at: new Date().toISOString(), level, scope, message });
   if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES);
 }
@@ -26,7 +30,7 @@ export function listLogs(limit = MAX_ENTRIES): LogEntry[] {
   return entries.slice(-Math.min(Math.max(limit, 1), MAX_ENTRIES)).reverse();
 }
 
-/** 仅供测试：清空缓冲。 */
+/** 清空缓冲：用户点「清空日志」时调用，也是测试的重置入口。 */
 export function resetLogs(): void {
   entries.length = 0;
 }

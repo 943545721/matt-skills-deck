@@ -1,9 +1,8 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { mapRpc } from "../../shared/map.ts";
-import { getIssue, listIssues } from "../tracker/github.ts";
 import { parseMapBody } from "../tracker/map-body.ts";
-import { routeFromIssues, suggestNextSteps } from "../tracker/map-route.ts";
-import { requireGithubRepo } from "./repo-gate.ts";
+import { groupRoute, routeFromIssues, routeLevels, suggestNextSteps } from "../tracker/map-route.ts";
+import { readBoard, readIssue } from "../tracker/read.ts";
 
 type MapInput = RpcInput<typeof mapRpc>;
 
@@ -14,17 +13,17 @@ type MapInput = RpcInput<typeof mapRpc>;
  * 「雾里还剩两条」可能对应一张已经关掉的票。
  */
 export async function mapHandler(input: MapInput): Promise<RpcOutput<typeof mapRpc>> {
-  const gate = await requireGithubRepo(input.workspaceDir, "地图");
-  if (!gate.ok) return gate;
-
-  const detail = await getIssue(gate.ref.owner, gate.ref.name, input.number);
+  const read = await readIssue(input.workspaceDir, input.number);
+  if (!read.ok) return read;
+  const detail = read.result;
   if (!detail.ok) return { ok: false, reason: detail.reason, detail: detail.detail };
 
-  const board = await listIssues(gate.ref.owner, gate.ref.name, 100);
-  if (!board.ok) return { ok: false, reason: board.reason, detail: board.detail };
+  const board = await readBoard(input.workspaceDir, { limit: 100 });
+  if (!board.ok) return board;
+  if (!board.result.ok) return { ok: false, reason: board.result.reason, detail: board.result.detail };
 
   const map = parseMapBody(detail.issue.body);
-  const route = routeFromIssues(board.issues);
+  const route = routeFromIssues(board.result.issues);
   return {
     ok: true,
     issue: {
@@ -35,6 +34,8 @@ export async function mapHandler(input: MapInput): Promise<RpcOutput<typeof mapR
     },
     map,
     route,
+    groups: groupRoute(route),
+    levels: routeLevels(route),
     suggestions: suggestNextSteps({ map, route }),
   };
 }

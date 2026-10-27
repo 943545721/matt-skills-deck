@@ -177,7 +177,7 @@ test("大回包不被截断，且状态过滤下推到了 GraphQL 查询", { ski
 
   const captured = String(spawnSync("cat", [capture], { encoding: "utf8" }).stdout);
   // 状态下推：默认 open 必须体现在查询里，而不是取回 100 条混合状态再本地筛。
-  assert.match(captured, /states: \[OPEN\]/);
+  assert.match(captured, /states:\s*\[OPEN\]/);
   // 字符串变量走 -f（原样），数字走 -F：-F 会做类型推断并把 @ 当读文件。
   assert.match(captured, /(^|\n)-f\nowner=acme\n/);
   assert.match(captured, /(^|\n)-f\nname=deck\n/);

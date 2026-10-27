@@ -20,6 +20,13 @@
 | P7 后续（续） | gh 失败分类与顶栏显示：装了 gh 但没登录时，标题写「GitHub 拒绝了这次操作」、顶栏写「未关联仓库」。新增 `server/tracker/gh-error.ts` 统一分类（退出码 4，或 stderr 点名 `gh auth login` / `not logged into any GitHub hosts` → `gh-unauth`），读/写/标签/地图四条链路共用；`shared/{issues,labels,map}` 的失败枚举随之扩展，`issues.list` / `issues.detail` 失败时也回传已解析的仓库坐标，`BoardView` 据此显示 `owner/name`。`code-reviewer` 复审发现并修掉两处：① 提示词曾匹配 `error.message`，其中拼着完整 argv（含用户写的评论正文），超时 + 正文含「gh auth login」会被误判成没登录，绕过「评论可能已写入」的保护 → 改为只匹配真 stderr，且 stderr 为空时不回显命令行；② 泛化的 `authentication required` 会把企业代理 407 说成没登录 → 收窄为 gh 的两句原话 | 两套 typecheck 干净；84 条用例全绿（新增 10 条：分类器各分支、超时不污染、代理 407、RPC 失败带 repo、没登录不回落 CLI）；本机真实 gh 走 `listIssuesHandler` 得 `gh-unauth` + `943545721/matt-skills-deck`；reload 后 running、日志无错。审查复验结论 **APPROVE**；残留三条非阻塞项见「验证缺口」 |
 | P7 后续（差距盘点） | 与 DSH 原版逐项对账：计划引用的 A1–A26 清单在计划文件中并不存在，按 DSH 源码（`kernel/locale-data.ts`、`views/`、`deck/tools/`）重建为 26 项，逐项标注「已有 / 换面 / 部分 / 未做 + 原因」，写入 `docs/port-diff.md`，附缺口优先级与阻塞口径。结论：已有 4、换面 2、部分 9、未做 11。此前 P6 的「完成（代码侧）」只覆盖已交付子集，**不等于能力对齐**；最显眼的缺口是拉取请求（A5）与可接/阻塞/筛选（A2–A4），两者都不需要新的宿主能力 | 每项「未做」都能在 DSH 源码里找到对应文件与文案，且在本仓库无实现；`docs/port-diff.md` 的 A1–A26 表现为本项目唯一对齐口径。本轮未改代码（只改文档），84 条用例与两套 typecheck 不受影响 |
 
+| P8 | 数据层与任务板：拉取请求、阻塞与认领、KPI、筛选排序、新鲜度 | **完成**：GraphQL 同时取 `issues` 与 `pullRequests`（共用编号空间、`isPullRequest` 区分）；`blockedBy` 与 assignee 进 readiness；可接 / 阻塞 / 已关闭 KPI + 六个视图 + 四种排序；`fetchedAt`、`rateLimit`、GraphQL → REST 回退提示、自动刷新（设置 0–300 秒） | `tests/mcp-tools.test.mjs` 的 PR 三态筛选、`tests/issues.test.mjs` 的阻塞口径；两套 typecheck 干净；147 条用例全绿 |
+| P9 | 票面动作与当前票 | **完成**：打开远端（`openExternalUrl`）、复制链接、五种动作提示词、接手 / 完成真实写入；绑定「当前票」，任务板标出当前票 | `client/deck/IssueModal.tsx`、`BoardView.tsx`；写路径在 `tests/gh-write.test.mjs` 覆盖（参数、失败分类、超时保护） |
+| P10 | 页面深度：地图层级、环境检查、配色提示词、提交历史与 AI 交接、日志、MCP 工具 | **完成**：地图子票分组 + 路线分层（Tarjan 缩环）+ 每层进度；环境检查逐项给修复命令；标签配色提示词；`git log` 提交历史与交接提示词；日志开关 / 刷新 / 复制导出 / 清空；MCP 工具扩到 14 个 | `tests/env.test.mjs` 10 条、`tests/map.test.mjs`、`tests/labels.test.mjs`、`tests/mcp-tools.test.mjs` 12 条；本机 `node --test` 147/147 |
+| P11 | 设置与更新 | **完成**：独立设置页（后端、刷新间隔、调试日志、更新检查、语言说明），保存带 revision，两个客户端同时改不会静默覆盖；更新检查读远端 tag、显示当前 / 最新、给出可复制安装命令 | `client/deck/SettingsView.tsx`、`server/update.ts`、`tests/update.test.mjs` 5 条；A22 仍不做（见 D4） |
+| P12 | 工作流与多后端 | **完成**：新建需求的探索 / 实施六段模板 + `requirement` 标签；诊断页六步仓库初始化引导（只复制不代跑）；本地 Markdown 后端（`.deck/` 读写）；GitLab 只读后端（`glab`）；写路径闸门；后端切换前置提示 | `tests/requirement.test.mjs` 4 条、`tests/local.test.mjs` 13 条、`tests/gitlab.test.mjs` 6 条、`tests/mcp-tools.test.mjs` 本地读写 2 条；`docs/port-diff.md` 已改为 A1–A26 逐项结论（已有 15 / 已有+换面 3 / 换面 4 / 部分 3 / 未做 1） |
+| 全量验收 | 26 项落地后的整体复核 | **完成（代码侧）**：两套 `tsc --noEmit` 无输出；`node --test tests/*.test.mjs` **147/147**；MCP 工具 14 个，读工具预授权、写工具不预授权；GitLab 写与 PR 在非 GitHub 后端明确拒绝；本地后端写路径不调用 `gh` | 真实 GitHub / GitLab 联网读写与客户端 bundle 外观仍需在有登录态的环境人工确认（见「验证缺口」） |
+
 ## 已定决策
 
 | 编号 | 决策 |
@@ -28,7 +35,7 @@
 | D2 | 先常规卡片，P5 再重画像素风 |
 | D3 | 技能随包 + 一键安装按钮，不自动写入 |
 | D4 | ~~会话命名降级为规则截取~~ → **0.13 上不可实现，放弃**：`agent.create` 钩子只看得到 `config` 与 `env`（看不到首条提示词），`PaseoAgentHandle` 也没有改名 API。宁可不命名，也不注入一个猜出来的假标题 |
-| D5 | 不单独做「设置页」：界面语言跟随 App 语言（SDK `useTranslation`），不做插件自带的语言开关；技能包语言是独立开关，默认跟随 App |
+| D5 | 设置页只装**影响行为**的项（后端、刷新间隔、调试日志、更新检查）；界面语言仍跟随 App 语言（SDK `useTranslation`），不做插件自带的语言开关；技能包语言是独立开关，默认跟随 App |
 | D6 | **不上架公开注册表**：仓库公开 + tag 可装即止，不提交 `getpaseo/plugins`。理由是不愿为此维护审核往来；`docs/registry-submission.md` 保留为流程备查，`media`、提交表单等事项随之关闭 |
 
 ## 验证缺口
@@ -41,8 +48,13 @@
 - 像素风是纯 RN 样式改造（无图片、无 gif），编译与 reload 都过，但外观**没有截图验证**：
   这个环境里起不了 Paseo 桌面端窗口。布局按「外层 padding 露出右下投影」的固定写法实现，
   不依赖负边距，改动集中在 `client/deck/pixel.tsx` 一处，真机觉得不好看时改那一个文件即可。
-- **功能对齐不是「验证不到」，而是「还没做」**：A1–A26 里 11 项未做、9 项只做了部分
-  （见 `docs/port-diff.md`）。P6 的「完成」只针对已交付子集，别再当成与 DSH 对齐。
+- **A1–A26 已逐项落地**：已有 15、已有 + 换面 3、换面 4、部分 3（A15 / A20 / A24）、未做 1（A22）。
+  剩余差异都是宿主边界（会话改名、全局状态栏 / 胶囊栏、全局横幅、打开日志目录、插件安装 API），
+  以及 A15 不自动搬数据；逐项说明见 `docs/port-diff.md`。
+- 多后端只验到「本地 Markdown 真实读写 + GitLab / GitHub 的参数与失败分支」：本地后端有 13 条用例，
+  真实 `.deck/` 文件在测试里落盘并回读；GitHub / GitLab 联网读写仍需在登录态环境跑一次。
+- 客户端新增设置页与初始化引导后，**外观与加载期校验只验到编译与翻译表测试**；需要在 Paseo 设置里
+  确认插件卡片显示「运行中」，再打开设置页与诊断页各点一遍。
 - gh 失败的边角：无效/过期 token（`Bad credentials` 401）仍归 `gh-failed`，详情行能看出原因；
   标签批量改色中途掉登录时，已成功的条目不会回显（PATCH 幂等，重试可收敛）；
   企业代理 407 已正确归为 `gh-failed`，但评论会走「可能已写入」的保守提示（不重发，安全方向）。
@@ -58,7 +70,12 @@
   `addComposerPill` 必须按 `agentId` 注册，而插件客户端拿不到 agent 列表，也没有「新会话」事件可订阅。
 - 客户端无任意网络、无 DOM → 图片走服务端 data URL，样式只用 RN + theme token。
 - 插件 API 处于实验期 → `requirements.paseo` 钉 `>=0.13.0 <0.14.0`。
-- 服务端无沙箱 → 命令白名单只放 `gh` / `git`（GitLab 的 `glab` 未接，别提前放行），路径必须落在工作区内。
+- 服务端无沙箱 → 命令白名单只放 `gh` / `git` / `glab`（`glab` 是为 A15 的 GitLab 只读后端 deliberate 放行，
+  只用于 `glab api` 读接口与 `auth status`），路径必须落在工作区内。
+- 本地后端只写 `.deck/` 下的三个位置（`issues/<n>.md`、`issues/<n>.comments.json`、`labels.json`），
+  文件名由数字票号拼出，不接受外部传入的文件名；`.deck/` 不是链接、不跟随符号链接。
+- 写路径统一走 `resolveWritableBackend`：GitHub 与本地可写，GitLab 明确拒绝；不要在工具或 RPC 里另开旁路。
+- `PaseoAgentHandle` 没有改名方法，`PaseoWorkspaceHandle.setTitle` 改的是工作区名而不是会话名——不要拿它冒充 A22。
 - 判 `gh` 失败只认 **stderr + 退出码**：退出码 4（或 stderr 里 gh 自己说 `gh auth login` /
   `not logged into any GitHub hosts`）才是「没登录」。**不要拿 `error.message` 做关键词匹配**——
   execFile 的 message 拼着完整 argv，评论正文、标签名都在里面，会把用户内容当成失败原因

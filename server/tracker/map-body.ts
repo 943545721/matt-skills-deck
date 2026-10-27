@@ -111,6 +111,47 @@ export function parseDecisionLine(line: string): MapDecision | null {
   return null;
 }
 
+/**
+ * 按解析器认得的形状生成地图正文。
+ *
+ * 与 `parseMapBody` 成对：写入的每个区块标题、每条决策的写法都必须能被读回来。
+ * 生成空区块时保留标题与占位注释，避免「这一节不存在」和「这一节是空的」被混为一谈。
+ */
+export function buildMapBody(input: {
+  destination: string;
+  notes?: string;
+  decisions?: readonly { title: string; url?: string; gist?: string }[];
+  fog?: readonly string[];
+  outOfScope?: readonly string[];
+}): string {
+  const decisionLine = (decision: { title: string; url?: string; gist?: string }): string => {
+    const title = decision.title.trim();
+    const gist = decision.gist?.trim() ?? "";
+    if (decision.url?.trim()) return `- [${title}](${decision.url.trim()})${gist ? ` — ${gist}` : ""}`;
+    return `- **${title}**${gist ? `：${gist}` : ""}`;
+  };
+  const bullets = (items: readonly string[] | undefined, empty: string): string =>
+    items?.length ? items.map((item) => `- ${item.trim()}`).filter((line) => line !== "-").join("\n") : empty;
+
+  return [
+    "## Destination",
+    input.destination.trim() || "<!-- Not yet specified -->",
+    "",
+    "## Notes",
+    input.notes?.trim() || "<!-- Empty -->",
+    "",
+    "## Decisions so far",
+    bullets(input.decisions?.map(decisionLine), "<!-- None yet -->"),
+    "",
+    "## Not yet specified",
+    bullets(input.fog, "<!-- None -->"),
+    "",
+    "## Out of scope",
+    bullets(input.outOfScope, "<!-- None -->"),
+    "",
+  ].join("\n");
+}
+
 /** 按二级标题切块，取出五个区块。`##` 与标题之间允许没有空格（`##Notes` 也算标题）。 */
 export function parseMapBody(body: unknown): ParsedMapBody {
   const out: ParsedMapBody = { destination: "", notes: "", decisions: [], fog: [], outOfScope: [] };

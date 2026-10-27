@@ -69,8 +69,23 @@ export async function setLabelColors(
   owner: string,
   repo: string,
   changes: readonly LabelColorChange[],
-): Promise<{ ok: true; applied: LabelColorChange[]; failed: { name: string; detail: string }[] } | LabelFailure> {
-  if (!changes.length) return { ok: true, applied: [], failed: [] };
+): Promise<
+  | {
+      ok: true;
+      applied: LabelColorChange[];
+      failed: { name: string; detail: string }[];
+      /** 写后读回核对一致的标签。 */
+      verified: LabelColorChange[];
+      /** PATCH 回了成功、但读回的颜色不是期望值。 */
+      mismatched: { name: string; expected: string; actual: string }[];
+      /** 读回失败：此时 applied 只是「请求成功」，不能当成已确认。 */
+      readbackFailed: boolean;
+    }
+  | LabelFailure
+> {
+  if (!changes.length) {
+    return { ok: true, applied: [], failed: [], verified: [], mismatched: [], readbackFailed: false };
+  }
 
   const applied: LabelColorChange[] = [];
   const failed: { name: string; detail: string }[] = [];
@@ -103,5 +118,20 @@ export async function setLabelColors(
     applied.push({ name, color });
   }
 
-  return { ok: true, applied, failed };
+  // 写后读回：GitHub 的 PATCH 回 200 不等于颜色真的改了（企业代理、缓存层都可能吞掉）。
+  // 读不回来就如实标 readbackFailed，不把「请求发成功了」说成「已经改好了」。
+  if (!applied.length) return { ok: true, applied, failed, verified: [], mismatched: [], readbackFailed: false };
+  const reread = await listLabels(owner, repo);
+  if (!reread.ok) {
+    return { ok: true, applied, failed, verified: [], mismatched: [], readbackFailed: true };
+  }
+  const actual = new Map(reread.labels.map((label) => [label.name, label.color]));
+  const verified: LabelColorChange[] = [];
+  const mismatched: { name: string; expected: string; actual: string }[] = [];
+  for (const change of applied) {
+    const seen = actual.get(change.name) ?? "";
+    if (seen === change.color) verified.push(change);
+    else mismatched.push({ name: change.name, expected: change.color, actual: seen });
+  }
+  return { ok: true, applied, failed, verified, mismatched, readbackFailed: false };
 }

@@ -9,7 +9,8 @@ const REMOTE_PROBLEMS: Record<RemoteFailure["reason"], string> = {
 };
 
 export interface RepoOut {
-  host: RemoteRef["host"];
+  /** local 表示没有远端（或设置强制本地）：数据在 `.deck/` 里。 */
+  host: RemoteRef["host"] | "local";
   owner: string;
   name: string;
   webUrl: string | null;
