@@ -3,8 +3,7 @@
 把 [dsh-mattpocock-skills-deck](https://github.com/FeatherHunter/dsh-mattpocock-skills-deck) 移植成 Paseo 插件：
 27 个 Matt Pocock 工程技能，加上 GitHub 工作票面、地图与一组给 Agent 用的 `deck_*` 工具。
 
-当前状态：**功能对齐 DSH 版**（P0–P6 完成；代码已推到 GitHub 并打了 `v0.1.0`，仓库目前仍是**私有**，
-转公开后才能被他人安装、才能进注册表审核）。逐阶段证据见 `PROGRESS.md`。
+当前状态：**功能对齐 DSH 版**（P0–P7 完成；仓库公开在 GitHub，打了 `v0.1.0` / `v0.1.1`，可用 git 源安装）。按 D6 决定**不提交公开注册表**，逐阶段证据见 `PROGRESS.md`。
 
 ## 能做什么
 
@@ -21,14 +20,8 @@
 # 本地目录（开发用）
 paseo plugin install /绝对路径/paseo-matt-skills-deck
 
-# Git（仓库转为公开后可用，推荐钉 tag）
-paseo plugin install git:943545721/matt-skills-deck --ref v0.1.0
-
-# 注册表（条目通过审核后）
-paseo plugin install 943545721/matt-skills-deck
-
-# npm（包发布后）
-paseo plugin install npm:matt-skills-deck
+# Git（推荐钉 tag）
+paseo plugin install git:943545721/matt-skills-deck --ref v0.1.1
 
 paseo plugin reload matt-skills-deck     # 改完代码热更新
 paseo plugin ls                          # 应显示 running

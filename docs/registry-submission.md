@@ -1,5 +1,8 @@
 # 注册表提交包
 
+> **现状（D6）**：决定**不上架公开注册表**，本文仅作流程备查，不需要执行。
+> 仓库已公开、tag 可装、artifact 校验已通过；不提交 `getpaseo/plugins`。
+
 公开注册表是 GitHub 上的 [`getpaseo/plugins`](https://github.com/getpaseo/plugins)：作者开一个
 **submission issue**，机器人把 issue 转成 review PR，维护者审核后再合并。CLI 里没有 `publish`
 子命令，安装端读的是 `<base>/plugins/<owner>/<slug>.json`。
