@@ -17,6 +17,7 @@
 
 | P7 | 发布准备：远端、版本与包元数据、图标、CI、注册表提交包 | **完成（代码侧）**：仓库推到 `github.com/943545721/matt-skills-deck` 并打了 `v0.1.0` / `v0.1.1`（已转公开，匿名克隆与 raw 均 200）；`package.json` 补 `repository`/`homepage`/`bugs`/`keywords`/`engines`，`files` 带上 `assets/`；新增 512×512 像素风图标 `assets/icon.png`（清单 `icon` 引用，`media` 仍为空）；新增 `.github/workflows/ci.yml`（Node 22 上 `npm ci` + 两套 typecheck + 全部用例）；README 安装命令换成真实地址。注册表流程已核实：公开注册表是 `getpaseo/plugins`，作者开 submission issue、机器人转 review PR；提交包与已校验的记录写在 `docs/registry-submission.md` | 从 `v0.1.0` 干净 clone 后 typecheck 无输出、71 条用例全绿；本机 typecheck/测试/reload 均过；远端 `main` 与 tag 均已推送；注册表记录过离线校验（`node scripts/validate.ts`：390 条 well-formed）。**仓库已转公开**（匿名访问清单/tag/图标均 200）；注册表在线校验通过（`validate.ts --online --changed`：1 record matches its pinned artifact）；用 API 建的 submission issue #1253 因拿不到 `submission` 标签（表单模板才会打、非协作者加标签 403）没触发 review，已关闭。**已按 D6 决定不再上架**：网页表单与 `media` 截图都不再需要；npm 仍保持 `private` |
 | P7 后续 | 加载期校验修复：插件在设置里一直显示「失败」，实测是客户端 bundle 加载期的两道校验，一道比一道晚暴露。① `Invalid translation key: prototype`——SDK 的 `flatten` 在**任意层级**拒绝 `prototype` / `constructor` / `__proto__` 和含点号的键，`map.kind.prototype` 改名 `prototypeKind`（en/zh 各一处，`MapModal` 查表同步）。② `Invalid workspace panel id: deck.board`——面的 id 走 `^[a-z][a-z0-9-]*$`，不许点号（与 RPC 方法名不是一套规则），三个面改为 `deck-board` / `deck-home` / `deck` 并抽到 `client/deck/ids.ts`。测试盲区一并补上：`tests/messages.test.mjs` 不再复刻 SDK 规则（漏的正是保留键那条），改为直接调 `defineTranslations` 真身；新增 `tests/ids.test.mjs` 钉住 id 正则 | 两套 `tsc --noEmit` 无输出；`node --test` 74/74；客户端 bundle 重新编译后三个面均注册成功；`paseo plugin reload` 后进程重启、日志干净，用户在设置里确认显示「运行中」。另用 SDK 真身做反向探针：旧键 `prototype` 与含点号键均抛 `Invalid translation key`，新键通过 |
+| P7 后续（续） | gh 失败分类与顶栏显示：装了 gh 但没登录时，标题写「GitHub 拒绝了这次操作」、顶栏写「未关联仓库」。新增 `server/tracker/gh-error.ts` 统一分类（退出码 4，或 stderr 点名 `gh auth login` / `not logged into any GitHub hosts` → `gh-unauth`），读/写/标签/地图四条链路共用；`shared/{issues,labels,map}` 的失败枚举随之扩展，`issues.list` / `issues.detail` 失败时也回传已解析的仓库坐标，`BoardView` 据此显示 `owner/name`。`code-reviewer` 复审发现并修掉两处：① 提示词曾匹配 `error.message`，其中拼着完整 argv（含用户写的评论正文），超时 + 正文含「gh auth login」会被误判成没登录，绕过「评论可能已写入」的保护 → 改为只匹配真 stderr，且 stderr 为空时不回显命令行；② 泛化的 `authentication required` 会把企业代理 407 说成没登录 → 收窄为 gh 的两句原话 | 两套 typecheck 干净；84 条用例全绿（新增 10 条：分类器各分支、超时不污染、代理 407、RPC 失败带 repo、没登录不回落 CLI）；本机真实 gh 走 `listIssuesHandler` 得 `gh-unauth` + `943545721/matt-skills-deck`；reload 后 running、日志无错。审查复验结论 **APPROVE**；残留三条非阻塞项见「验证缺口」 |
 
 ## 已定决策
 
@@ -39,6 +40,11 @@
 - 像素风是纯 RN 样式改造（无图片、无 gif），编译与 reload 都过，但外观**没有截图验证**：
   这个环境里起不了 Paseo 桌面端窗口。布局按「外层 padding 露出右下投影」的固定写法实现，
   不依赖负边距，改动集中在 `client/deck/pixel.tsx` 一处，真机觉得不好看时改那一个文件即可。
+- gh 失败的边角：无效/过期 token（`Bad credentials` 401）仍归 `gh-failed`，详情行能看出原因；
+  标签批量改色中途掉登录时，已成功的条目不会回显（PATCH 幂等，重试可收敛）；
+  企业代理 407 已正确归为 `gh-failed`，但评论会走「可能已写入」的保守提示（不重发，安全方向）。
+  真实代理 407 下的完整 `postComment` 没有实测，本机只验了真实 gh 的 stderr 文本与分类结果。
+  顶栏渲染与 `getIssueHandler` 失败带 repo 没有客户端/单测覆盖（仓库无客户端测试设施）。
 - P2 没有整份搬运源仓库 `src/tracker`（147 文件 / 2.9 万行）。只迁移了与读路径相关的语义：
   远端解析、票面映射、排序口径、地图标签 `wayfinder:map`。其余（本地 Markdown 后端、绑定与切换、
   三后端抽象）在 P3/P4 按需搬运，避免先造抽象再用它。
@@ -50,6 +56,11 @@
 - 客户端无任意网络、无 DOM → 图片走服务端 data URL，样式只用 RN + theme token。
 - 插件 API 处于实验期 → `requirements.paseo` 钉 `>=0.13.0 <0.14.0`。
 - 服务端无沙箱 → 命令白名单只放 `gh` / `git`（GitLab 的 `glab` 未接，别提前放行），路径必须落在工作区内。
+- 判 `gh` 失败只认 **stderr + 退出码**：退出码 4（或 stderr 里 gh 自己说 `gh auth login` /
+  `not logged into any GitHub hosts`）才是「没登录」。**不要拿 `error.message` 做关键词匹配**——
+  execFile 的 message 拼着完整 argv，评论正文、标签名都在里面，会把用户内容当成失败原因
+  （超时 + 正文写「gh auth login」会绕过「评论可能已写入」的保护）；也别加泛化的
+  `authentication required`，企业代理的 407 就是这句话。统一入口在 `server/tracker/gh-error.ts`。
 - RPC 方法名只能是小写：校验正则是 `^[a-z][a-z0-9._-]*$`，写成 `deck.issues.setLabels` 会让整个插件
   加载失败（报 `Invalid plugin RPC method`，且 `plugin reload` 也一起失败）。所以改成 `deck.issues.labels.replace`。
 - 面的 id（工作区面板 / 整页 / 侧栏行）走 `^[a-z][a-z0-9-]*$`，**不允许点号**：写成 `deck.board` 报
