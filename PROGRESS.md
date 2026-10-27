@@ -16,6 +16,7 @@
 | P5–P6 复审 | `code-reviewer` 复审 MCP 链路后按结论修的 9 处：入口判定在含空格/非 ASCII 的安装路径下会静默不启动（`file://` 拼字符串 vs 百分号编码）；`process.exit()` 砍掉大于 64KB 的回包尾巴（改为等写入回调 + `process.exitCode`）；状态过滤发生在 100 条混合状态窗口之后，导致 open 视图少票；标签/评论被静默截断却仍允许「整体替换」；工具入参多余键被静默丢弃；通知被回包、非法 id 冒充 null；注入前不检查 Node 版本与入口文件；写评论超时后回落 CLI 造成重复评论 | 64 条测试全绿（新增 10 条：入口含空格/中文路径、慢读端下 128KB 回包完整、`--workspace` 三种非法入参、严格入参、通知与非法 id、注入前置检查、写回落的两条分支）；两端 typecheck 通过；reload 后 running 且日志无错。截断与入口判定两条都先复现后修复：把旧写法临时贴回去，用例 3 只收到 65536 字节且 JSON 不合法。复审第二轮又修三处：入口守卫漏了符号链接安装路径（改为两侧 `realpathSync` 比较，`~/.paseo` 软链到别的盘就会踩）；`HTTP 5xx/408` 不能当「确定被拒」（网关没回话时评论可能已写入）；标签守卫下沉到 `server/tracker/label-guard.ts`，MCP 出口与 RPC 出口共用同一条不变量（`labels-truncated` 已进 shared 的失败枚举）。复审第三轮只剩两条 LOW 建议，取其一落地：入口判定失败时同时置 `process.exitCode = 1`（原来只写 stderr、退出码 0，客户端分不清「异常退出」与「安静消失」），并补一条「被包了一层」的包装进程用例钉住退出码——去掉那行改动用例即红。当前 71 条用例 |
 
 | P7 | 发布准备：远端、版本与包元数据、图标、CI、注册表提交包 | **完成（代码侧）**：仓库推到 `github.com/943545721/matt-skills-deck` 并打了 `v0.1.0` / `v0.1.1`（已转公开，匿名克隆与 raw 均 200）；`package.json` 补 `repository`/`homepage`/`bugs`/`keywords`/`engines`，`files` 带上 `assets/`；新增 512×512 像素风图标 `assets/icon.png`（清单 `icon` 引用，`media` 仍为空）；新增 `.github/workflows/ci.yml`（Node 22 上 `npm ci` + 两套 typecheck + 全部用例）；README 安装命令换成真实地址。注册表流程已核实：公开注册表是 `getpaseo/plugins`，作者开 submission issue、机器人转 review PR；提交包与已校验的记录写在 `docs/registry-submission.md` | 从 `v0.1.0` 干净 clone 后 typecheck 无输出、71 条用例全绿；本机 typecheck/测试/reload 均过；远端 `main` 与 tag 均已推送；注册表记录过离线校验（`node scripts/validate.ts`：390 条 well-formed）。**仓库已转公开**（匿名访问清单/tag/图标均 200）；注册表在线校验通过（`validate.ts --online --changed`：1 record matches its pinned artifact）；用 API 建的 submission issue #1253 因拿不到 `submission` 标签（表单模板才会打、非协作者加标签 403）没触发 review，已关闭。**已按 D6 决定不再上架**：网页表单与 `media` 截图都不再需要；npm 仍保持 `private` |
+| P7 后续 | 加载期校验修复：插件在设置里一直显示「失败」，实测是客户端 bundle 加载期的两道校验，一道比一道晚暴露。① `Invalid translation key: prototype`——SDK 的 `flatten` 在**任意层级**拒绝 `prototype` / `constructor` / `__proto__` 和含点号的键，`map.kind.prototype` 改名 `prototypeKind`（en/zh 各一处，`MapModal` 查表同步）。② `Invalid workspace panel id: deck.board`——面的 id 走 `^[a-z][a-z0-9-]*$`，不许点号（与 RPC 方法名不是一套规则），三个面改为 `deck-board` / `deck-home` / `deck` 并抽到 `client/deck/ids.ts`。测试盲区一并补上：`tests/messages.test.mjs` 不再复刻 SDK 规则（漏的正是保留键那条），改为直接调 `defineTranslations` 真身；新增 `tests/ids.test.mjs` 钉住 id 正则 | 两套 `tsc --noEmit` 无输出；`node --test` 74/74；客户端 bundle 重新编译后三个面均注册成功；`paseo plugin reload` 后进程重启、日志干净，用户在设置里确认显示「运行中」。另用 SDK 真身做反向探针：旧键 `prototype` 与含点号键均抛 `Invalid translation key`，新键通过 |
 
 ## 已定决策
 
@@ -51,6 +52,11 @@
 - 服务端无沙箱 → 命令白名单只放 `gh` / `git`（GitLab 的 `glab` 未接，别提前放行），路径必须落在工作区内。
 - RPC 方法名只能是小写：校验正则是 `^[a-z][a-z0-9._-]*$`，写成 `deck.issues.setLabels` 会让整个插件
   加载失败（报 `Invalid plugin RPC method`，且 `plugin reload` 也一起失败）。所以改成 `deck.issues.labels.replace`。
+- 面的 id（工作区面板 / 整页 / 侧栏行）走 `^[a-z][a-z0-9-]*$`，**不允许点号**：写成 `deck.board` 报
+  `Invalid workspace panel id`，整个插件在界面上显示「失败」。跟上面 RPC 方法名不是一套规则，别互相套用；
+  三个 id 已抽到 `client/deck/ids.ts`，改名前先看 `tests/ids.test.mjs`。
+- 文案键不能叫 `prototype` / `constructor` / `__proto__`，也不能含点号：SDK 的 `flatten` 在**任意层级**检查，
+  命中即抛，客户端面板根本加载不起来。要表达「原型」时键名用 `prototypeKind` 这类写法。
 - 服务端相对导入一律写 `.ts` 扩展名：测试直接用 `node --test` 跑 TypeScript（Node 自带类型剥离），
   不带扩展名会在测试阶段报 `ERR_MODULE_NOT_FOUND`，而 tsc 不报。`allowImportingTsExtensions` 已开。
 - 插件运行时的自身目录只能从 `$PASEO_HOME/config.json` 读（实测 `import.meta` 为空、cwd 为 `/`）。
