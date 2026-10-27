@@ -4,14 +4,19 @@
 **submission issue**，机器人把 issue 转成 review PR，维护者审核后再合并。CLI 里没有 `publish`
 子命令，安装端读的是 `<base>/plugins/<owner>/<slug>.json`。
 
-## 先决条件（当前未满足）
+## 先决条件（已满足）
 
-**仓库必须公开。** 现在匿名访问 `https://api.github.com/repos/943545721/matt-skills-deck`
-返回 404、`raw.githubusercontent.com` 上的 `v0.1.0` 也是 404 —— 也就是说这是私有仓库。
-私有时注册表无法 clone 到 artifact，`paseo plugin install git:…` 对外也不可用（只有持有
-SSH 密钥的账号能拉）。
+仓库已转为**公开**：匿名访问 `api.github.com/repos/943545721/matt-skills-deck`、
+`raw.githubusercontent.com/.../v0.1.1/paseo-plugin.json`、图标 URL 均返回 200。
 
-处理：仓库 **Settings → General → Danger Zone → Change visibility → Public**。
+## 必须走网页表单，不能用 API 开 issue
+
+intake 工作流的 job 级条件是 `contains(github.event.issue.labels.*.name, 'submission')`，
+而 `submission` 标签由**表单模板**在提交时自动打上。用 REST API 建 issue 时：
+`labels` 参数会被忽略（非协作者没有 triage 权限），再单独加标签直接 403
+`Must have admin rights to Repository.`。结果就是 issue 建得出来，但 intake 永远跳过它。
+
+实测过：issue #1253 就是这么建的，没有标签、没有 PR，已关闭。
 
 ## 提交表单怎么填
 
@@ -23,12 +28,14 @@ SSH 密钥的账号能拉）。
 | Source | `https://github.com/943545721/matt-skills-deck` |
 | Categories | ☑ **Workspaces**（主类目）、☑ **Utils**、☑ **Git** |
 
+**必须在网页上提交**（见上一节：API 建的 issue 拿不到 `submission` 标签）。
 只填这些就够。标签、日期、artifact 固定由机器人写；缺截图不会挡住 review。
 
 ## 预备好的记录
 
-下面这份已用注册表自带的校验器跑过离线检查（`node scripts/validate.ts`：390 条记录全部
-well-formed）。若需要直接提 PR，放到 `plugins/943545721/matt-skills-deck.json`。
+下面这份用注册表自带的校验器跑过两轮：离线（392 条记录全部 well-formed）与在线
+（`--online --changed`：**1 record matches its pinned artifact**，即注册表能真的 clone 到
+那个 commit）。若需要直接提 PR，放到 `plugins/943545721/matt-skills-deck.json`。
 
 三处 `<sha>` 都换成 `git rev-parse 'v0.1.1^{commit}'` 的输出（40 位）。
 
@@ -66,9 +73,11 @@ well-formed）。若需要直接提 PR，放到 `plugins/943545721/matt-skills-d
 
 ## 还差什么
 
-1. **仓库转公开**（见上）—— 不做这一步，后面全部无效。
+1. **在网页上提交那张表单** —— 唯一还缺的一步，且必须由有 GitHub 登录态的人完成
+   （原因见上：标签只能由表单打上）。
 2. **`media`**：现在空数组。注册表对「有界面的插件」期望提供截图；`REVIEW.md` 说视觉相关
    的 listing 需要合适的媒体。本机起不了 Paseo 桌面端窗口，截不了图。建议录一段
    「任务板 → 地图 → 下一步」的 mp4/gif，传到仓库 `docs/` 下，再填 raw 链接。
+   审核者可以补 listing 文案，但截图最好由作者提供。
 3. **审核期间的更新**：Git 来源不会被自动跟踪新版本，发新 tag 后要重新提交一次，
    或请在审 PR 里改 commit。

@@ -47,23 +47,25 @@
 - 清单 `paseo-plugin.json`（id、`requirements.paseo: >=0.13.0 <0.14.0`）；
 - 双语 overview、README、LICENSE / NOTICE；
 - 可用的 `npm run typecheck` 与 `npm test`（提交前门槛）。
-- **远端**：`git@github.com:943545721/matt-skills-deck.git`，默认分支 `main`。**仓库目前是私有的**
-  （匿名 `api.github.com/repos/...` 与 `raw.githubusercontent.com` 均返回 404），转公开前
-  `paseo plugin install git:…` 对外不可用，注册表也无法 clone 到 artifact。
-- **版本**：`package.json` 为 `0.1.0`，已打附注 tag `v0.1.0`；转公开后即可用
-  `paseo plugin install git:943545721/matt-skills-deck --ref v0.1.0` 安装。
+- **远端**：`git@github.com:943545721/matt-skills-deck.git`，默认分支 `main`，**已转为公开**
+  （匿名访问清单、tag、图标均 200）。
+- **版本**：`package.json` 为 `0.1.0`，已打附注 tag `v0.1.0` / `v0.1.1`；
+  `paseo plugin install git:943545721/matt-skills-deck --ref v0.1.1` 可用。
 - **提交入口已核实**：公开注册表是 [`getpaseo/plugins`](https://github.com/getpaseo/plugins)，
-  作者开 submission issue、机器人转 review PR；提交包见 [`registry-submission.md`](registry-submission.md)。
+  作者在**网页表单**开 submission issue、机器人转 review PR；提交包见
+  [`registry-submission.md`](registry-submission.md)。
+- **artifact 已验证可拉取**：注册表校验器 `validate.ts --online --changed` 通过
+  （`1 record(s) match their pinned artifacts`）。
 - **包元数据**：补了 `repository` / `homepage` / `bugs` / `keywords` / `engines`，`files` 带上 `assets/`。
 - **图标**：`assets/icon.png`（512×512 像素风），清单里以 `icon` 引用；`media` 仍为空数组。
 - **CI**：`.github/workflows/ci.yml` 在 Node 22 上跑 `npm ci` + 两套 typecheck + 71 条测试。
 
 还差的，需要人到场处理：
 
-1. **仓库要转公开**：注册表的 review 会 clone artifact，私有仓库直接失败（本地已复现：
-   `validate.ts --online` 报 `could not read Username`）。转公开前，git 安装与注册表提交都无效。
-2. **提交 issue 要本人开**：需要 GitHub 登录态，本机只有 SSH 密钥、没有 API token。
-3. **`media` 是空的**：注册表条目要求一串图片/视频 URL，本环境起不了 Paseo 桌面端窗口，截不了图。
+1. **提交 issue 必须在网页表单里点**：intake 只处理带 `submission` 标签的 issue，而这个标签由
+   表单模板自动打上。用 API 建 issue 时标签会被忽略（非协作者无 triage 权限，单独加标签 403），
+   实测建的 #1253 因此没有触发 review，已关闭。详见 [`registry-submission.md`](registry-submission.md)。
+2. **`media` 是空的**：注册表条目要求一串图片/视频 URL，本环境起不了 Paseo 桌面端窗口，截不了图。
    等能截图时，录一段「任务板 → 地图 → 下一步」的 gif 或 mp4 最省事。
-4. **`package.json` 仍带 `"private": true`**：这是故意的，防手滑发到 npm；本机也没有 npm 凭据。
+3. **`package.json` 仍带 `"private": true`**：这是故意的，防手滑发到 npm；本机也没有 npm 凭据。
    真要走 npm 产物时，去掉这个字段再 `npm publish`（`license` / `repository` 已经补齐）。
