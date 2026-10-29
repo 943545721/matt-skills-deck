@@ -141,7 +141,8 @@ export function buildMapBody(input: {
     input.notes?.trim() || "<!-- Empty -->",
     "",
     "## Decisions so far",
-    bullets(input.decisions?.map(decisionLine), "<!-- None yet -->"),
+    // 决策行自己带 `- `，不能再套一层 bullets，否则写出 `- - **标题**`（读回来不是决策）。
+    input.decisions?.length ? input.decisions.map(decisionLine).join("\n") : "<!-- None yet -->",
     "",
     "## Not yet specified",
     bullets(input.fog, "<!-- None -->"),
@@ -176,4 +177,43 @@ export function parseMapBody(body: unknown): ParsedMapBody {
   out.fog = clean(sections["Not yet specified"]).filter((line) => !line.startsWith("<!--"));
   out.outOfScope = clean(sections["Out of scope"]).filter((line) => !line.startsWith("<!--"));
   return out;
+}
+
+/**
+ * 项目地图骨架：按本项目的模块（area）分组，生成一张能被读回来的空地图。
+ *
+ * 每个项目一张自己的地图，所以骨架里只提本项目与它的模块；跨项目只保留「怎么引用」的写法。
+ * 生成走 `buildMapBody`：写与读是一对，形状由同一个函数保证，骨架不会造出读不回来的正文。
+ *
+ * 明确不生成跨项目聚合：总图各项目各一份，这是已经定过的决定。
+ */
+export function mapSkeletonBody(input: {
+  /** 目标那一句；留空时写成待填。 */
+  destination: string;
+  /** 本项目的模块键（配置里的 `areas`）；为空时给一个「未分组」。 */
+  areas: readonly string[];
+  /** 这张图属于哪个项目；没有配置时传 null。 */
+  project: { key: string; dir: string } | null;
+}): string {
+  const areas = input.areas.length > 0 ? [...input.areas] : ["未分组"];
+  const project = input.project ? `${input.project.key}（${input.project.dir}）` : "未在配置里登记";
+  const destination = input.destination.trim() || "待写：这条路线最终要到达的那件事。";
+
+  return buildMapBody({
+    destination,
+    notes: [
+      `本图只覆盖 ${project}；别的项目的票不在这张图上，也不做跨项目聚合。`,
+      "跨项目依赖写在子票正文里：`Blocked by: owner/repo#12`；本项目内可以简写成 `项目键#12`。",
+      "模块分组来自 `.paseo-deck.json` 的 `areas`；结构变了就重跑项目梳理，再回来改分组。",
+    ].join("\n"),
+    decisions: areas.map((area) => ({
+      title: `area:${area}`,
+      gist: "待定：这个模块上第一个要定的事（用票名指代它，别只写编号）",
+    })),
+    fog: areas.map((area) => `${area}：还没定的部分`),
+    outOfScope: [
+      "跨项目聚合页与跨项目计数：总图各项目各一份，不做合并视图。",
+      "不属于本项目模块范围的工作。",
+    ],
+  });
 }
