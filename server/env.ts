@@ -1,15 +1,22 @@
 import { execFile } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import { STANDARD_LABELS } from "../shared/labels.ts";
-import type { EnvCheck } from "../shared/env.ts";
+import type { EnvCheck, envProjectsRpc, WorkspaceProjectView, WorkspaceProjectsReport } from "../shared/env.ts";
+import { areasMissingFromStructure, workspacePackagePaths } from "../shared/env.ts";
 import { getSettings } from "./settings.ts";
 import type { DeckSettings } from "../shared/settings.ts";
 import { listLabels } from "./tracker/labels.ts";
 import { resolveRepo, type Gate } from "./rpc/repo-gate.ts";
 import type { TargetFailure } from "./tracker/targets.ts";
-import { listWorkspaceRepoTargets, type WorkspaceRepoListing } from "./tracker/targets.ts";
+import {
+  listWorkspaceProjects,
+  listWorkspaceRepoTargets,
+  type WorkspaceProjectListing,
+  type WorkspaceRepoListing,
+} from "./tracker/targets.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -56,6 +63,99 @@ const defaultProbe: EnvProbe = {
   listLabels,
   settings: getSettings,
 };
+
+// ---------------------------------------------------------------------------
+// 项目清单：配了几个、各自什么后端、哪里不对、是不是跟目录对不上了
+// ---------------------------------------------------------------------------
+
+/** 项目视图要读的三件事。注入是为了让「目录错了 / area 对不上」能在没有真实仓库时测。 */
+export interface ProjectsProbe {
+  listProjects(workspaceDir: string): Promise<WorkspaceProjectListing>;
+  readDir(target: string): Promise<string[] | null>;
+  readText(file: string): Promise<string | null>;
+}
+
+export const defaultProjectsProbe: ProjectsProbe = {
+  listProjects: listWorkspaceProjects,
+  async readDir(target) {
+    try {
+      return await readdir(target);
+    } catch {
+      return null;
+    }
+  },
+  async readText(file) {
+    try {
+      return await readFile(file, "utf8");
+    } catch {
+      return null;
+    }
+  },
+};
+
+/**
+ * 把项目清单整理成检查页能直接渲染的形状。
+ *
+ * 两类结论分开给：
+ * - `problem`：这个项目当不了任务板目标（目录不在、不是仓库、没有远端），要修；
+ * - `areaDrift`：areas 在目录里找不到对应项，配置可能过期，重跑梳理即可——只提示，不阻断。
+ *
+ * 旧格式（v1）不产生任何错误提示：它只是「选了一个仓库」，没有清单可对，
+ * 所以既不算 drift 也不算 warning。
+ */
+export async function inspectWorkspaceProjects(
+  workspaceDir: string,
+  probe: ProjectsProbe = defaultProjectsProbe,
+): Promise<WorkspaceProjectsReport> {
+  const listing = await probe.listProjects(workspaceDir);
+  if (listing.error) {
+    return {
+      kind: "none",
+      error: `${listing.error.reason}：${listing.error.detail}`,
+      projects: [],
+      drift: [],
+      warnings: [],
+    };
+  }
+
+  const projects: WorkspaceProjectView[] = [];
+  for (const row of listing.projects) {
+    let areaDrift: string[] = [];
+    if (listing.kind === "v2" && row.exists && row.areas.length > 0) {
+      const dir = path.join(workspaceDir, row.dir);
+      const dirs = (await probe.readDir(dir)) ?? [];
+      const manifest = workspacePackagePaths(await probe.readText(path.join(dir, "package.json")));
+      areaDrift = manifest.undecidable ? [] : areasMissingFromStructure(row.areas, { dirs, workspacePaths: manifest.paths });
+    }
+    projects.push({
+      key: row.key,
+      dir: row.dir,
+      repo: row.repo,
+      owner: row.owner,
+      areas: row.areas,
+      skillsMode: row.skillsMode,
+      backend: row.resolved?.host ?? null,
+      problem: row.problem,
+      areaDrift,
+    });
+  }
+
+  return {
+    kind: listing.kind,
+    error: null,
+    projects,
+    // v1 没有「清单」这回事：磁盘上多出来的仓库不是漂移。
+    drift: listing.kind === "v2" ? listing.drift : [],
+    warnings: listing.warnings,
+  };
+}
+
+type ProjectsInput = RpcInput<typeof envProjectsRpc>;
+
+/** 检查页的项目清单出口。只读，不写配置、不建标签。 */
+export async function envProjectsHandler(input: ProjectsInput): Promise<RpcOutput<typeof envProjectsRpc>> {
+  return inspectWorkspaceProjects(input.workspaceDir);
+}
 
 /** `v22.20.0` → [22,20]；认不出就按 0 算，避免「版本检查」把插件判死。 */
 function nodeVersionOf(raw: string): [number, number] {

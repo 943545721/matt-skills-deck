@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { collectEnvChecks, effectiveBackend } from "../server/env.ts";
+import { collectEnvChecks, effectiveBackend, inspectWorkspaceProjects } from "../server/env.ts";
+import { areasMissingFromStructure, workspacePackagePaths } from "../shared/env.ts";
 import { STANDARD_LABELS } from "../shared/labels.ts";
 
 /**
@@ -284,4 +285,162 @@ test("auto 解析失败：后端报 none，不再假装本地可用", async () =
   assert.equal(backend, "none");
   assert.equal(byId(checks).backend.status, "fail");
   assert.match(byId(checks).backend.detail, /bitbucket/);
+});
+
+// ---------------------------------------------------------------------------
+// 项目清单（#6）：配了几个、各自什么后端、哪里不对、是不是跟目录对不上
+// ---------------------------------------------------------------------------
+
+const projectsProbe = (overrides = {}) => ({
+  listProjects: async () => projectListing(),
+  readDir: async (target) => (target.endsWith("/api") ? ["api", "auth", "node_modules"] : null),
+  readText: async () => null,
+  ...overrides,
+});
+
+function projectListing(overrides = {}) {
+  return {
+    ok: true,
+    kind: "v2",
+    config: { version: 2, projects: [], warnings: [] },
+    error: null,
+    projects: [
+      {
+        key: "api",
+        dir: "api",
+        repo: "acme/api",
+        owner: "backend",
+        areas: ["api", "auth"],
+        skillsMode: null,
+        exists: true,
+        resolved: { host: "github", owner: "acme", name: "api", webUrl: "https://github.com/acme/api" },
+        problem: null,
+      },
+      {
+        key: "web",
+        dir: "apps/web",
+        repo: null,
+        owner: "frontend",
+        areas: [],
+        skillsMode: "per-project",
+        exists: false,
+        resolved: null,
+        problem: "目录「apps/web」不存在",
+      },
+    ],
+    scanned: [],
+    drift: ["磁盘上有 tool（acme/tool），项目清单里没有它"],
+    warnings: [],
+    ...overrides,
+  };
+}
+
+const byProject = (report) => Object.fromEntries(report.projects.map((row) => [row.key, row]));
+
+test("项目清单：列目录、仓库、后端与技能模式，坏掉的项目逐条点名", async () => {
+  const report = await inspectWorkspaceProjects("/work/ws", projectsProbe());
+  assert.equal(report.kind, "v2");
+  assert.equal(report.error, null);
+  const rows = byProject(report);
+  assert.equal(rows.api.backend, "github");
+  assert.equal(rows.api.problem, null);
+  assert.deepEqual(rows.api.areas, ["api", "auth"]);
+  assert.equal(rows.web.backend, null);
+  assert.match(rows.web.problem, /apps\/web/);
+  assert.equal(rows.web.skillsMode, "per-project");
+  // 磁盘上有、清单里没写的仓库：只在 v2 报。
+  assert.deepEqual(report.drift, ["磁盘上有 tool（acme/tool），项目清单里没有它"]);
+  assert.deepEqual(report.warnings, []);
+});
+
+test("项目清单：area 目录不见了就提示配置可能过期，但不判项目坏", async () => {
+  const listing = projectListing();
+  listing.projects[0].areas = ["api", "report"];
+  const report = await inspectWorkspaceProjects("/work/ws", projectsProbe({ listProjects: async () => listing }));
+  const row = byProject(report).api;
+  assert.deepEqual(row.areaDrift, ["report"]);
+  assert.equal(row.problem, null);
+  assert.equal(row.backend, "github");
+});
+
+test("项目清单：area 在 package.json workspaces 里也算对得上", async () => {
+  const listing = projectListing();
+  listing.projects[0].areas = ["admin-web"];
+  const report = await inspectWorkspaceProjects(
+    "/work/ws",
+    projectsProbe({
+      listProjects: async () => listing,
+      readDir: async () => [],
+      readText: async () => JSON.stringify({ workspaces: ["apps/admin-web"] }),
+    }),
+  );
+  assert.deepEqual(byProject(report).api.areaDrift, []);
+});
+
+test("项目清单：workspace 声明带通配符时判不了，就不给过期提示", async () => {
+  const listing = projectListing();
+  listing.projects[0].areas = ["admin-web"];
+  const report = await inspectWorkspaceProjects(
+    "/work/ws",
+    projectsProbe({
+      listProjects: async () => listing,
+      readDir: async () => [],
+      readText: async () => JSON.stringify({ workspaces: ["apps/*"] }),
+    }),
+  );
+  assert.deepEqual(byProject(report).api.areaDrift, []);
+});
+
+test("项目清单：旧格式 v1 一句话说明、不产生任何错误与漂移", async () => {
+  const listing = projectListing({
+    kind: "v1",
+    projects: [
+      {
+        key: "api",
+        dir: "api",
+        repo: null,
+        owner: null,
+        areas: [],
+        skillsMode: null,
+        exists: true,
+        resolved: { host: "github", owner: "acme", name: "api", webUrl: "https://github.com/acme/api" },
+        problem: null,
+      },
+    ],
+  });
+  const report = await inspectWorkspaceProjects("/work/ws", projectsProbe({ listProjects: async () => listing }));
+  assert.equal(report.kind, "v1");
+  assert.equal(report.error, null);
+  assert.deepEqual(report.drift, []);
+  assert.deepEqual(report.warnings, []);
+  assert.equal(report.projects.length, 1);
+  assert.equal(report.projects[0].problem, null);
+  assert.deepEqual(report.projects[0].areaDrift, []);
+});
+
+test("项目清单：配置读不出来时报出原文，而不是显示「没有项目」", async () => {
+  const listing = projectListing({ kind: "none", error: { reason: "bad-json", detail: "Unexpected token }" }, projects: [], drift: [] });
+  const report = await inspectWorkspaceProjects("/work/ws", projectsProbe({ listProjects: async () => listing }));
+  assert.equal(report.kind, "none");
+  assert.match(report.error, /bad-json/);
+  assert.match(report.error, /Unexpected token/);
+  assert.deepEqual(report.projects, []);
+});
+
+test("workspace 声明解析：数组、packages 对象都认，带通配符标为判不了", () => {
+  assert.deepEqual(workspacePackagePaths(null), { paths: [], undecidable: false });
+  assert.deepEqual(workspacePackagePaths('{"workspaces":["apps/web"]}'), { paths: ["apps/web"], undecidable: false });
+  assert.deepEqual(workspacePackagePaths('{"workspaces":{"packages":["pkg/a"]}}'), { paths: ["pkg/a"], undecidable: false });
+  assert.deepEqual(workspacePackagePaths('{"workspaces":["apps/*","lib/x"]}'), { paths: ["lib/x"], undecidable: true });
+  // 坏的 package.json 判不了，不拿来当证据。
+  assert.deepEqual(workspacePackagePaths("{oops"), { paths: [], undecidable: true });
+});
+
+test("area 对目录：同名子目录、workspace 全路径与末段都算命中", () => {
+  const structure = { dirs: ["Api", "legacy"], workspacePaths: ["apps/admin-web", "./pkg/core/"] };
+  assert.deepEqual(areasMissingFromStructure(["api", "legacy"], structure), []);
+  assert.deepEqual(areasMissingFromStructure(["admin-web", "core"], structure), []);
+  assert.deepEqual(areasMissingFromStructure(["report"], structure), ["report"]);
+  // 空 áreas 不提示：没有清单就没有「过期」可言。
+  assert.deepEqual(areasMissingFromStructure([], structure), []);
 });

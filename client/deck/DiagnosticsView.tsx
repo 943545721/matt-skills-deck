@@ -5,7 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { EnvCheckId } from "../../shared/env";
-import { envCheckRpc } from "../../shared/env";
+import { envCheckRpc, envProjectsRpc } from "../../shared/env";
 import { logsClearRpc, logsRpc } from "../../shared/logs";
 import { deckSettings } from "../../shared/settings";
 import { statusRpc } from "../../shared/status";
@@ -61,6 +61,7 @@ export function DiagnosticsView({
   const readLogs = useRpc(logsRpc);
   const clearLogs = useRpc(logsClearRpc);
   const checkEnv = useRpc(envCheckRpc);
+  const checkProjects = useRpc(envProjectsRpc);
   const settings = useSettings(deckSettings);
   const [authOpen, setAuthOpen] = useState(false);
 
@@ -70,6 +71,13 @@ export function DiagnosticsView({
     queryKey: ["deck", "env", workspaceDir ?? ""],
     queryFn: () => checkEnv({ workspaceDir }),
     staleTime: 30_000,
+  });
+  // 项目清单单独一问：它比环境检查更常变（改配置、改目录），刷新时不该拖着 gh --version 一起重跑。
+  const projects = useQuery({
+    queryKey: ["deck", "env-projects", workspaceDir ?? ""],
+    queryFn: () => checkProjects({ workspaceDir: workspaceDir ?? "" }),
+    enabled: Boolean(workspaceDir),
+    staleTime: 15_000,
   });
 
   const clear = useMutation({
@@ -215,6 +223,91 @@ export function DiagnosticsView({
         )}
         {env.error ? <Text style={styles.danger}>{env.error.message}</Text> : null}
       </PixelCard>
+
+      {workspaceDir ? (
+        <>
+          <View style={styles.toolbar}>
+            <Text style={[styles.head, { color: skin.colors.tabInk }]}>{t("workspace.projectsTitle")}</Text>
+            {projects.data && projects.data.projects.length ? (
+              <Text style={styles.onChecker}>{t("workspace.projectsCount", { n: projects.data.projects.length })}</Text>
+            ) : null}
+            <View style={{ marginLeft: "auto" as const }} />
+            <PixelButton
+              skin={skin}
+              label={projects.isFetching ? t("common.refreshing") : t("common.refresh")}
+              accessibilityLabel={t("workspace.projectsTitle")}
+              onPress={() => void projects.refetch()}
+            />
+          </View>
+
+          <PixelCard skin={skin} style={styles.card}>
+            {projects.data ? (
+              <>
+                {projects.data.kind === "v1" ? <Text style={styles.muted}>{t("workspace.projectsV1")}</Text> : null}
+                {projects.data.kind === "none" && !projects.data.error ? (
+                  <Text style={styles.muted}>{t("workspace.projectsNone")}</Text>
+                ) : null}
+                {projects.data.error ? (
+                  <Text style={styles.danger}>{t("workspace.configError", { detail: projects.data.error })}</Text>
+                ) : null}
+                {projects.data.projects.map((row) => (
+                  <View key={row.key} style={styles.checkRow}>
+                    <View style={styles.checkHead}>
+                      <Text style={styles.checkName}>{row.key}</Text>
+                      <Text style={styles.muted} numberOfLines={2}>
+                        {row.dir}
+                      </Text>
+                      <Text style={[styles.checkName, row.backend ? styles.success : styles.danger]}>
+                        {row.backend ?? t("workspace.projectNoBackend")}
+                      </Text>
+                      {row.skillsMode ? (
+                        <Text style={styles.muted}>{t("workspace.projectSkills", { mode: row.skillsMode })}</Text>
+                      ) : null}
+                    </View>
+                    {row.repo || row.areas.length ? (
+                      <Text style={styles.hint} numberOfLines={2}>
+                        {[
+                          row.repo ?? "",
+                          row.areas.length ? `${t("workspace.projectAreas")} ${row.areas.join("、")}` : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </Text>
+                    ) : null}
+                    {row.problem ? <Text style={styles.danger}>{row.problem}</Text> : null}
+                    {row.areaDrift.length ? (
+                      <Text style={styles.warning}>{t("workspace.areaDrift", { names: row.areaDrift.join("、") })}</Text>
+                    ) : null}
+                  </View>
+                ))}
+                {projects.data.drift.length ? (
+                  <>
+                    <Text style={styles.checkName}>{t("workspace.driftTitle")}</Text>
+                    {projects.data.drift.map((item) => (
+                      <Text key={item} style={styles.warning} numberOfLines={2}>
+                        {item}
+                      </Text>
+                    ))}
+                  </>
+                ) : null}
+                {projects.data.warnings.length ? (
+                  <>
+                    <Text style={styles.checkName}>{t("workspace.warningsTitle")}</Text>
+                    {projects.data.warnings.map((item) => (
+                      <Text key={item} style={styles.muted} numberOfLines={2}>
+                        {item}
+                      </Text>
+                    ))}
+                  </>
+                ) : null}
+              </>
+            ) : (
+              <Text style={styles.hint}>{projects.isPending ? t("common.loading") : t("workspace.projectsTitle")}</Text>
+            )}
+            {projects.error ? <Text style={styles.danger}>{projects.error.message}</Text> : null}
+          </PixelCard>
+        </>
+      ) : null}
 
       <SetupGuide theme={theme} />
 

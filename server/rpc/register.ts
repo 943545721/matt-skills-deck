@@ -8,11 +8,12 @@ import {
   issuesSetLabelsRpc,
   issuesStateRpc,
 } from "../../shared/issues.ts";
-import { labelsColorsRpc, labelsListRpc } from "../../shared/labels.ts";
+import { labelsColorsRpc, labelsListRpc, labelsSyncRpc } from "../../shared/labels.ts";
 import { mapRpc } from "../../shared/map.ts";
 import { logsClearRpc, logsRpc } from "../../shared/logs.ts";
-import { envCheckRpc } from "../../shared/env.ts";
+import { envCheckRpc, envProjectsRpc } from "../../shared/env.ts";
 import { envCheckHandler } from "./env.ts";
+import { envProjectsHandler } from "../env.ts";
 import { authCancelRpc, authStartRpc, authStatusRpc, authTokenRpc } from "../../shared/auth.ts";
 import { authCancelHandler, authStartHandler, authStatusHandler, authTokenHandler } from "./auth.ts";
 import {
@@ -102,7 +103,7 @@ import {
   setIssueLabelsHandler,
   setIssueStateHandler,
 } from "./issues.ts";
-import { listLabelsHandler, setLabelColorsHandler } from "./labels.ts";
+import { listLabelsHandler, setLabelColorsHandler, syncLabelsHandler } from "./labels.ts";
 import { mapHandler } from "./map.ts";
 import { adoptSkillHandler, listSkills, installSkillsHandler, readSkill, removeSkillsHandler } from "./skills.ts";
 import { readStatus } from "../status.ts";
@@ -150,6 +151,7 @@ export function registerAll(server: PluginServerContext): void {
 
   server.handle(labelsListRpc, listLabelsHandler);
   server.handle(labelsColorsRpc, setLabelColorsHandler);
+  server.handle(labelsSyncRpc, syncLabelsHandler);
 
   server.handle(gitStatusRpc, gitStatusHandler);
   server.handle(gitWorktreesRpc, gitWorktreesHandler);
@@ -171,6 +173,7 @@ export function registerAll(server: PluginServerContext): void {
     return { cleared };
   });
   server.handle(envCheckRpc, envCheckHandler);
+  server.handle(envProjectsRpc, envProjectsHandler);
   server.handle(authStatusRpc, authStatusHandler);
   server.handle(authStartRpc, authStartHandler);
   server.handle(authCancelRpc, authCancelHandler);
