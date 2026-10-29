@@ -24,6 +24,7 @@ import { SessionSheet } from "../session/SessionSheet.tsx";
 import type { SessionNavigation } from "../session/SessionSheet.tsx";
 import { useDeckWorkspaceProvider } from "../surfaces/host.tsx";
 import { CheckActionModal, type WizardStepSpec } from "./CheckActionModal";
+import { WorkspaceShapeBanner } from "./WorkspaceShapeBanner";
 import {
   checkGuidePromptOf,
   ensureLabelsPromptOf,
@@ -596,6 +597,9 @@ export function ChecksTab({
           onPress={() => void query.refetch()}
         />
       </View>
+
+      {/* 先问「这个目录是什么」，再谈检查项：判成不成套时，下面那些单项检查本身就问错了问题。 */}
+      <WorkspaceShapeBanner theme={theme} workspaceId={workspaceId} workspaceDir={workspaceDir} />
 
       {query.error ? (
         <PixelBanner skin={skin}>

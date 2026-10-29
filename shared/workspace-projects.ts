@@ -19,6 +19,21 @@ export type ProjectOwner = (typeof PROJECT_OWNERS)[number];
 export const SKILL_MODES = ["unified", "per-project"] as const;
 export type SkillMode = (typeof SKILL_MODES)[number];
 
+/**
+ * 工作区的形态：单项目、同一产品线的多项目容器、或者一堆互不相关的仓库。
+ *
+ * 写进配置就表示人已经表过态，插件不再反复提示；不写则由插件依据目录与远端判断。
+ */
+export const WORKSPACE_SHAPES = ["single", "container", "mixed"] as const;
+export type WorkspaceShape = (typeof WORKSPACE_SHAPES)[number];
+
+/** 人对「这些项目到底算不算一套」的声明。 */
+export interface WorkspaceCoordination {
+  shape: WorkspaceShape | null;
+  /** 一句话说明为什么这么分（「这些就是要放一起」之类）。 */
+  note: string | null;
+}
+
 export interface WorkspaceProject {
   /** 项目标识，小写字母数字连字符；作标签与菜单的稳定键。 */
   key: string;
@@ -36,6 +51,8 @@ export interface WorkspaceProject {
 export interface WorkspaceConfig {
   version: 1 | 2;
   projects: WorkspaceProject[];
+  /** v2 才有的「这些项目算不算一套」的声明；没有就是 null。 */
+  coordination: WorkspaceCoordination | null;
   /** 只提醒、不阻断：读出来的清单能用，但这些地方值得人看一眼。 */
   warnings: string[];
 }
@@ -139,6 +156,26 @@ function parseProject(raw: unknown, index: number, warnings: string[]): ParseOne
 
 type ParseOneResult = { ok: true; project: WorkspaceProject } | { ok: false; detail: string };
 
+/** `coordination` 是人写的声明，写错就直说，不猜一个形状。 */
+function readCoordination(raw: unknown): { ok: true; value: WorkspaceCoordination | null } | { ok: false; detail: string } {
+  if (raw === undefined || raw === null) return { ok: true, value: null };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, detail: "coordination 必须是对象" };
+  }
+  const item = raw as Record<string, unknown>;
+  const shapeRaw = item.shape === undefined || item.shape === null ? "" : asString(item.shape);
+  let shape: WorkspaceShape | null = null;
+  if (shapeRaw) {
+    if (!(WORKSPACE_SHAPES as readonly string[]).includes(shapeRaw)) {
+      return { ok: false, detail: `coordination.shape「${shapeRaw.slice(0, 40)}」只认 ${WORKSPACE_SHAPES.join(" / ")}` };
+    }
+    shape = shapeRaw as WorkspaceShape;
+  }
+  const note = asString(item.note).slice(0, 500);
+  if (!shape && !note) return { ok: true, value: null };
+  return { ok: true, value: { shape, note: note || null } };
+}
+
 /**
  * 解析一份配置对象。
  *
@@ -171,8 +208,10 @@ export function parseWorkspaceConfigValue(value: unknown): ConfigParse {
       seen.add(parsed.project.key);
       projects.push(parsed.project);
     }
+    const coordination = readCoordination(raw.coordination);
+    if (!coordination.ok) return { ok: false, reason: "bad-shape", detail: coordination.detail };
     if (projects.length === 0) warnings.push("projects 是空数组：这个工作区没有任何项目，界面会按单仓库模式回退");
-    return { ok: true, config: { version: 2, projects, warnings } };
+    return { ok: true, config: { version: 2, projects, coordination: coordination.value, warnings } };
   }
 
   const repoDir = asString(raw.repoDir);
@@ -188,6 +227,8 @@ export function parseWorkspaceConfigValue(value: unknown): ConfigParse {
     config: {
       version: 1,
       projects: [{ key: keyFromDir(repoDir), dir: repoDir, repo: null, owner: null, areas: [], skillsMode: null }],
+      // v1 没有任何「算不算一套」的声明：老文件不该凭空多出提示。
+      coordination: null,
       warnings,
     },
   };

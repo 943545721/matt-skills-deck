@@ -1,6 +1,7 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { PROJECT_OWNERS, SKILL_MODES } from "./workspace-projects.ts";
+import { MIXED_OPTIONS } from "./workspace-shape.ts";
+import { PROJECT_OWNERS, SKILL_MODES, WORKSPACE_SHAPES } from "./workspace-projects.ts";
 
 /**
  * 仓库详情。
@@ -161,6 +162,61 @@ export const workspaceProjectsRpc = defineRpc({
     /** 配置读出来了，但有些项被忽略 / 兜底，值得人看一眼。 */
     warnings: z.array(z.string()),
   }),
+});
+
+/**
+ * 工作区形态：单项目 / 多项目容器 / 不成套。
+ *
+ * 只读判定 + 可复制的梳理提示词。判成多项目或不成套时 `prompt` 非空，
+ * 界面据此主动提示；`acknowledged` 为 true 表示人已经表过态（写了项目清单或
+ * `coordination.shape`），界面不要再弹。
+ */
+export const workspaceShapeRpc = defineRpc({
+  name: "deck.workspace.shape",
+  input: z.object({
+    workspaceDir: z.string().min(1),
+    /** 提示词用哪种语言，跟界面语言走。 */
+    lang: z.enum(["zh", "en"]).optional(),
+  }),
+  output: z.object({
+    ok: z.literal(true),
+    shape: z.enum(WORKSPACE_SHAPES),
+    /** 判定依据，逐条；讲不清的地方以「未确认」开头。 */
+    reasons: z.array(z.string()),
+    acknowledged: z.boolean(),
+    repos: z.array(z.object({ dir: z.string(), host: z.enum(["github", "gitlab"]), owner: z.string(), name: z.string() })),
+    projects: z.array(z.object({ key: z.string(), dir: z.string() })),
+    configError: z.object({ reason: z.string(), detail: z.string() }).nullable(),
+    truncated: z.boolean(),
+    surveyPrompt: z.string().nullable(),
+    prompt: z
+      .object({
+        kind: z.enum(["survey", "mixed"]),
+        title: z.string(),
+        lines: z.array(z.string()),
+        options: z.array(z.enum(MIXED_OPTIONS)),
+      })
+      .nullable(),
+  }),
+});
+
+/**
+ * 记下「这些项目就这么放一起」。
+ *
+ * 只写 `coordination.shape`：用户说过一次之后，自识别提示就该停。
+ * 不顺手改项目清单、不动 v1 文件——那两件事各有各的入口。
+ */
+export const workspaceAcknowledgeRpc = defineRpc({
+  name: "deck.workspace.acknowledge",
+  input: z.object({ workspaceDir: z.string().min(1), shape: z.enum(WORKSPACE_SHAPES) }),
+  output: z.discriminatedUnion("ok", [
+    z.object({ ok: z.literal(true), shape: z.enum(WORKSPACE_SHAPES) }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["invalid", "no-config", "v1", "write-failed"]),
+      detail: z.string(),
+    }),
+  ]),
 });
 
 /**

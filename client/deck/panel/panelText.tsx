@@ -500,6 +500,20 @@ const EN = {
   "run.sessionTitle": "Session for #{number}: {title}",
   "run.noSession": "No issue is attached. Open an issue and choose “Attach to a session”.",
   "run.readOnly": "Read-only view: it reads status, worktree and logs; it never sends anything.",
+
+  "shape.title.survey": "This is a multi-project workspace",
+  "shape.title.mixed": "These repos do not look like one set",
+  "shape.reasons": "How this was decided",
+  "shape.truncated": "Only the first {n} subdirectories were scanned; the verdict may be incomplete.",
+  "shape.configError": "The project list could not be read: {detail}",
+  "shape.surveyCta": "Copy the survey prompt",
+  "shape.surveyCopied": "Survey prompt copied",
+  "shape.surveyHint": "Paste it into a session to run /project-survey. The plugin will not run it by itself or write any config.",
+  "shape.option.subset": "Include only some of these repos in this workspace",
+  "shape.option.split": "Split into two workspaces, one container each",
+  "shape.option.all-with-source": "Include all, but label each ticket with its source",
+  "shape.acknowledged": "You already decided how these projects belong together; this hint will not show again.",
+  "shape.dismiss": "Stop suggesting this",
 } as const;
 
 export type PanelKey = keyof typeof EN;
@@ -1020,6 +1034,20 @@ const ZH: Record<PanelKey, string> = {
   "run.sessionTitle": "票 #{number} 的会话：{title}",
   "run.noSession": "还没有附加票。打开一张票，点「附加到会话」。",
   "run.readOnly": "只读视图：读取状态、工作树与日志，不发送任何东西。",
+
+  "shape.title.survey": "这是多项目工作区",
+  "shape.title.mixed": "这些仓库看起来不成套",
+  "shape.reasons": "判定依据",
+  "shape.truncated": "只扫了前 {n} 个子目录，判定可能不完整。",
+  "shape.configError": "项目清单读不出来：{detail}",
+  "shape.surveyCta": "复制梳理提示词",
+  "shape.surveyCopied": "梳理提示词已复制",
+  "shape.surveyHint": "粘到会话里跑 /project-survey。插件不会自己执行，也不会写任何配置。",
+  "shape.option.subset": "只把其中几个项目纳入本工作区",
+  "shape.option.split": "拆成两个工作区，各自一个容器",
+  "shape.option.all-with-source": "全部纳入，但每张票标出来源项目",
+  "shape.acknowledged": "你已经定过这些项目怎么放一起，这条提示不会再出现。",
+  "shape.dismiss": "不再提示",
 };
 
 const TABLES = { en: EN, zh: ZH };

@@ -162,6 +162,15 @@ test("认不出的形状与坏 JSON：原因分得开，界面才能说清是哪
   assert.equal(good.config.projects[0].dir, "mall-api");
 });
 
+test("coordination：只认三种形状，写错报错；v1 永远是 null", () => {
+  const declared = ok(v2([project()], { coordination: { shape: "container", note: "这些都是同一套" } }));
+  assert.deepEqual(declared.coordination, { shape: "container", note: "这些都是同一套" });
+  assert.equal(ok(v2([project()])).coordination, null);
+  assert.equal(ok({ repoDir: "mall-api" }).coordination, null);
+  fail(v2([project()], { coordination: { shape: "群组" } }), "bad-shape");
+  fail(v2([project()], { coordination: "container" }), "bad-shape");
+});
+
 test("projectByKey：命中给项目，未命中给 null", () => {
   const config = ok(v2([project({ key: "api" }), project({ key: "web", dir: "web" })]));
   assert.equal(projectByKey(config, "web")?.dir, "web");

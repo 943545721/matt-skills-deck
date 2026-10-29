@@ -20,14 +20,18 @@ import {
   repoInfoRpc,
   repoSelectRpc,
   repoTargetsRpc,
+  workspaceAcknowledgeRpc,
   workspaceProjectsRpc,
+  workspaceShapeRpc,
 } from "../../shared/repo.ts";
 import {
   repoCandidatesHandler,
   repoInfoHandler,
   repoSelectHandler,
   repoTargetsHandler,
+  workspaceAcknowledgeHandler,
   workspaceProjectsHandler,
+  workspaceShapeHandler,
 } from "./repo.ts";
 import { updateCheckRpc } from "../../shared/update.ts";
 import { checkForUpdate } from "../update.ts";
@@ -174,6 +178,8 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(repoInfoRpc, repoInfoHandler);
   server.handle(repoTargetsRpc, repoTargetsHandler);
   server.handle(workspaceProjectsRpc, workspaceProjectsHandler);
+  server.handle(workspaceShapeRpc, workspaceShapeHandler);
+  server.handle(workspaceAcknowledgeRpc, workspaceAcknowledgeHandler);
   server.handle(repoCandidatesRpc, repoCandidatesHandler);
   server.handle(repoSelectRpc, repoSelectHandler);
   server.handle(updateCheckRpc, () => checkForUpdate());
