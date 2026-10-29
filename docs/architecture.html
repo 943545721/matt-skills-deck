@@ -1,0 +1,643 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>matt-skills-deck 架构图纸</title>
+<style>
+  :root { --bg:#0e1113; --plate:#131719; --line:#2a3237; --ink:#d8dee3; --dim:#8b969d; --accent:#c7a244; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:22px 26px 48px; background:var(--bg); color:var(--ink);
+         font:14px/1.6 ui-sans-serif,-apple-system,"Segoe UI",Roboto,"Noto Sans SC","PingFang SC",sans-serif; }
+  h1 { font-size:18px; margin:0 0 2px; font-weight:600; }
+  .sub { color:var(--dim); font-size:12px; margin:0 0 16px; }
+  .sub code { color:var(--accent); }
+  input.v { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
+  nav.tabs { display:flex; flex-wrap:wrap; border-bottom:1px solid var(--line); margin-bottom:18px; }
+  nav.tabs label { padding:7px 11px; font-size:12px; color:var(--dim); cursor:pointer;
+                   border-bottom:2px solid transparent; margin-bottom:-1px; }
+  nav.tabs label:hover { color:var(--ink); }
+  main section { display:none; }
+  h2 { font-size:15px; margin:0 0 4px; font-weight:600; }
+  .note { color:var(--dim); font-size:12px; margin:0 0 12px; }
+  .note code, p code { color:var(--accent); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+  figure { margin:0; }
+  svg { width:100%; height:auto; display:block; background:var(--plate);
+        border:1px solid var(--line); border-radius:3px; }
+  svg .box { fill:#171d20; stroke:#3a454b; stroke-width:1; }
+  svg .box.accent { stroke:var(--accent); }
+  svg .t { fill:#d8dee3; font:11px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  svg .s { fill:#8b969d; font:10px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  svg .l { stroke:#3a454b; stroke-width:1; fill:none; }
+  svg .l.accent { stroke:var(--accent); }
+  svg .lbl { fill:var(--accent); font:10px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  details { margin-top:10px; }
+  summary { cursor:pointer; color:var(--dim); font-size:12px; user-select:none; }
+  summary:hover { color:var(--ink); }
+  pre { margin:8px 0 0; padding:12px 14px; background:#0b0e10; border:1px solid var(--line);
+        border-radius:3px; overflow:auto; color:#b9c2c8;
+        font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  table { border-collapse:collapse; font-size:12px; margin-top:10px; }
+  th, td { border-bottom:1px solid var(--line); padding:5px 12px 5px 0; text-align:left; vertical-align:top; }
+  th { color:var(--dim); font-weight:500; }
+  td code { color:var(--accent); font:11px ui-monospace,SFMono-Regular,Menlo,monospace; }
+  footer { margin-top:26px; color:var(--dim); font-size:11px; border-top:1px solid var(--line); padding-top:10px; }
+  #r1:checked ~ nav label[for=r1], #r2:checked ~ nav label[for=r2], #r3:checked ~ nav label[for=r3],
+  #r4:checked ~ nav label[for=r4], #r5:checked ~ nav label[for=r5], #r6:checked ~ nav label[for=r6],
+  #r7:checked ~ nav label[for=r7], #r8:checked ~ nav label[for=r8], #r9:checked ~ nav label[for=r9]
+  { color:var(--accent); border-bottom-color:var(--accent); }
+  #r1:checked ~ main #v1, #r2:checked ~ main #v2, #r3:checked ~ main #v3,
+  #r4:checked ~ main #v4, #r5:checked ~ main #v5, #r6:checked ~ main #v6,
+  #r7:checked ~ main #v7, #r8:checked ~ main #v8, #r9:checked ~ main #v9
+  { display:block; }
+</style>
+</head>
+<body>
+<h1>matt-skills-deck · 架构图纸</h1>
+<p class="sub">Paseo 插件 · 版本 <code>0.1.0</code>（<code>shared/version.ts</code>）· 生成于 2026-10-30 · 每条结论都能指到文件，读不出来的地方写「未确认」</p>
+
+<input class="v" type="radio" name="v" id="r1" checked>
+<input class="v" type="radio" name="v" id="r2">
+<input class="v" type="radio" name="v" id="r3">
+<input class="v" type="radio" name="v" id="r4">
+<input class="v" type="radio" name="v" id="r5">
+<input class="v" type="radio" name="v" id="r6">
+<input class="v" type="radio" name="v" id="r7">
+<input class="v" type="radio" name="v" id="r8">
+<input class="v" type="radio" name="v" id="r9">
+
+<nav class="tabs">
+  <label for="r1">1 分层技术树</label>
+  <label for="r2">2 代码目录树</label>
+  <label for="r3">3 运行时进程树</label>
+  <label for="r4">4 端到端数据流</label>
+  <label for="r5">5 事件接入与分流</label>
+  <label for="r6">6 链路时序</label>
+  <label for="r7">7 状态机</label>
+  <label for="r8">8 部署拓扑</label>
+  <label for="r9">9 故障降级</label>
+</nav>
+
+<main>
+
+<!-- ═══════════════ 1 分层技术树 ═══════════════ -->
+<section id="v1">
+  <h2>1 分层技术树</h2>
+  <p class="note">这个系统分几层、每层有哪些真实存在的组件、各自住在哪个目录。依据 <code>index.server.ts</code>、<code>index.client.tsx</code>、<code>server/rpc/register.ts</code>、<code>server/hooks.ts</code>。</p>
+  <figure>
+    <svg viewBox="0 0 900 366" role="img" aria-label="分层技术树">
+      <text class="s" x="14" y="36">接入</text>
+      <rect class="box" x="70" y="18" width="140" height="34" rx="2"/><text class="t" x="80" y="39">工作区面板 deck-board</text>
+      <rect class="box" x="218" y="18" width="120" height="34" rx="2"/><text class="t" x="228" y="39">整页 deck-home</text>
+      <rect class="box" x="346" y="18" width="90" height="34" rx="2"/><text class="t" x="356" y="39">设置页</text>
+      <rect class="box" x="444" y="18" width="200" height="34" rx="2"/><text class="t" x="454" y="39">pill / 顶栏 / 侧栏 / agent 面板</text>
+      <rect class="box" x="652" y="18" width="140" height="34" rx="2"/><text class="t" x="662" y="39">命令中心 · /deck</text>
+      <text class="s" x="806" y="39">React 19</text>
+
+      <line class="l" x1="400" y1="52" x2="400" y2="86"/>
+      <text class="lbl" x="408" y="74">宿主 RPC（defineRpc + zod）</text>
+
+      <text class="s" x="14" y="122">应用</text>
+      <rect class="box accent" x="70" y="104" width="210" height="34" rx="2"/><text class="t" x="80" y="125">RPC · 63 个 handler</text>
+      <rect class="box accent" x="288" y="104" width="210" height="34" rx="2"/><text class="t" x="298" y="125">MCP · 17 个 MCP 工具</text>
+      <rect class="box accent" x="506" y="104" width="286" height="34" rx="2"/><text class="t" x="516" y="125">hooks · agent.create / turn_ended</text>
+
+      <line class="l" x1="400" y1="138" x2="400" y2="172"/>
+      <text class="lbl" x="408" y="160">同一批纯函数与后端</text>
+
+      <text class="s" x="14" y="208">领域</text>
+      <rect class="box" x="70" y="190" width="130" height="34" rx="2"/><text class="t" x="80" y="211">tracker</text>
+      <rect class="box" x="208" y="190" width="110" height="34" rx="2"/><text class="t" x="218" y="211">skills</text>
+      <rect class="box" x="326" y="190" width="84" height="34" rx="2"/><text class="t" x="336" y="211">git</text>
+      <rect class="box" x="418" y="190" width="150" height="34" rx="2"/><text class="t" x="428" y="211">orchestration</text>
+      <rect class="box" x="576" y="190" width="216" height="34" rx="2"/><text class="t" x="586" y="211">session / handoff / ledger</text>
+
+      <line class="l" x1="400" y1="224" x2="400" y2="258"/>
+      <text class="lbl" x="408" y="246">全部经子进程或文件系统</text>
+
+      <text class="s" x="14" y="294">数据</text>
+      <rect class="box" x="70" y="276" width="180" height="34" rx="2"/><text class="t" x="80" y="297">GitHub REST/GraphQL（gh）</text>
+      <rect class="box" x="258" y="276" width="170" height="34" rx="2"/><text class="t" x="268" y="297">GitLab API（glab）</text>
+      <rect class="box" x="436" y="276" width="220" height="34" rx="2"/><text class="t" x="446" y="297">.deck / .scratch Markdown</text>
+      <rect class="box" x="664" y="276" width="128" height="34" rx="2"/><text class="t" x="674" y="297">sites.json 0600</text>
+      <text class="s" x="70" y="332">技术栈：TypeScript 5.9 · Node ≥22.18（原生类型剥离，测试直接跑 .ts）· React 19.1 · react-native-web 0.81 · @tanstack/react-query 5 · zod 4</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+接入 │ 工作区面板 deck-board · 整页 deck-home · 设置页 · pill/顶栏/侧栏 · agent 面板 · 命令中心
+     ↓ 宿主 RPC（defineRpc 契约 + zod 校验；客户端 index.client.tsx 调 useRpc）
+应用 │ server/rpc 63 个 handler · server/mcp 17 个 deck_* 工具 · hooks(agent.create / turn_ended)
+     ↓
+领域 │ tracker(36 文件) · skills(5) · git(6) · orchestration · session/handoff/ledger
+     ↓
+数据 │ gh CLI → api.github.com（REST + graphql） · glab → GitLab API · .deck/.scratch · sites.json
+  </pre></details>
+</section>
+
+<!-- ═══════════════ 2 代码目录树 ═══════════════ -->
+<section id="v2">
+  <h2>2 代码目录树</h2>
+  <p class="note">仓库骨架（<code>ls</code> 两层，行数是实测：<code>cat</code> 全部 <code>*.ts/*.tsx</code>）。标注的是「这个目录负责什么」，不是文件清单。</p>
+  <figure>
+    <svg viewBox="0 0 900 400" role="img" aria-label="代码目录树">
+      <rect class="box accent" x="330" y="10" width="240" height="30" rx="2"/><text class="t" x="356" y="30">matt-skills-deck/</text>
+      <line class="l" x1="450" y1="40" x2="450" y2="58"/><line class="l" x1="90" y1="58" x2="810" y2="58"/>
+      <line class="l" x1="90" y1="58" x2="90" y2="76"/><line class="l" x1="270" y1="58" x2="270" y2="76"/>
+      <line class="l" x1="450" y1="58" x2="450" y2="76"/><line class="l" x1="630" y1="58" x2="630" y2="76"/>
+      <line class="l" x1="810" y1="58" x2="810" y2="76"/>
+
+      <rect class="box" x="20" y="76" width="140" height="30" rx="2"/><text class="t" x="28" y="96">index.client.tsx</text>
+      <text class="s" x="20" y="122">注册面板/整页/设置页</text>
+      <text class="s" x="20" y="136">/侧栏，只放「面」</text>
+
+      <rect class="box" x="200" y="76" width="140" height="30" rx="2"/><text class="t" x="208" y="96">index.server.ts</text>
+      <text class="s" x="200" y="122">只挂载：settings + rpc</text>
+      <text class="s" x="200" y="136">+ hooks，卸载时收 gh</text>
+
+      <rect class="box" x="380" y="76" width="140" height="30" rx="2"/><text class="t" x="388" y="96">client/deck/</text>
+      <text class="s" x="380" y="122">70 文件 18.5k 行：面板、</text>
+      <text class="s" x="380" y="136">surface、timeline、settings</text>
+
+      <rect class="box" x="560" y="76" width="140" height="30" rx="2"/><text class="t" x="568" y="96">server/</text>
+      <text class="s" x="560" y="122">88 文件 20.4k 行：rpc、</text>
+      <text class="s" x="560" y="136">tracker、skills、git、mcp</text>
+
+      <rect class="box" x="740" y="76" width="140" height="30" rx="2"/><text class="t" x="748" y="96">shared/</text>
+      <text class="s" x="740" y="122">44 文件 9.2k 行：RPC 契约</text>
+      <text class="s" x="740" y="136">(zod)、纯函数、文案键</text>
+
+      <line class="l" x1="450" y1="150" x2="450" y2="168"/><line class="l" x1="90" y1="168" x2="810" y2="168"/>
+      <line class="l" x1="90" y1="168" x2="90" y2="186"/><line class="l" x1="270" y1="168" x2="270" y2="186"/>
+      <line class="l" x1="450" y1="168" x2="450" y2="186"/><line class="l" x1="630" y1="168" x2="630" y2="186"/>
+      <line class="l" x1="810" y1="168" x2="810" y2="186"/>
+
+      <rect class="box" x="20" y="186" width="140" height="30" rx="2"/><text class="t" x="28" y="206">templates/skills/</text>
+      <text class="s" x="20" y="232">30 个技能 × zh/en</text>
+      <text class="s" x="20" y="246">（含 README / GLOSSARY）</text>
+
+      <rect class="box" x="200" y="186" width="140" height="30" rx="2"/><text class="t" x="208" y="206">server/mcp/</text>
+      <text class="s" x="200" y="232">独立 stdio 入口：</text>
+      <text class="s" x="200" y="246">main.ts · tools.ts</text>
+
+      <rect class="box" x="380" y="186" width="140" height="30" rx="2"/><text class="t" x="388" y="206">server/tracker/</text>
+      <text class="s" x="380" y="232">36 文件：github / gitlab /</text>
+      <text class="s" x="380" y="246">local / readiness / write</text>
+
+      <rect class="box" x="560" y="186" width="140" height="30" rx="2"/><text class="t" x="568" y="206">tests/</text>
+      <text class="s" x="560" y="232">67 文件 15.3k 行，</text>
+      <text class="s" x="560" y="246">当前 780 条全绿</text>
+
+      <rect class="box" x="740" y="186" width="140" height="30" rx="2"/><text class="t" x="748" y="206">docs/ + .github/</text>
+      <text class="s" x="740" y="232">设计笔记、发布说明；</text>
+      <text class="s" x="740" y="246">CI：ci.yml</text>
+
+      <text class="s" x="20" y="288">构建产物不在仓库里：.gitignore 只有 node_modules/ · *.log · .DS_Store · .paseo/，没有 dist/、没有构建脚本——</text>
+      <text class="s" x="20" y="306">插件由宿主在加载时直接执行 TypeScript（Node 22.18+ 原生剥离类型），package.json 里只有 typecheck / test 两个脚本。</text>
+      <text class="s" x="20" y="332">工作区数据目录（运行时生成、不进版本库）：.deck/（本地票面、handoffs、skills-draft）、.claude/skills、.agents/skills、.paseo-deck.json。</text>
+      <rect class="box" x="20" y="348" width="860" height="34" rx="2"/>
+      <text class="t" x="32" y="369">未确认：.paseo/ 被 .gitignore 排除，但仓库里没有写入它的代码路径（grep 无命中），大概率是宿主自己放的。</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+matt-skills-deck/
+├─ index.client.tsx   注册面板 / 整页 / 设置页 / 侧栏，只放「面」
+├─ index.server.ts    只挂载 settings + rpc + hooks；卸载时收掉 gh 子进程
+├─ client/deck/       70 文件 18.5k 行：面板、surface、timeline、设置
+├─ server/            88 文件 20.4k 行：rpc / tracker / skills / git / mcp
+├─ shared/            44 文件 9.2k 行：RPC 契约(zod)、纯函数、文案键
+├─ templates/skills/  30 个技能 × zh/en（含 README / GLOSSARY）
+├─ server/mcp/        独立 stdio 入口 main.ts + tools.ts
+├─ server/tracker/    36 文件：github / gitlab / local / readiness / write
+├─ tests/             67 文件 15.3k 行，当前 780 条全绿
+└─ docs/ .github/     设计笔记、发布说明；CI = ci.yml
+无构建产物：.gitignore 只排 node_modules / *.log / .DS_Store / .paseo，
+宿主直接执行 TypeScript（Node ≥22.18 类型剥离），package.json 只有 typecheck 与 test。
+运行时数据：.deck/ · .claude/skills · .agents/skills · .paseo-deck.json
+  </pre></details>
+</section>
+
+<!-- ═══════════════ 3 运行时进程树 ═══════════════ -->
+<section id="v3">
+  <h2>3 运行时进程树</h2>
+  <p class="note">真正跑起来的进程与谁拉起谁。依据：<code>paseo plugin ls</code>（running）+ 日志里的 <code>[paseo] Loading plugin / Plugin ready</code>、<code>server/hooks.ts</code> 的注入器、<code>server/status.ts</code> 的 <code>gh</code> 探测。</p>
+  <figure>
+    <svg viewBox="0 0 900 330" role="img" aria-label="运行时进程树">
+      <rect class="box accent" x="300" y="12" width="300" height="34" rx="2"/>
+      <text class="t" x="330" y="33">Paseo 宿主 daemon（node）</text>
+      <text class="s" x="612" y="33">拉起 / 停止插件</text>
+
+      <line class="l" x1="450" y1="46" x2="450" y2="70"/><line class="l" x1="140" y1="70" x2="760" y2="70"/>
+      <line class="l" x1="140" y1="70" x2="140" y2="94"/><line class="l" x1="450" y1="70" x2="450" y2="94"/>
+      <line class="l" x1="760" y1="70" x2="760" y2="94"/>
+
+      <rect class="box" x="30" y="94" width="220" height="36" rx="2"/>
+      <text class="t" x="40" y="111">插件服务端进程</text>
+      <text class="s" x="40" y="125">index.server.ts · node 22</text>
+
+      <rect class="box" x="290" y="94" width="320" height="36" rx="2"/>
+      <text class="t" x="300" y="111">每个 agent 会话一个 MCP 子进程</text>
+      <text class="s" x="300" y="125">node server/mcp/main.ts --workspace &lt;dir&gt;（stdio）</text>
+
+      <rect class="box" x="650" y="94" width="220" height="36" rx="2"/>
+      <text class="t" x="660" y="111">Paseo App / Web 客户端</text>
+      <text class="s" x="660" y="125">加载 index.client.tsx</text>
+
+      <line class="l" x1="140" y1="130" x2="140" y2="158"/><line class="l" x1="80" y1="158" x2="300" y2="158"/>
+      <line class="l" x1="80" y1="158" x2="80" y2="180"/><line class="l" x1="190" y1="158" x2="190" y2="180"/>
+      <line class="l" x1="300" y1="158" x2="300" y2="180"/>
+
+      <rect class="box" x="20" y="180" width="120" height="32" rx="2"/><text class="t" x="30" y="200">gh（20s 超时）</text>
+      <rect class="box" x="150" y="180" width="120" height="32" rx="2"/><text class="t" x="160" y="200">git（默认 20s）</text>
+      <rect class="box" x="280" y="180" width="120" height="32" rx="2"/><text class="t" x="290" y="200">glab</text>
+      <text class="s" x="20" y="228">短命子进程：一次调用一个，结束即退</text>
+
+      <line class="l" x1="450" y1="130" x2="450" y2="158" stroke-dasharray="3 3"/>
+      <rect class="box" x="480" y="180" width="380" height="32" rx="2"/>
+      <text class="t" x="490" y="200">同一批函数被两端复用：server/tracker/*、server/skills/*</text>
+      <text class="s" x="490" y="228">MCP 子进程不经过 RPC，直接 import 这些模块</text>
+
+      <rect class="box" x="20" y="258" width="860" height="54" rx="2"/>
+      <text class="t" x="32" y="278">本插件自己拉起的常驻进程只有一个：插件服务端（父进程是宿主 daemon；REVISION 为空＝直接跑工作区源码）。</text>
+      <text class="t" x="32" y="296">MCP 子进程按会话增减；gh / git / glab 每次调用起一个短命进程。agent 会话进程由宿主负责，不在本仓库内（未确认）。</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+Paseo 宿主 daemon（node）
+├─ 插件服务端进程   index.server.ts（paseo plugin ls → running）
+│  ├─ gh   每次调用一个短命子进程，20s 超时
+│  ├─ git  默认 20s（读出 5s / push 180s）
+│  └─ glab
+├─ 每个 agent 会话 → MCP 子进程（stdio）
+│  └─ node server/mcp/main.ts --workspace &lt;dir&gt;（hooks 注入，alwaysLoad）
+└─ 客户端：Paseo App 加载 index.client.tsx（与插件同包，另一个运行时）
+插件不监听端口；没有队列 worker、没有定时器进程（见视图 5）。
+  </pre></details>
+</section>
+
+<!-- ═══════════════ 4 端到端数据流 ═══════════════ -->
+<section id="v4">
+  <h2>4 端到端数据流</h2>
+  <p class="note">一次「打开任务板」从点击到列表出现，每一跳的协议。依据 <code>client/deck/BoardView.tsx</code>、<code>server/rpc/issues.ts</code>、<code>server/tracker/targets.ts</code>、<code>server/tracker/backend.ts</code>、<code>server/tracker/github.ts</code>。</p>
+  <figure>
+    <svg viewBox="0 0 900 330" role="img" aria-label="端到端数据流">
+      <rect class="box" x="14" y="30" width="130" height="52" rx="2"/>
+      <text class="t" x="24" y="50">BoardView</text><text class="s" x="24" y="66">useQuery 缓存键</text><text class="s" x="24" y="79">含 repoKey</text>
+
+      <rect class="box" x="164" y="30" width="130" height="52" rx="2"/>
+      <text class="t" x="174" y="50">useRpc</text><text class="s" x="174" y="66">issuesListRpc</text><text class="s" x="174" y="79">zod 校验入参</text>
+
+      <rect class="box accent" x="314" y="30" width="150" height="52" rx="2"/>
+      <text class="t" x="324" y="50">宿主 RPC 通道</text><text class="s" x="324" y="66">插件进程 ↔ 宿主</text><text class="s" x="324" y="79">↔ 客户端</text>
+
+      <rect class="box" x="484" y="30" width="150" height="52" rx="2"/>
+      <text class="t" x="494" y="50">listIssuesHandler</text><text class="s" x="494" y="66">server/rpc/issues.ts</text><text class="s" x="494" y="79">resolveWritableBackend?</text>
+
+      <rect class="box" x="654" y="30" width="180" height="52" rx="2"/>
+      <text class="t" x="664" y="50">resolveWorkspaceTargets</text><text class="s" x="664" y="66">git remote get-url（每个 repo）</text><text class="s" x="664" y="79">容器工作区往下找一层</text>
+
+      <line class="l" x1="144" y1="56" x2="164" y2="56"/>
+      <line class="l" x1="294" y1="56" x2="314" y2="56"/>
+      <line class="l" x1="464" y1="56" x2="484" y2="56"/>
+      <line class="l" x1="634" y1="56" x2="654" y2="56"/>
+
+      <line class="l" x1="744" y1="82" x2="744" y2="108"/><line class="l" x1="200" y1="108" x2="744" y2="108"/>
+      <line class="l" x1="200" y1="108" x2="200" y2="132"/><line class="l" x1="450" y1="108" x2="450" y2="132"/>
+      <line class="l" x1="700" y1="108" x2="700" y2="132"/>
+
+      <rect class="box" x="90" y="132" width="220" height="56" rx="2"/>
+      <text class="t" x="100" y="152">GitHub：gh api graphql</text><text class="s" x="100" y="168">HTTPS 443 · 20s 超时</text><text class="s" x="100" y="181">凭据由 gh 自己管</text>
+
+      <rect class="box" x="340" y="132" width="220" height="56" rx="2"/>
+      <text class="t" x="350" y="152">GitLab：glab api</text><text class="s" x="350" y="168">HTTPS 443</text><text class="s" x="350" y="181">写前查权限（≥ Reporter）</text>
+
+      <rect class="box" x="590" y="132" width="220" height="56" rx="2"/>
+      <text class="t" x="600" y="152">本地：readBoard(.deck)</text><text class="s" x="600" y="168">读 Markdown，不联网</text><text class="s" x="600" y="181">.scratch 同形状也读</text>
+
+      <line class="l" x1="450" y1="188" x2="450" y2="214"/>
+      <rect class="box" x="250" y="214" width="400" height="46" rx="2"/>
+      <text class="t" x="262" y="234">归一成同一份票面（kind / state / blockedBy / assignees）</text>
+      <text class="s" x="262" y="250">readiness 在这里算：ready / claimed / blocked / closed</text>
+
+      <line class="l" x1="450" y1="260" x2="450" y2="284"/>
+      <text class="t" x="462" y="276">回程：同一通道 → useQuery 缓存 → 渲染 + 计数页签</text>
+      <text class="s" x="462" y="298">失败不抛到界面：TargetFailure 带 reason + detail，顶栏显示真实原因</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+点击 → BoardView(useQuery) → useRpc(issuesListRpc) → 宿主 RPC 通道 → listIssuesHandler
+     → resolveWorkspaceTargets（对每个仓库跑 git remote get-url；容器工作区往下找一层）
+     → resolveBackend
+          ├─ github → gh api graphql（HTTPS 443，20s 超时，凭据由 gh 管）
+          ├─ gitlab → glab api（写前查权限 ≥ Reporter）
+          └─ local  → readBoard(.deck)、.scratch 同形状也读（不联网）
+     → 归一成一份票面，readiness 统一在这里算
+     → 回程同一通道 → useQuery 缓存 → 列表 + 计数页签
+失败不抛异常：TargetFailure { reason, detail }，顶栏显示真实原因。
+  </pre></details>
+</section>
+
+<!-- ═══════════════ 5 事件接入与分流 ═══════════════ -->
+<section id="v5">
+  <h2>5 事件接入与分流</h2>
+  <p class="note">外部事件只有宿主回调这一种入口；没有 webhook、没有队列、没有 cron。<b>有两处 <code>setInterval</code></b>——设备码授权轮询（<code>server/auth.ts:279</code>）与面板刷新心跳（<code>client/deck/panel/usePanelRefresh.tsx:116</code>），都不是后台业务作业。依据 <code>server/hooks.ts</code>。</p>
+  <figure>
+    <svg viewBox="0 0 900 330" role="img" aria-label="事件接入与分流">
+      <rect class="box accent" x="330" y="14" width="240" height="34" rx="2"/>
+      <text class="t" x="346" y="35">宿主事件（唯一入口）</text>
+      <text class="s" x="590" y="35">server/hooks.ts</text>
+
+      <line class="l" x1="450" y1="48" x2="450" y2="72"/><line class="l" x1="200" y1="72" x2="700" y2="72"/>
+      <line class="l" x1="200" y1="72" x2="200" y2="96"/><line class="l" x1="700" y1="72" x2="700" y2="96"/>
+
+      <rect class="box" x="40" y="96" width="320" height="44" rx="2"/>
+      <text class="t" x="50" y="114">before("agent.create")</text>
+      <text class="s" x="50" y="130">改写请求：注入 mcpServers + preapproved 只读工具</text>
+
+      <rect class="box" x="540" y="96" width="320" height="44" rx="2"/>
+      <text class="t" x="550" y="114">on("agent.turn_ended")</text>
+      <text class="s" x="550" y="130">只看子会话：agent.parentAgentId 存在才回传</text>
+
+      <line class="l" x1="200" y1="140" x2="200" y2="166"/><line class="l" x1="110" y1="166" x2="300" y2="166"/>
+      <line class="l" x1="110" y1="166" x2="110" y2="190"/><line class="l" x1="300" y1="166" x2="300" y2="190"/>
+
+      <rect class="box" x="20" y="190" width="180" height="52" rx="2"/>
+      <text class="t" x="30" y="208">有 GitHub / GitLab 远端</text>
+      <text class="s" x="30" y="224">一定注入；十几把 deck_* 刀</text>
+      <text class="s" x="30" y="238">alwaysLoad，不进检索折叠</text>
+
+      <rect class="box" x="210" y="190" width="180" height="52" rx="2"/>
+      <text class="t" x="220" y="208">本地后端</text>
+      <text class="s" x="220" y="224">只有 .deck/ 或 .scratch/ 已存在</text>
+      <text class="s" x="220" y="238">或设置里明确选了 local 才注入</text>
+
+      <rect class="box" x="540" y="160" width="150" height="40" rx="2"/>
+      <text class="t" x="550" y="178">reportEnabledFor(cwd)</text>
+      <text class="s" x="550" y="193">按工作区开关</text>
+      <rect class="box" x="700" y="160" width="170" height="40" rx="2"/>
+      <text class="t" x="710" y="178">TurnReporter.report</text>
+      <text class="s" x="710" y="193">写回父会话 + .deck/handoffs</text>
+      <line class="l" x1="690" y1="180" x2="700" y2="180"/>
+
+      <rect class="box" x="20" y="262" width="850" height="52" rx="2"/>
+      <text class="t" x="32" y="282">注入失败不拦开会话：catch 后记一条 warn、请求原样放行（hooks.ts）。</text>
+      <text class="t" x="32" y="300">回传失败不影响会话：同样只记日志，回传件仍留在 .deck/handoffs/。</text>
+      <text class="s" x="560" y="300">无 webhook / 队列 / cron；两处 setInterval＝授权轮询 + 面板心跳</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+宿主事件（唯一入口，server/hooks.ts）
+├─ before("agent.create")
+│   ├─ 有 GitHub/GitLab 远端 → 一定注入 MCP（alwaysLoad，只读工具进 preapproved）
+│   ├─ 本地后端 → 只有 .deck/ 或 .scratch/ 已存在，或设置里选了 local 才注入
+│   └─ 任何异常 → 记 warn，请求原样放行（不拦用户开会话）
+└─ on("agent.turn_ended")
+    ├─ 无 parentAgentId → 直接 return（不处理主会话）
+    └─ 有 → reportEnabledFor(cwd) → TurnReporter.report → 写回父会话 + .deck/handoffs
+没有 webhook、没有队列、没有 cron。
+两处 setInterval 是「设备码授权轮询」与「面板刷新心跳」，不是后台业务作业。
+  </pre></details>
+</section>
+
+<!-- ═══════════════ 6 链路时序 ═══════════════ -->
+<section id="v6">
+  <h2>6 链路时序</h2>
+  <p class="note">最核心的写链路：发一条评论。重点是「失败之后到底能不能重试」。依据 <code>server/tracker/write.ts</code>、<code>server/tracker/gh-error.ts</code>、<code>server/rpc/issues.ts</code>。</p>
+  <figure>
+    <svg viewBox="0 0 900 380" role="img" aria-label="发评论时序">
+      <text class="t" x="30" y="20">面板</text><text class="t" x="190" y="20">RPC handler</text>
+      <text class="t" x="380" y="20">write.ts</text><text class="t" x="560" y="20">gh</text><text class="t" x="760" y="20">GitHub</text>
+      <line class="l" x1="60" y1="28" x2="60" y2="370"/><line class="l" x1="230" y1="28" x2="230" y2="370"/>
+      <line class="l" x1="430" y1="28" x2="430" y2="370"/><line class="l" x1="610" y1="28" x2="610" y2="370"/>
+      <line class="l" x1="800" y1="28" x2="800" y2="370"/>
+
+      <line class="l accent" x1="60" y1="60" x2="230" y2="60"/><text class="s" x="70" y="54">commentIssue（zod 校验正文非空）</text>
+      <line class="l" x1="230" y1="96" x2="430" y2="96"/><text class="s" x="240" y="90">resolveWritableBackend（GitLab 先查权限）</text>
+      <line class="l" x1="430" y1="132" x2="610" y2="132"/><text class="s" x="440" y="126">gh api POST .../issues/N/comments</text>
+      <line class="l" x1="610" y1="166" x2="800" y2="166"/><text class="s" x="620" y="160">HTTPS</text>
+
+      <rect class="box" x="600" y="184" width="270" height="60" rx="2"/>
+      <text class="t" x="612" y="202">回包分类 classifyGhError</text>
+      <text class="s" x="612" y="218">HTTP 4xx（408 除外）= 明确被拒</text>
+      <text class="s" x="612" y="232">5xx / 超时 / 断连 = 可能已写入</text>
+
+      <line class="l accent" x1="600" y1="262" x2="430" y2="262"/><text class="s" x="440" y="256">被拒 → 回落 gh issue comment（CLI）</text>
+      <line class="l" x1="430" y1="296" x2="60" y2="296"/>
+      <text class="s" x="70" y="290">成功：本地乐观回填时间戳，列表立刻可见</text>
+
+      <line class="l" x1="430" y1="330" x2="60" y2="330" stroke-dasharray="4 3"/>
+      <text class="s" x="70" y="324">可能已写入：报「先刷新确认」，maybeCreated=true，不自动重发</text>
+      <text class="s" x="70" y="352">本地后端不走这条：postLocalComment 直接写 .deck 下的 Markdown。</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+面板            RPC handler              write.ts            gh                GitHub
+ │ commentIssue（zod：正文非空、票号正整数） │                   │                 │
+ ├──────────────▶│                          │                   │                 │
+ │               │ resolveWritableBackend   │                   │                 │
+ │               │（GitLab 先查权限≥Reporter）│                  │                 │
+ │               ├─────────────────────────▶│                   │                 │
+ │               │                          │ gh api POST       │                 │
+ │               │                          ├──────────────────▶├────────────────▶│
+ │               │                          │ 回包分类          │                 │
+ │               │                          │ ├ 4xx(非408) 明确被拒 → 回落 gh issue comment
+ │               │                          │ ├ 5xx/超时/断连 → 不回落，maybeCreated=true
+ │               │                          │ └ 2xx → 乐观回填时间戳
+ │               │◀─────────────────────────┤                   │                 │
+ │◀──────────────┤ 成功 / 「可能已写入，先刷新确认」              │                 │
+本地后端不经过 gh：postLocalComment 直接写 .deck 下的 Markdown。
+  </pre></details>
+</section>
+
+<!-- ═══════════════ 7 状态机 ═══════════════ -->
+<section id="v7">
+  <h2>7 状态机</h2>
+  <p class="note">这张票「能不能接」的唯一口径：<code>server/tracker/readiness.ts</code> 的 <code>readinessOf()</code>。四态互斥，界面与 MCP 都不许另写一份判断。</p>
+  <figure>
+    <svg viewBox="0 0 900 320" role="img" aria-label="票面状态机">
+      <rect class="box accent" x="60" y="120" width="140" height="46" rx="2"/>
+      <text class="t" x="86" y="140">ready 可接</text><text class="s" x="86" y="156">打开 · 无人认领 · 无未闭合阻塞</text>
+
+      <rect class="box" x="300" y="40" width="150" height="46" rx="2"/>
+      <text class="t" x="336" y="60">claimed 认领中</text><text class="s" x="322" y="76">assignees 非空</text>
+
+      <rect class="box" x="300" y="200" width="150" height="46" rx="2"/>
+      <text class="t" x="336" y="220">blocked 阻塞</text><text class="s" x="322" y="236">任一 blockedBy 仍 OPEN</text>
+
+      <rect class="box" x="600" y="120" width="150" height="46" rx="2"/>
+      <text class="t" x="626" y="140">closed 收尾</text><text class="s" x="620" y="156">state=CLOSED 或 PR merged</text>
+
+      <line class="l accent" x1="200" y1="140" x2="300" y2="70"/><text class="s" x="214" y="98">被指派</text>
+      <line class="l accent" x1="300" y1="70" x2="200" y2="140"/><text class="s" x="232" y="128">全部解除指派</text>
+      <line class="l accent" x1="200" y1="150" x2="300" y2="220"/><text class="s" x="214" y="200">新增阻塞者</text>
+      <line class="l accent" x1="300" y1="220" x2="200" y2="150"/><text class="s" x="236" y="186">阻塞者全关</text>
+      <line class="l" x1="450" y1="70" x2="600" y2="130"/><text class="s" x="470" y="88">关闭 / 合并</text>
+      <line class="l" x1="450" y1="210" x2="600" y2="156"/><text class="s" x="472" y="200">关闭 / 合并</text>
+
+      <rect class="box" x="60" y="270" width="800" height="38" rx="2"/>
+      <text class="t" x="72" y="294">优先级：closed 最先判（关闭或 PR 合并）→ blocked（只有仍打开的阻塞者算）→ claimed → 否则 ready。</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+        被指派             关闭/合并
+ ready ────────▶ claimed ──────────▶ closed
+   ▲   ◀────────                    ▲
+   │   全部解除指派                  │
+   │ 新增阻塞者          关闭/合并    │
+   └──────▶ blocked ────────────────┘
+              ◀────── 阻塞者全关
+判定顺序（readiness.ts）：closed（state=CLOSED 或 PR merged）→ blocked（任一阻塞者仍 OPEN）
+→ claimed（assignees 非空）→ 才是 ready。四态互斥；ready+claimed+blocked = open。
+  </pre></details>
+</section>
+
+<!-- ═══════════════ 8 部署拓扑 ═══════════════ -->
+<section id="v8">
+  <h2>8 部署拓扑</h2>
+  <p class="note">没有容器、没有反向代理、没有域名、没有数据库。所谓「部署」就是把插件目录交给 Paseo。依据 <code>paseo-plugin.json</code>、<code>.github/workflows/ci.yml</code>、<code>package.json</code>。</p>
+  <figure>
+    <svg viewBox="0 0 900 340" role="img" aria-label="部署拓扑">
+      <rect class="box" x="40" y="20" width="360" height="70" rx="2"/>
+      <text class="t" x="54" y="42">开发机 / 服务器</text>
+      <text class="s" x="54" y="60">插件目录：/www/wwwroot/game.kxhyapp.com/paseo-matt-skills-deck</text>
+      <text class="s" x="54" y="76">paseo plugin reload matt-skills-deck → Plugin ready</text>
+
+      <rect class="box accent" x="40" y="120" width="170" height="70" rx="2"/>
+      <text class="t" x="54" y="142">Paseo 运行时</text>
+      <text class="s" x="54" y="160">paseo ≥0.13.0 &lt;0.14.0</text>
+      <text class="s" x="54" y="176">宿主托管插件进程</text>
+
+      <rect class="box" x="230" y="120" width="170" height="70" rx="2"/>
+      <text class="t" x="244" y="142">认证来源</text>
+      <text class="s" x="244" y="160">gh 自己的登录态</text>
+      <text class="s" x="244" y="176">插件不存 token</text>
+
+      <rect class="box" x="430" y="20" width="190" height="70" rx="2"/>
+      <text class="t" x="444" y="42">GitHub Actions</text>
+      <text class="s" x="444" y="60">node 22 · npm ci</text>
+      <text class="s" x="444" y="76">typecheck → test</text>
+
+      <rect class="box" x="430" y="120" width="190" height="70" rx="2"/>
+      <text class="t" x="444" y="142">远端仓库</text>
+      <text class="s" x="444" y="160">github.com/943545721</text>
+      <text class="s" x="444" y="176">/matt-skills-deck</text>
+
+      <rect class="box" x="650" y="20" width="220" height="70" rx="2"/>
+      <text class="t" x="664" y="42">外部依赖（出网）</text>
+      <text class="s" x="664" y="60">api.github.com（gh）</text>
+      <text class="s" x="664" y="76">gitlab 实例（glab）</text>
+
+      <rect class="box" x="650" y="120" width="220" height="70" rx="2"/>
+      <text class="t" x="664" y="142">本地数据（无数据库）</text>
+      <text class="s" x="664" y="160">&lt;工作区&gt;/.deck/ · .claude/skills</text>
+      <text class="s" x="664" y="176">sites.json 0600（PASEO_HOME 或 ~/.paseo 下）</text>
+
+      <rect class="box" x="40" y="228" width="830" height="44" rx="2"/>
+      <text class="t" x="54" y="248">发布方式：git 仓库 + tag（v*）。更新检查走 git ls-remote --tags，被网络挡住时回落 gh；</text>
+      <text class="t" x="54" y="264">安装源写作 git:943545721/matt-skills-deck（server/update.ts）。</text>
+
+      <text class="s" x="40" y="300">未确认：生产环境是否也走同一台机器、PASEO_HOME 的实际取值——仓库里只看到它被读取，没有部署文档说明。</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+开发机 / 服务器
+├─ 插件目录 /www/wwwroot/game.kxhyapp.com/paseo-matt-skills-deck
+├─ Paseo 运行时（paseo ≥0.13.0 &lt;0.14.0；宿主托管插件进程）
+├─ 认证来源：gh 自己的登录态（插件不存 token）
+├─ 本地数据（无数据库）
+│   ├─ &lt;工作区&gt;/.deck/ · &lt;工作区&gt;/.claude/skills · .agents/skills
+│   └─ &lt;PASEO_HOME 或 ~/.paseo&gt;/matt-skills-deck/sites.json（0600）
+└─ 出网：api.github.com（gh）· GitLab 实例（glab）
+
+CI：GitHub Actions（.github/workflows/ci.yml）→ node 22 → npm ci → typecheck → test
+发布：git tag v*；更新检查 git ls-remote --tags，网络被挡时回落 gh
+没有 Dockerfile / compose / pm2 / nginx / k8s：部署 = 把目录交给 Paseo。
+  </pre></details>
+</section>
+
+<!-- ═══════════════ 9 故障降级 ═══════════════ -->
+<section id="v9">
+  <h2>9 故障降级关系</h2>
+  <p class="note">谁挂了会影响谁、有没有兜底。全部来自代码里的分支：<code>server/tracker/write.ts</code>、<code>server/auth.ts</code>、<code>server/update.ts</code>、<code>server/tracker/backend.ts</code>、<code>server/hooks.ts</code>。</p>
+  <figure>
+    <svg viewBox="0 0 900 380" role="img" aria-label="故障降级">
+      <rect class="box accent" x="330" y="12" width="240" height="32" rx="2"/>
+      <text class="t" x="352" y="33">外部依赖失败</text>
+
+      <line class="l" x1="450" y1="44" x2="450" y2="64"/><line class="l" x1="120" y1="64" x2="780" y2="64"/>
+      <line class="l" x1="120" y1="64" x2="120" y2="86"/><line class="l" x1="340" y1="64" x2="340" y2="86"/>
+      <line class="l" x1="560" y1="64" x2="560" y2="86"/><line class="l" x1="780" y1="64" x2="780" y2="86"/>
+
+      <rect class="box" x="20" y="86" width="200" height="76" rx="2"/>
+      <text class="t" x="32" y="106">gh 没登录</text>
+      <text class="s" x="32" y="122">面板内跑设备码流程</text>
+      <text class="s" x="32" y="138">token 只走 stdin</text>
+      <text class="s" x="32" y="152">→ 自动轮询到登录成功</text>
+
+      <rect class="box" x="240" y="86" width="200" height="76" rx="2"/>
+      <text class="t" x="252" y="106">写请求 4xx（非 408）</text>
+      <text class="s" x="252" y="122">明确被拒</text>
+      <text class="s" x="252" y="138">→ 回落 gh CLI 再试一次</text>
+      <text class="s" x="252" y="152">（两条路都能成）</text>
+
+      <rect class="box" x="460" y="86" width="200" height="76" rx="2"/>
+      <text class="t" x="472" y="106">5xx / 超时 / 断连</text>
+      <text class="s" x="472" y="122">可能已写入</text>
+      <text class="s" x="472" y="138">→ 不回落、不自动重发</text>
+      <text class="s" x="472" y="152">→ 报「先刷新确认」</text>
+
+      <rect class="box" x="680" y="86" width="200" height="76" rx="2"/>
+      <text class="t" x="692" y="106">GitLab 权限问不出</text>
+      <text class="s" x="692" y="122">归档 / 关票 / &lt; Reporter</text>
+      <text class="s" x="692" y="138">→ 拒绝写</text>
+      <text class="s" x="692" y="152">不赌「大概是公开项目」</text>
+
+      <rect class="box" x="20" y="190" width="200" height="66" rx="2"/>
+      <text class="t" x="32" y="210">git ls-remote 超时</text>
+      <text class="s" x="32" y="226">（只放行 api.github.com 的机器）</text>
+      <text class="s" x="32" y="242">→ 回落 gh 查 tag</text>
+
+      <rect class="box" x="240" y="190" width="200" height="66" rx="2"/>
+      <text class="t" x="252" y="210">多仓库没给 repoKey</text>
+      <text class="s" x="252" y="226">→ 拒绝猜，要求指明仓库</text>
+      <text class="s" x="252" y="242">MCP 与 RPC 同一口径</text>
+
+      <rect class="box" x="460" y="190" width="200" height="66" rx="2"/>
+      <text class="t" x="472" y="210">MCP 注入失败</text>
+      <text class="s" x="472" y="226">→ 记 warn、请求原样放行</text>
+      <text class="s" x="472" y="242">开会话永远不被插件拦住</text>
+
+      <rect class="box" x="680" y="190" width="200" height="66" rx="2"/>
+      <text class="t" x="692" y="210">子会话回传失败</text>
+      <text class="s" x="692" y="226">→ 记日志；回传件仍在</text>
+      <text class="s" x="692" y="242">.deck/handoffs/ 里</text>
+
+      <rect class="box" x="20" y="290" width="860" height="44" rx="2"/>
+      <text class="t" x="32" y="310">共同原则：能确定「没发生」才重试；不能确定的，一律报「可能已发生」并让人先确认。</text>
+      <text class="t" x="32" y="326">插件卸载时 disposeGithubAuth() 收掉等待授权的 gh 子进程，不留后台进程。</text>
+
+      <text class="s" x="20" y="362">未确认：GitHub GraphQL 的速率限制/降级策略——代码里没有发现二级限流或本地缓存兜底。</text>
+    </svg>
+  </figure>
+  <details><summary>ASCII 版</summary><pre>
+gh 没登录        → 面板内设备码流程（token 只走 stdin）→ 轮询到登录成功
+写请求 4xx(≠408) → 明确被拒 → 回落 gh issue comment 再试一次
+5xx/超时/断连    → 可能已写入 → 不回落、不自动重发 → 报「先刷新确认」
+GitLab 权限不定   → 归档/关票/&lt;Reporter → 拒绝写，不赌
+git ls-remote 超时 → 回落 gh 查 tag（只放行 api.github.com 的机器）
+多仓库没 repoKey   → 拒绝猜，要求指明仓库
+MCP 注入失败      → 记 warn，请求原样放行（开会话不被插件拦住）
+子会话回传失败     → 记日志；回传件仍在 .deck/handoffs/
+插件卸载          → disposeGithubAuth() 收掉等待授权的 gh 子进程
+
+原则：能确定「没发生」才重试；不能确定的，报「可能已发生」让人先确认。
+  </pre></details>
+</section>
+
+</main>
+
+<footer>
+  matt-skills-deck · 九个视图 · 与 <code>docs/architecture.mmd</code> 描述同一件事，改一处要改两处。<br>
+  未画出（不是没有）：无 webhook / 队列 / 定时任务；无数据库；无容器与反向代理——理由分别是「grep 未找到」「数据全在文件系统」「仓库内无对应配置」。
+</footer>
+</body>
+</html>

@@ -60,12 +60,12 @@ intake 工作流的 job 级条件是 `contains(github.event.issue.labels.*.name,
   "publishedAt": "2026-10-27T00:00:00Z",
   "reviewedAt": "2026-10-27T00:00:00Z",
   "listing": {
-    "description": "Adds a workspace tab with a GitHub issue board, wayfinder maps, 27 bilingual engineering skills you can install into a workspace, and read/write MCP tools for the agent.",
+    "description": "Adds a workspace tab with a GitHub issue board, wayfinder maps, 28 bilingual engineering skills you can install into a workspace, and read/write MCP tools for the agent.",
     "icon": "https://raw.githubusercontent.com/943545721/matt-skills-deck/<sha>/assets/icon.png",
     "media": [],
     "translations": {
       "zh-CN": {
-        "description": "工作区标签页：GitHub 任务板、wayfinder 地图、27 个中英双语工程技能（可一键装进工作区），以及给 Agent 用的读写 MCP 工具。"
+        "description": "工作区标签页：GitHub 任务板、wayfinder 地图、30 个中英双语工程技能（可一键装进工作区），以及给 Agent 用的读写 MCP 工具。"
       }
     }
   }

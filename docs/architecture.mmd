@@ -1,0 +1,180 @@
+%% matt-skills-deck 架构图纸 · Mermaid 源码
+%% 与 docs/architecture.html 的九个视图一一对应；改一处就改另一处。
+%% 生成于 2026-10-30，版本 0.1.0。
+
+%% === 1 分层技术树 ===
+flowchart TB
+    subgraph Ingress["接入层 · client/deck"]
+        Panel["工作区面板 deck-board"]
+        Home["整页 deck-home"]
+        Settings["设置页"]
+        Surfaces["pill / 顶栏 / 侧栏 / agent 面板"]
+        Command["命令中心 · /deck"]
+    end
+    subgraph App["应用层 · server"]
+        Rpc["RPC · 63 个 handler"]
+        Mcp["MCP · 17 个 deck_* 工具（stdio）"]
+        Hooks["hooks · agent.create / turn_ended"]
+    end
+    subgraph Domain["领域层"]
+        Tracker["tracker"]
+        Skills["skills"]
+        Git["git"]
+        Orch["orchestration"]
+        Session["session / handoff / ledger"]
+    end
+    subgraph Data["数据层"]
+        GitHub["GitHub REST+GraphQL（gh）"]
+        GitLab["GitLab API（glab）"]
+        Local[".deck / .scratch Markdown"]
+        Sites["sites.json 0600"]
+    end
+    Panel --> Rpc
+    Home --> Rpc
+    Settings --> Rpc
+    Surfaces --> Rpc
+    Command --> Rpc
+    Rpc --> Tracker
+    Mcp --> Tracker
+    Hooks --> Mcp
+    Tracker --> Domain
+    Tracker --> GitHub
+    Tracker --> GitLab
+    Tracker --> Local
+    Orch --> Sites
+
+%% === 2 代码目录树 ===
+flowchart LR
+    Root["matt-skills-deck/"]
+    Root --> ClientEntry["index.client.tsx<br/>注册面"]
+    Root --> ServerEntry["index.server.ts<br/>只挂载"]
+    Root --> ClientDir["client/deck<br/>70 文件 18.5k 行"]
+    Root --> ServerDir["server<br/>88 文件 20.4k 行"]
+    Root --> SharedDir["shared<br/>44 文件 9.2k 行（zod 契约）"]
+    Root --> Templates["templates/skills<br/>30 技能 × zh/en"]
+    Root --> Tests["tests<br/>67 文件 · 780 条"]
+    Root --> Docs[".github / docs<br/>CI 与设计笔记"]
+    ServerDir --> McpDir["server/mcp<br/>独立 stdio 入口"]
+    ServerDir --> TrackerDir["server/tracker<br/>github / gitlab / local / readiness"]
+
+%% === 3 运行时进程树 ===
+flowchart TB
+    Daemon["Paseo 宿主 daemon（node）"]
+    Daemon --> Plugin["插件服务端进程<br/>index.server.ts"]
+    Daemon --> McpProc["每个 agent 一个 MCP 子进程<br/>node server/mcp/main.ts --workspace dir"]
+    Daemon --> Client["Paseo App 客户端<br/>index.client.tsx"]
+    Plugin --> Gh["gh · 20s 超时"]
+    Plugin --> GitBin["git · 默认 20s（读出 5s / push 180s）"]
+    Plugin --> Glab["glab"]
+    McpProc -.->|"直接 import，不过 RPC"| TrackerLib["server/tracker · server/skills"]
+    Note["插件不监听端口；无队列 worker、无 cron；两处 setInterval＝授权轮询 + 面板心跳"]
+
+%% === 4 端到端数据流 ===
+sequenceDiagram
+    participant UI as BoardView
+    participant RPC as 宿主 RPC 通道
+    participant H as listIssuesHandler
+    participant T as resolveWorkspaceTargets
+    participant B as resolveBackend
+    participant GH as gh / glab / .deck
+    UI->>RPC: useRpc(issuesListRpc)，zod 校验入参
+    RPC->>H: 插件进程内调用
+    H->>T: 逐个仓库 git remote get-url
+    T-->>H: RepoTarget[]（容器工作区往下找一层）
+    H->>B: 按目标解析后端
+    B->>GH: graphql / api / readBoard
+    GH-->>B: 原始票面
+    B-->>H: 归一后的票面
+    H-->>RPC: 列表 + 计数
+    RPC-->>UI: useQuery 缓存 → 渲染
+    Note over B,GH: 失败不抛异常：TargetFailure { reason, detail }
+
+%% === 5 事件接入与分流 ===
+flowchart TD
+    Event["宿主事件（唯一入口）server/hooks.ts"]
+    Event --> Create["before agent.create"]
+    Event --> End["on agent.turn_ended"]
+    Create --> Remote{"有 GitHub / GitLab 远端？"}
+    Remote -->|是| Inject["注入 MCP（alwaysLoad，只读进 preapproved）"]
+    Remote -->|否| LocalCheck{"存在 .deck/ 或 .scratch/，或设置选了 local？"}
+    LocalCheck -->|是| Inject
+    LocalCheck -->|否| Skip["不注入"]
+    Create -->|任何异常| Pass["记 warn，请求原样放行"]
+    End --> Child{"有 parentAgentId？"}
+    Child -->|否| Ignore["return（主会话不处理）"]
+    Child -->|是| Report["reportEnabledFor(cwd) → TurnReporter.report"]
+    Report --> Write["写回父会话 + .deck/handoffs"]
+
+%% === 6 链路时序 ===
+sequenceDiagram
+    participant UI as 面板
+    participant R as RPC handler
+    participant W as write.ts
+    participant Gh as gh
+    participant Api as GitHub
+    UI->>R: commentIssue（正文非空、票号正整数）
+    R->>W: resolveWritableBackend（GitLab 先查权限 ≥ Reporter）
+    W->>Gh: gh api POST .../issues/N/comments
+    Gh->>Api: HTTPS
+    Api-->>Gh: 响应
+    Gh-->>W: 回包
+    alt HTTP 4xx（408 除外）
+        W->>Gh: 回落 gh issue comment
+        Gh-->>W: 成功（无真实时间戳，乐观回填）
+    else 5xx / 超时 / 断连
+        W-->>R: maybeCreated = true，不重发
+    else 2xx
+        W-->>R: 成功，乐观回填时间戳
+    end
+    R-->>UI: 成功 / 「可能已写入，先刷新确认」
+
+%% === 7 状态机 ===
+stateDiagram-v2
+    [*] --> ready: 打开 · 无人认领 · 无未闭合阻塞
+    ready --> claimed: 被指派
+    claimed --> ready: 全部解除指派
+    ready --> blocked: 新增阻塞者（仍 OPEN）
+    blocked --> ready: 阻塞者全关
+    claimed --> blocked: 新增阻塞者
+    blocked --> claimed: 阻塞者全关且仍有 assignees
+    ready --> closed: 关闭 / PR 合并
+    claimed --> closed: 关闭 / PR 合并
+    blocked --> closed: 关闭 / PR 合并
+    closed --> [*]
+    note right of closed
+        判定顺序：closed → blocked → claimed → ready
+        四态互斥；ready + claimed + blocked = open
+    end note
+
+%% === 8 部署拓扑 ===
+flowchart TB
+    subgraph Host["开发机 / 服务器"]
+        Dir["插件目录<br/>/www/wwwroot/game.kxhyapp.com/paseo-matt-skills-deck"]
+        Paseo["Paseo 运行时 ≥0.13.0 <0.14.0"]
+        Auth["认证来源：gh 自身登录态<br/>（插件不存 token）"]
+        Data["本地数据（无数据库）<br/>.deck/ · .claude/skills · sites.json 0600（PASEO_HOME 或 ~/.paseo）"]
+    end
+    subgraph CI["GitHub Actions"]
+        Build["node 22 → npm ci → typecheck → test"]
+    end
+    External["出网：api.github.com · GitLab 实例"]
+    Repo["github.com/943545721/matt-skills-deck<br/>tag v*"]
+    Dir --> Paseo
+    Paseo --> Auth
+    Paseo --> Data
+    Paseo --> External
+    Repo --> Build
+    Repo --> Dir
+    Note["无 Dockerfile / compose / pm2 / nginx / k8s"]
+
+%% === 9 故障降级 ===
+flowchart LR
+    F1["gh 没登录"] --> R1["设备码流程<br/>token 只走 stdin"]
+    F2["写请求 4xx（≠408）"] --> R2["回落 gh issue comment"]
+    F3["5xx / 超时 / 断连"] --> R3["不回落、不重发<br/>报「先刷新确认」"]
+    F4["GitLab 权限问不出"] --> R4["拒绝写"]
+    F5["git ls-remote 超时"] --> R5["回落 gh 查 tag"]
+    F6["多仓库没给 repoKey"] --> R6["拒绝猜，要求指明仓库"]
+    F7["MCP 注入失败"] --> R7["记 warn，请求原样放行"]
+    F8["子会话回传失败"] --> R8["记日志；回传件留在 .deck/handoffs"]
+    F9["插件卸载"] --> R9["disposeGithubAuth 收掉 gh 子进程"]
