@@ -15,8 +15,20 @@ import { envCheckRpc } from "../../shared/env.ts";
 import { envCheckHandler } from "./env.ts";
 import { authCancelRpc, authStartRpc, authStatusRpc, authTokenRpc } from "../../shared/auth.ts";
 import { authCancelHandler, authStartHandler, authStatusHandler, authTokenHandler } from "./auth.ts";
-import { repoCandidatesRpc, repoInfoRpc, repoSelectRpc, repoTargetsRpc } from "../../shared/repo.ts";
-import { repoCandidatesHandler, repoInfoHandler, repoSelectHandler, repoTargetsHandler } from "./repo.ts";
+import {
+  repoCandidatesRpc,
+  repoInfoRpc,
+  repoSelectRpc,
+  repoTargetsRpc,
+  workspaceProjectsRpc,
+} from "../../shared/repo.ts";
+import {
+  repoCandidatesHandler,
+  repoInfoHandler,
+  repoSelectHandler,
+  repoTargetsHandler,
+  workspaceProjectsHandler,
+} from "./repo.ts";
 import { updateCheckRpc } from "../../shared/update.ts";
 import { checkForUpdate } from "../update.ts";
 import { checksRunRpc } from "../../shared/checks-rpc.ts";
@@ -161,6 +173,7 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(authTokenRpc, authTokenHandler);
   server.handle(repoInfoRpc, repoInfoHandler);
   server.handle(repoTargetsRpc, repoTargetsHandler);
+  server.handle(workspaceProjectsRpc, workspaceProjectsHandler);
   server.handle(repoCandidatesRpc, repoCandidatesHandler);
   server.handle(repoSelectRpc, repoSelectHandler);
   server.handle(updateCheckRpc, () => checkForUpdate());

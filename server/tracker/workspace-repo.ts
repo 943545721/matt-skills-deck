@@ -1,6 +1,12 @@
 import { readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { RepoCandidate } from "../../shared/repo.ts";
+import type { ConfigFailureReason, WorkspaceConfig } from "../../shared/workspace-projects.ts";
+import {
+  PROJECT_CONFIG_FILE,
+  isSafeProjectDir,
+  parseWorkspaceConfigText,
+} from "../../shared/workspace-projects.ts";
 import type { RemoteFailure, RemoteRef } from "./remote.ts";
 import { parseRemoteUrl, readRemoteUrl, webUrlFor } from "./remote.ts";
 
@@ -40,7 +46,6 @@ const REMOTE_PROBLEMS: Record<RemoteFailure["reason"], string> = {
   "git-missing": "没有找到 git 命令：装好 git 并确认它在 PATH 里，插件靠它认仓库",
 };
 
-const SELECTION_FILE = ".paseo-deck.json";
 const MAX_CHILDREN = 30;
 const SCAN_BATCH = 6;
 
@@ -72,7 +77,8 @@ async function realDir(dir: string): Promise<string | null> {
  * 宁可当作没识别到，也不去读工作区外的仓库。
  */
 async function childRepoAt(rootReal: string, dir: string): Promise<{ ref: RemoteRef; repoRoot: string } | null> {
-  if (!isSafeSegment(dir)) return null;
+  // v2 的项目目录允许 `apps/admin-web` 这种多段路径；越界由下面的 realpath 相对检查兜住。
+  if (!isSafeProjectDir(dir)) return null;
 
   let real: string;
   try {
@@ -97,20 +103,99 @@ async function childRepoAt(rootReal: string, dir: string): Promise<{ ref: Remote
   return ref ? { ref, repoRoot: real } : null;
 }
 
-/** 读 `.paseo-deck.json`；不存在、坏了、指向的目录已经没了都当作「没选」，不报致命错误。 */
+/** 配置读不出来的三种来源：没有文件、文件读不动、内容不认。 */
+export type ProjectConfigRead =
+  | { ok: true; config: WorkspaceConfig }
+  | { ok: false; reason: "missing" }
+  | { ok: false; reason: "unreadable" | ConfigFailureReason; detail: string };
+
+/**
+ * 读 `.paseo-deck.json` 并分辨「没有」与「坏了」。
+ *
+ * 早先这里把任何问题都吞成 null，用户看到的是「0 张票」，说不清是没配还是配错了。
+ * 现在调用方拿得到具体原因，可以在界面上原样显示。
+ */
+export async function readWorkspaceConfig(workspaceDir: string): Promise<ProjectConfigRead> {
+  let text: string;
+  try {
+    text = await readFile(path.join(workspaceDir, PROJECT_CONFIG_FILE), "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, reason: "missing" };
+    return {
+      ok: false,
+      reason: "unreadable",
+      detail: `读 ${PROJECT_CONFIG_FILE} 失败：${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  return parseWorkspaceConfigText(text);
+}
+
+/**
+ * v1 的「选了哪个仓库」。
+ *
+ * v2 没有这个语义（项目清单里每个项目都是自己），所以一律返回 null；
+ * 坏配置也只当作「没选」——选择只是默认项，读不出来不该让整块板子变成错误，
+ * 具体原因由 `readWorkspaceConfig` 的调用方展示。
+ */
 export async function readSelection(workspaceDir: string): Promise<string | null> {
+  const read = await readWorkspaceConfig(workspaceDir);
+  if (!read.ok || read.config.version !== 1) return null;
+  const dir = read.config.projects[0]?.dir ?? "";
+  if (!isSafeSegment(dir)) return null;
   const rootReal = await realDir(workspaceDir);
   if (!rootReal) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(await readFile(path.join(workspaceDir, SELECTION_FILE), "utf8"));
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-  const dir = (parsed as { repoDir?: unknown }).repoDir;
-  if (typeof dir !== "string" || !isSafeSegment(dir)) return null;
   return (await childRepoAt(rootReal, dir)) ? dir : null;
+}
+
+/** 配置里某个项目目录的实探结果：目录在不在、是不是工作区内、能不能认出远端。 */
+export interface ProjectDirProbe {
+  /** 真实路径（已 `realpath`，一定落在工作区内）；读不到时 null。 */
+  realDir: string | null;
+  /** 目录是 git 仓库且远端可识别时的坐标；否则 null。 */
+  ref: RemoteRef | null;
+  /** 非 null 表示这个项目当不了任务板目标，原因就是它。 */
+  problem: string | null;
+}
+
+/** 以工作区为根探一个项目目录；上游（目标解析 / 诊断界面）都从这里拿结论。 */
+export async function probeProjectDir(workspaceDir: string, dir: string): Promise<ProjectDirProbe> {
+  const rootReal = await realDir(workspaceDir);
+  if (!rootReal) return { realDir: null, ref: null, problem: `工作区目录不可读：${workspaceDir}` };
+  return probeProjectDirAt(rootReal, dir);
+}
+
+async function probeProjectDirAt(rootReal: string, dir: string): Promise<ProjectDirProbe> {
+  if (!isSafeProjectDir(dir)) {
+    return { realDir: null, ref: null, problem: `目录「${dir}」不是工作区内的相对路径` };
+  }
+  let real: string;
+  try {
+    real = await realpath(path.join(rootReal, dir));
+  } catch {
+    return { realDir: null, ref: null, problem: `目录「${dir}」不存在` };
+  }
+  const rel = path.relative(rootReal, real);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    return { realDir: null, ref: null, problem: `目录「${dir}」指向工作区外（符号链接？）` };
+  }
+  try {
+    if (!(await stat(real)).isDirectory()) {
+      return { realDir: null, ref: null, problem: `「${dir}」不是目录` };
+    }
+  } catch {
+    return { realDir: null, ref: null, problem: `目录「${dir}」读不到` };
+  }
+  const remote = await readRemoteUrl(real);
+  if (!remote.ok) {
+    const reason = remote.reason === "git-missing" ? "没有找到 git 命令" : "不是可读的 git 仓库";
+    return { realDir: real, ref: null, problem: `${reason}（${dir}）` };
+  }
+  const ref = parseRemoteUrl(remote.url);
+  if (!ref || ref.host === "other") {
+    return { realDir: real, ref: null, problem: `远端不是 GitHub / GitLab（${dir}）` };
+  }
+  return { realDir: real, ref, problem: null };
 }
 
 export type SelectionWrite =
@@ -123,7 +208,18 @@ export async function writeSelection(workspaceDir: string, repoDir: string | nul
   if (!rootReal) {
     return { ok: false, reason: "invalid-selection", detail: `工作区目录不可读：${workspaceDir}` };
   }
-  const file = path.join(workspaceDir, SELECTION_FILE);
+  const file = path.join(workspaceDir, PROJECT_CONFIG_FILE);
+
+  // v2 文件里是一整份项目清单：这里只会写 v1 的形状，落笔就等于把清单删了。
+  // 选择条在 v2 工作区里应该改用项目清单，而不是覆盖它。
+  const existing = await readWorkspaceConfig(workspaceDir);
+  if (existing.ok && existing.config.version === 2) {
+    return {
+      ok: false,
+      reason: "invalid-selection",
+      detail: `${PROJECT_CONFIG_FILE} 是 v2 项目清单，不能用一个「默认仓库」覆盖它；请在项目清单里调整`,
+    };
+  }
 
   if (repoDir === null) {
     try {
@@ -133,7 +229,7 @@ export async function writeSelection(workspaceDir: string, repoDir: string | nul
       return {
         ok: false,
         reason: "write-failed",
-        detail: `删除 ${SELECTION_FILE} 失败：${error instanceof Error ? error.message : String(error)}`,
+        detail: `删除 ${PROJECT_CONFIG_FILE} 失败：${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -156,7 +252,7 @@ export async function writeSelection(workspaceDir: string, repoDir: string | nul
     return {
       ok: false,
       reason: "write-failed",
-      detail: `写入 ${SELECTION_FILE} 失败：${error instanceof Error ? error.message : String(error)}`,
+      detail: `写入 ${PROJECT_CONFIG_FILE} 失败：${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }

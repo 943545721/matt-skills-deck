@@ -1,13 +1,20 @@
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
-import type { repoCandidatesRpc, repoInfoRpc, repoSelectRpc, repoTargetsRpc } from "../../shared/repo.ts";
+import type {
+  repoCandidatesRpc,
+  repoInfoRpc,
+  repoSelectRpc,
+  repoTargetsRpc,
+  workspaceProjectsRpc,
+} from "../../shared/repo.ts";
 import { readRepoInfo } from "../tracker/repo-info.ts";
-import { listWorkspaceRepoTargets } from "../tracker/targets.ts";
+import { listWorkspaceProjects, listWorkspaceRepoTargets } from "../tracker/targets.ts";
 import { readRepoCandidates, writeSelection } from "../tracker/workspace-repo.ts";
 
 type RepoInfoInput = RpcInput<typeof repoInfoRpc>;
 type RepoCandidatesInput = RpcInput<typeof repoCandidatesRpc>;
 type RepoSelectInput = RpcInput<typeof repoSelectRpc>;
 type RepoTargetsInput = RpcInput<typeof repoTargetsRpc>;
+type WorkspaceProjectsInput = RpcInput<typeof workspaceProjectsRpc>;
 
 /**
  * 工作区实际覆盖的仓库全集。
@@ -46,4 +53,16 @@ export async function repoCandidatesHandler(
  */
 export async function repoSelectHandler(input: RepoSelectInput): Promise<RpcOutput<typeof repoSelectRpc>> {
   return writeSelection(input.workspaceDir, input.repoDir);
+}
+
+/**
+ * 项目清单与磁盘实况：只读，不写配置。
+ *
+ * 界面用它画「这些项目都在这」的列表、显示配置错误与漂移提示；
+ * 写清单是人的事（或项目梳理技能给人确认后由人落笔），这里不代劳。
+ */
+export async function workspaceProjectsHandler(
+  input: WorkspaceProjectsInput,
+): Promise<RpcOutput<typeof workspaceProjectsRpc>> {
+  return listWorkspaceProjects(input.workspaceDir);
 }

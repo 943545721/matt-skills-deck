@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { PROJECT_OWNERS, SKILL_MODES } from "./workspace-projects.ts";
 
 /**
  * 仓库详情。
@@ -115,6 +116,51 @@ export const repoTargetsRpc = defineRpc({
       detail: z.string(),
     }),
   ]),
+});
+
+/**
+ * 配置里的一行项目，外加磁盘上的实况。
+ *
+ * 「配置写了什么」与「磁盘上是什么」必须一起给：只有前者会让人以为目录还在，
+ * 只有后者看不出清单漏了谁。`problem` 是 `resolved` 为 null 时的原因，界面原样显示。
+ */
+const workspaceProjectRow = z.object({
+  key: z.string(),
+  dir: z.string(),
+  repo: z.string().nullable(),
+  owner: z.enum(PROJECT_OWNERS).nullable(),
+  areas: z.array(z.string()),
+  skillsMode: z.enum(SKILL_MODES).nullable(),
+  exists: z.boolean(),
+  resolved: z
+    .object({ host: z.enum(["github", "gitlab"]), owner: z.string(), name: z.string(), webUrl: z.string() })
+    .nullable(),
+  problem: z.string().nullable(),
+});
+
+/**
+ * 工作区的项目清单（`.paseo-deck.json`）与磁盘实况。
+ *
+ * 只读。项目清单是人的决定，插件只负责把它读出来、指出对不上的地方；
+ * 「扫描项目结构、产出模块与角色候选」是另一条路（项目梳理技能），不在这里做。
+ */
+export const workspaceProjectsRpc = defineRpc({
+  name: "deck.workspace.projects",
+  input: z.object({ workspaceDir: z.string().min(1) }),
+  output: z.object({
+    ok: z.literal(true),
+    /** v1 是「选了一个仓库」，v2 是项目清单，none 是没配或读不出来。 */
+    kind: z.enum(["v1", "v2", "none"]),
+    /** 配置坏了才非 null；没配（missing）不算错。 */
+    error: z.object({ reason: z.string(), detail: z.string() }).nullable(),
+    projects: z.array(workspaceProjectRow),
+    /** 磁盘上直接子目录里的仓库，用于漂移提示。 */
+    scanned: z.array(repoCandidate),
+    /** 磁盘上有、清单里没写的仓库。 */
+    drift: z.array(z.string()),
+    /** 配置读出来了，但有些项被忽略 / 兜底，值得人看一眼。 */
+    warnings: z.array(z.string()),
+  }),
 });
 
 /**
