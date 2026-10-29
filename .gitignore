@@ -2,3 +2,6 @@ node_modules/
 *.log
 .DS_Store
 .paseo/
+
+# 本地运行时状态（编排、临时板子数据），不进版本库
+.deck/
