@@ -268,7 +268,8 @@ const CROSS_REPO_BLOCK_RE = new RegExp(
   "m",
 );
 
-const BLOCKED_BY_TEXT_RE = /^[ \t]*(?:\*\*)?Blocked[ \t]+by[ \t]*[:：][ \t]*(?:\*\*)?[ \t]*(.*)$/m;
+/** 固定行的读法：`Blocked by:` / `**Blocked by:**` / 全角冒号 / `Blocked By` 都认——手打的东西不挑写法。 */
+const BLOCKED_BY_TEXT_RE = /^[ \t]*(?:\*\*)?[Bb]locked[ \t]+[Bb]y[ \t]*[:：][ \t]*(?:\*\*)?[ \t]*(.*)$/m;
 
 /** 一条引用在正文里的写法：`owner/repo#12`。渲染与解析共用这一个函数。 */
 export const crossRepoRefText = (repo: string, number: number): string => `${repo}#${number}`;
@@ -302,14 +303,24 @@ export function renderCrossRepoBlock(refs: readonly string[]): string {
   return line ? `<!-- ${CROSS_REPO_BLOCKED_BY}\n${line}\n-->` : "";
 }
 
-/** 读隐藏区段里的条目（原样，不归一仓库）。区段不存在或没有固定行时回空数组。 */
+/**
+ * 读跨仓库引用（原样，不归一仓库）。
+ *
+ * 两个来源，隐藏区段优先：
+ * 1. 插件自己维护的区段（唯一的真相，重复调用不叠加）；
+ * 2. 人手写的可见 `Blocked by:` 行——文档教的就是这一行，手写之后读不出来等于
+ *    悄悄把依赖丢了，票会显示成可接。区段存在时不再看可见行：区段是插件写的，
+ *    它已经把要留的引用都写进去了，再读一遍可见行只会把删掉的引用请回来。
+ */
 export function parseCrossRepoBlockRefs(body: unknown): string[] {
   const text = typeof body === "string" ? body : "";
   const block = CROSS_REPO_BLOCK_RE.exec(text);
-  if (!block) return [];
-  const line = BLOCKED_BY_TEXT_RE.exec(block[1] ?? "");
-  if (!line) return [];
-  return splitRefs(line[1] ?? "");
+  if (block) {
+    const line = BLOCKED_BY_TEXT_RE.exec(block[1] ?? "");
+    return line ? splitRefs(line[1] ?? "") : [];
+  }
+  const visible = BLOCKED_BY_TEXT_RE.exec(text);
+  return visible ? splitRefs(visible[1] ?? "") : [];
 }
 
 /**

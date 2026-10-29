@@ -89,6 +89,20 @@ test("固定行：整段是一行 `Blocked by:`，多个引用逗号分隔；没
   assert.deepEqual(parseCrossRepoBlockRefs("正文里没有区段"), []);
 });
 
+test("手写的可见 `Blocked by:` 行也认；隐藏区段存在时以区段为准", () => {
+  // 文档教的就是手写这一行：读不出来等于悄悄把依赖丢了。
+  assert.deepEqual(parseCrossRepoBlockRefs("先等对方上线。\n\nBlocked by: two/beta#7, gamma#9\n"), [
+    "two/beta#7",
+    "gamma#9",
+  ]);
+  assert.deepEqual(parseCrossRepoBlockRefs("Blocked By：two/beta#7"), ["two/beta#7"], "大小写与全角冒号都认");
+  assert.deepEqual(parseCrossRepoBlockRefs("正文只提到 Blocked by 而没有这一行"), []);
+
+  // 有了区段就只看区段：插件删掉的引用不能被可见行请回来。
+  const body = upsertCrossRepoBlockedBy("Blocked by: two/beta#7\n\n正文", ["three/gamma#9"]).body;
+  assert.deepEqual(parseCrossRepoBlockRefs(body), ["three/gamma#9"]);
+});
+
 test("幂等写入：同一组引用重复写不叠加，清空时整段删掉", () => {
   const first = upsertCrossRepoBlockedBy("hello", ["two/beta#7"]);
   assert.equal(first.changed, true);
