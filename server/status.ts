@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { PLUGIN_VERSION } from "../shared/version.ts";
+import { getSettings } from "./settings.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -50,6 +51,7 @@ export async function readStatus() {
     pluginVersion: PLUGIN_VERSION,
     node: process.version,
     daemonCwd: process.cwd(),
+    debugLogging: getSettings().debugLogging,
     gh: await probeGh(),
   };
 }

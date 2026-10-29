@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { STANDARD_LABELS } from "../../shared/labels";
 import { useDeckText } from "./i18n";
-import { PixelButton, usePixel } from "./pixel";
+import { PixelButton, PixelCard, PixelHead, usePixel } from "./pixel";
 
 /**
  * 仓库初始化指引（六步）。
@@ -35,25 +35,22 @@ export function SetupGuide({ theme }: { theme: PluginTheme }) {
 
   const styles = useMemo(
     () => ({
-      card: {
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
-        padding: 10,
-        gap: 8,
-      },
+      card: { padding: 10, gap: 8 },
       step: { gap: 2 },
-      title: { color: theme.colors.foreground, fontSize: 12, fontWeight: "600" as const },
-      hint: { color: theme.colors.foregroundMuted, fontSize: 11, lineHeight: 16 },
+      title: { color: skin.colors.ink, fontSize: 12, fontWeight: "700" as const },
+      hint: { color: skin.colors.ink2, fontSize: 11, lineHeight: 16 },
       command: {
-        color: theme.colors.foreground,
-        backgroundColor: theme.colors.surface0,
+        color: skin.colors.paper,
+        backgroundColor: skin.colors.shadow,
+        borderWidth: 1,
+        borderColor: skin.colors.line,
         padding: 6,
         fontSize: 11,
+        fontFamily: skin.mono.fontFamily,
       },
-      copy: { color: theme.colors.accent, fontSize: 11 },
+      copy: { color: skin.colors.link, fontSize: 11, fontFamily: skin.mono.fontFamily, fontWeight: "700" as const },
     }),
-    [theme],
+    [skin],
   );
 
   const copy = (text: string, message: string) => {
@@ -64,9 +61,9 @@ export function SetupGuide({ theme }: { theme: PluginTheme }) {
   };
 
   return (
-    <View style={styles.card}>
+    <PixelCard skin={skin} style={styles.card}>
       <View style={{ flexDirection: "row" as const, alignItems: "center" as const, gap: 8 }}>
-        <Text style={styles.title}>{t("diag.setupTitle")}</Text>
+        <PixelHead skin={skin} style={styles.title}>{t("diag.setupTitle")}</PixelHead>
         <View style={{ marginLeft: "auto" as const }}>
           <PixelButton
             skin={skin}
@@ -105,6 +102,6 @@ export function SetupGuide({ theme }: { theme: PluginTheme }) {
           </Pressable>
         </>
       ) : null}
-    </View>
+    </PixelCard>
   );
 }

@@ -12,6 +12,7 @@ export const DEFAULT_SETTINGS: DeckSettings = {
   backend: "auto",
   refreshSeconds: 60,
   debugLogging: true,
+  appearance: "auto",
 };
 
 let current: DeckSettings = DEFAULT_SETTINGS;
@@ -22,10 +23,15 @@ const apply = (state: { status: string; values?: unknown }) => {
   if (parsed.success) current = parsed.data;
 };
 
-export function registerDeckSettings(server: PluginServerContext): void {
+/**
+ * 返回首次读取完成（或失败）的 promise：调用方要等到那时才能确定
+ * `debugLogging` 的真实值——启动日志只有在此之后记，才不会绕过用户的开关。
+ */
+export function registerDeckSettings(server: PluginServerContext): Promise<void> {
   const handle = server.registerSettings(deckSettings);
-  void handle.read().then(apply).catch(() => undefined);
+  const ready = handle.read().then(apply).catch(() => undefined);
   handle.subscribe(apply);
+  return ready;
 }
 
 /** 同步快照；尚未完成首次读取时是默认值。 */

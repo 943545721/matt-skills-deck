@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { after, test } from "node:test";
 import { fakeGh } from "./helpers/fake-gh.mjs";
 import { findTool } from "../server/mcp/tools.ts";
+import { initializeLocalScratch } from "../server/tracker/local.ts";
+import { EDGE_LANDING } from "../shared/edge-rules.ts";
 
 /**
  * 这些用例真起 `gh` 子进程（假命令），走的是工具入口 → 领域代码 → 命令参数这一整条路。
@@ -187,10 +189,46 @@ test("改票：一个字段都不给就在本地拒绝，不发命令", { skip: 
 /* ---------------------------------------------------------------- 报缺陷 */
 
 const CREATE_HANDLER = `
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 const all = args.join(" ");
 appendFileSync(process.env.DECK_ARGS_FILE, JSON.stringify(args) + "\\n");
+// 建票前先按幂等锚查重（DSH 行为）：假 gh 必须如实回答「没有命中」，否则工具会把查不到当成写失败。
+if (args[0] === "search" && args[1] === "issues") {
+  console.log("[]");
+  process.exit(0);
+}
+if (args[0] === "issue" && args[1] === "list") {
+  console.log("[]");
+  process.exit(0);
+}
+// 标签写路径是「读现状 → 发差集 → 读回核对」：假 gh 要记住这轮改过什么。
+const stateFile = process.env.DECK_ARGS_FILE + ".labels";
+const labelsNow = () => existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : [];
+if (args[0] === "issue" && args[1] === "view") {
+  console.log(JSON.stringify({
+    number: 42,
+    title: "面板计数不对",
+    body: "",
+    state: "OPEN",
+    url: "https://github.com/acme/deck/issues/42",
+    createdAt: "2026-10-01T00:00:00Z",
+    updatedAt: "2026-10-01T00:00:00Z",
+    labels: labelsNow().map((name) => ({ name, color: "cccccc" })),
+    assignees: [],
+  }));
+  process.exit(0);
+}
+if (args[0] === "issue" && args[1] === "edit") {
+  let labels = labelsNow();
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "--add-label" && args[i + 1]) labels.push(args[i + 1]);
+    if (args[i] === "--remove-label" && args[i + 1]) labels = labels.filter((name) => name !== args[i + 1]);
+  }
+  writeFileSync(stateFile, JSON.stringify([...new Set(labels)]));
+  console.log("{}");
+  process.exit(0);
+}
 if (args[1] === "repos/acme/deck/issues") {
   console.log(JSON.stringify({ number: 42, html_url: "https://github.com/acme/deck/issues/42" }));
   process.exit(0);
@@ -204,7 +242,7 @@ console.error("unexpected gh call: " + all);
 process.exit(1);
 `;
 
-test("缺陷报告：正文按「发生了什么 / 期望 / 复现步骤」固定成节，步骤带序号", { skip: !gitAvailable && "本机没有 git" }, async () => {
+test("建缺陷票：kind=bug 自动带 bug 标签，正文原样提交", { skip: !gitAvailable && "本机没有 git" }, async () => {
   const ws = workspace();
   const argsFile = path.join(sandbox("deck-tool-args-"), "args.log");
   writeFileSync(argsFile, "", "utf8");
@@ -213,19 +251,19 @@ test("缺陷报告：正文按「发生了什么 / 期望 / 复现步骤」固�
     await withEnv({ DECK_ARGS_FILE: argsFile }, async () => {
       const result = json(
         await run(
-          "deck_issue_report",
+          "deck_issue_create",
           {
             title: "面板计数不对",
-            whatHappened: "关掉一张票后 ready 仍是 3",
-            expected: "ready 变成 2",
-            steps: ["打开面板", "关掉一张 ready 票"],
-            labels: ["bug"],
+            body: "## What happened\n\n关掉一张票后 ready 仍是 3\n\n## Expected\n\nready 变成 2\n\n## Steps to reproduce\n\n1. 打开面板\n2. 关掉一张 ready 票",
+            kind: "bug",
           },
           ws,
         ),
       );
       assert.equal(result.number, 42);
-      assert.deepEqual(result.labels, ["bug"]);
+      assert.equal(result.kind, "bug");
+      // DSH 位置表：缺陷票固定补 bug + needs-triage 两枚。
+      assert.deepEqual(result.labels, ["bug", "needs-triage"]);
     });
     const sent = readFileSync(argsFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
     const body = sent.flat().find((arg) => arg.startsWith("body=")) ?? "";
@@ -239,83 +277,157 @@ test("缺陷报告：正文按「发生了什么 / 期望 / 复现步骤」固�
   }
 });
 
-/* ---------------------------------------------------------------- 挂地图 */
+/* -------------------------------------------------------- 补边（父子 / 阻塞） */
 
-const mapDetail = (labels, totalCount) => `
-if (all.includes("number=1")) {
-  console.log(JSON.stringify({ data: { repository: { issue: ${JSON.stringify(
-    node(1, { labels: { totalCount: 1, nodes: [{ name: "wayfinder:map", color: "6e7781" }] } }),
-  )} } } }));
-  process.exit(0);
-}
-if (all.includes("number=2")) {
-  console.log(JSON.stringify({ data: { repository: { issue: ${JSON.stringify(
-    node(2, { labels: { totalCount, nodes: labels } }),
-  )} } } }));
-  process.exit(0);
-}`;
+const NO_GH = 'process.stdout.write("{}\\n")';
 
-const MAP_LINK_HANDLER = `
-import { appendFileSync } from "node:fs";
-const args = process.argv.slice(2);
-const all = args.join(" ");
-appendFileSync(process.env.DECK_ARGS_FILE, JSON.stringify(args) + "\\n");
-if (all.includes("graphql")) {${mapDetail([{ name: "bug", color: "ff0000" }], 1)}
-}
-if (args[1] && args[1].endsWith("/labels") && all.includes("PUT")) {
-  const names = args.filter((arg) => arg.startsWith("labels[]=")).map((arg) => arg.slice("labels[]=".length));
-  console.log(JSON.stringify(names.map((name) => ({ name, color: "cccccc" }))));
-  process.exit(0);
-}
-if (args[1] && args[1].endsWith("/comments") && all.includes("POST")) {
-  console.log(JSON.stringify({ body: "linked", user: { login: "me" }, created_at: "2026-10-01T00:00:00Z" }));
-  process.exit(0);
-}
-console.error("unexpected gh call: " + all);
-process.exit(1);
-`;
+const readDeck = (ws, number) => readFileSync(path.join(ws, ".deck", "issues", `${number}.md`), "utf8");
 
-test("挂地图：保留原有标签再加 wayfinder:<kind>，并在给出的地图下留一条评论", { skip: !gitAvailable && "本机没有 git" }, async () => {
-  const ws = workspace();
-  const argsFile = path.join(sandbox("deck-tool-args-"), "args.log");
-  writeFileSync(argsFile, "", "utf8");
-  const gh = toolGh(MAP_LINK_HANDLER);
+const scratchFile = (ws, unit, number) => {
+  const dir = path.join(ws, ".scratch", unit, "issues");
+  const name = readdirSync(dir).find((entry) => entry.startsWith(`${String(number).padStart(2, "0")}-`));
+  assert.ok(name, `应当在 ${dir} 里找到第 ${number} 张票`);
+  return readFileSync(path.join(dir, name), "utf8");
+};
+
+test("补边（本地 .deck）：父子写 parentKey、阻塞写 blockedBy，写后读回并标出落点", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh(NO_GH);
   try {
-    await withEnv({ DECK_ARGS_FILE: argsFile }, async () => {
-      const result = json(
-        await run("deck_map_link", { mapNumber: 1, number: 2, kind: "research", comment: "先查清楚" }, ws),
-      );
-      assert.equal(result.ok, true);
-      assert.deepEqual(result.labels, ["bug", "wayfinder:research"]);
-      assert.equal(result.commented, true);
-    });
-    const sent = readFileSync(argsFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
-    const put = sent.find((args) => args.includes("--method") && args.includes("PUT"));
-    assert.ok(put, "应当有一次 PUT 标签的调用");
-    assert.ok(put.includes("labels[]=bug"), "原有标签不能被覆盖掉");
-    assert.ok(put.includes("labels[]=wayfinder:research"));
+    for (const title of ["父票", "子票", "被阻塞票"]) json(await run("deck_issue_create", { title }, ws));
+
+    const parent = json(await run("deck_map_link", { key: 2, parentKey: 1 }, ws));
+    assert.equal(parent.status, "ok");
+    assert.equal(parent.items.length, 1);
+    assert.equal(parent.items[0].op, "parent");
+    assert.equal(parent.items[0].landing, EDGE_LANDING.FILE_NOTE);
+    assert.match(parent.items[0].evidence, /parentKey/);
+    assert.match(readDeck(ws, 2), /parentKey: 1/);
+
+    const blocked = json(await run("deck_map_link", { key: 3, blockedBy: [2] }, ws));
+    assert.equal(blocked.status, "ok");
+    assert.equal(blocked.items[0].op, "block");
+    assert.equal(blocked.items[0].landing, EDGE_LANDING.FILE_NOTE);
+    assert.match(blocked.items[0].evidence, /blockedBy/);
+    assert.match(readDeck(ws, 3), /blockedBy: \[2\]/);
+    assert.deepEqual(gh.calls(), []);
   } finally {
     gh.restore();
   }
 });
 
-const TRUNCATED_HANDLER = `
-const args = process.argv.slice(2);
-const all = args.join(" ");
-if (all.includes("graphql")) {${mapDetail([{ name: "bug", color: "ff0000" }], 30)}
-}
-console.error("unexpected gh call: " + all);
-process.exit(1);
-`;
-
-test("挂地图：标签读不全时拒绝写入，不拿「读到的 20 个」覆盖掉剩下的", { skip: !gitAvailable && "本机没有 git" }, async () => {
-  const ws = workspace();
-  const gh = toolGh(TRUNCATED_HANDLER);
+test("补边：同一张票的阻塞边先合并成完整集合再写一次；blockedBy 是整组替换", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh(NO_GH);
   try {
-    const result = await run("deck_map_link", { mapNumber: 1, number: 2, kind: "task" }, ws);
-    assert.equal(result.isError, true);
-    assert.equal(JSON.parse(result.text).reason, "labels-truncated");
-    assert.deepEqual(gh.calls(), ["api", "api"]);
+    for (const title of ["甲", "乙", "丙", "丁"]) json(await run("deck_issue_create", { title }, ws));
+
+    const merged = json(
+      await run("deck_map_link", { edges: [{ key: 4, blockedBy: [2] }, { key: 4, blockedBy: [3] }] }, ws),
+    );
+    assert.equal(merged.status, "ok");
+    assert.deepEqual(merged.items.map((item) => item.target), ["2", "3"]);
+    assert.match(readDeck(ws, 4), /blockedBy: \[2,3\]/);
+
+    const replaced = json(await run("deck_map_link", { key: 4, blockedBy: [2] }, ws));
+    assert.equal(replaced.status, "ok");
+    assert.match(readDeck(ws, 4), /blockedBy: \[2\]/);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("补边：自阻塞与同批成环都在写前被拒，父子边不受影响", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh(NO_GH);
+  try {
+    for (const title of ["根", "甲", "乙"]) json(await run("deck_issue_create", { title }, ws));
+
+    const self = await run("deck_map_link", { key: 3, blockedBy: [3] }, ws);
+    assert.equal(self.isError, true);
+    const selfPayload = JSON.parse(self.text);
+    assert.equal(selfPayload.status, "unsupported");
+    assert.equal(selfPayload.items[0].landing, EDGE_LANDING.READ_BACK_MISSING);
+    assert.match(selfPayload.items[0].evidence, /不能阻塞自己/);
+    assert.match(readDeck(ws, 3), /blockedBy: \[\]/);
+
+    json(await run("deck_map_link", { key: 3, blockedBy: [2] }, ws));
+    const cycle = await run("deck_map_link", { edges: [{ key: 2, parentKey: 1, blockedBy: [3] }] }, ws);
+    const cyclePayload = JSON.parse(cycle.text);
+    assert.equal(cyclePayload.status, "partial");
+    const parentItem = cyclePayload.items.find((item) => item.op === "parent");
+    const blockItem = cyclePayload.items.find((item) => item.op === "block");
+    assert.equal(parentItem.ok, true, "阻塞边被拒不应拖累同一条作业里的父子边");
+    assert.equal(blockItem.ok, false);
+    assert.match(blockItem.evidence, /成环/);
+    assert.match(readDeck(ws, 2), /parentKey: 1/);
+    assert.match(readDeck(ws, 2), /blockedBy: \[\]/);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("补边（本地 .scratch）：父票写 DSH-PARENT，阻塞写 Blocked by 行", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh(NO_GH);
+  try {
+    const init = await initializeLocalScratch(ws, { name: "backlog" });
+    assert.equal(init.ok, true, init.detail);
+    json(await run("deck_issue_create", { title: "父票" }, ws));
+    json(await run("deck_issue_create", { title: "子票" }, ws));
+
+    const parent = json(await run("deck_map_link", { key: 2, parentKey: 1 }, ws));
+    assert.equal(parent.items[0].landing, EDGE_LANDING.FILE_NOTE);
+    assert.match(parent.items[0].evidence, /DSH-PARENT/);
+    assert.match(scratchFile(ws, "backlog", 2), /<!-- DSH-PARENT: 1 -->/);
+
+    const blocked = json(await run("deck_map_link", { key: 2, blockedBy: [1] }, ws));
+    assert.equal(blocked.items[0].landing, EDGE_LANDING.BODY_LINE);
+    assert.match(blocked.items[0].evidence, /Blocked by/);
+    assert.match(scratchFile(ws, "backlog", 2), /\*\*Blocked by:\*\* #01/);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("补边：blockedBy 里混进非票号时整组不写，已有的阻塞边不会被清空", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh(NO_GH);
+  try {
+    for (const title of ["甲", "乙", "丙"]) json(await run("deck_issue_create", { title }, ws));
+    json(await run("deck_map_link", { key: 3, blockedBy: [2] }, ws));
+
+    const invalid = await run("deck_map_link", { key: 3, blockedBy: [2, "abc"] }, ws);
+    assert.equal(invalid.isError, true);
+    const payload = JSON.parse(invalid.text);
+    assert.equal(payload.items[0].ok, false);
+    assert.match(payload.items[0].evidence, /不是票号/);
+    assert.match(readDeck(ws, 3), /blockedBy: \[2\]/, "不能把过滤后的空表当成 blockedBy:[] 写进去");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("地图快照：子票按父子边取，已关闭的也计入进度，frontierOnly 只留可接的", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh(NO_GH);
+  try {
+    const map = json(await run("deck_issue_create", { title: "地图", labels: ["wayfinder:map"] }, ws));
+    assert.equal(map.number, 1);
+    for (const title of ["子票甲", "子票乙", "游离票"]) json(await run("deck_issue_create", { title }, ws));
+    json(await run("deck_map_link", { key: 2, parentKey: 1 }, ws));
+    json(await run("deck_map_link", { key: 3, parentKey: 1 }, ws));
+    json(await run("deck_issue_patch", { number: 3, state: "closed" }, ws));
+
+    const snapshot = json(await run("deck_map_snapshot", { key: 1 }, ws));
+    assert.deepEqual(snapshot.children.map((item) => item.number).sort((a, b) => a - b), [2, 3]);
+    assert.equal(snapshot.childrenSource, "parent");
+    assert.deepEqual(snapshot.progress, { total: 2, closed: 1, open: 1 });
+    assert.deepEqual(snapshot.notes, []);
+
+    const frontier = json(await run("deck_map_snapshot", { key: 1, frontierOnly: true }, ws));
+    assert.deepEqual(frontier.children.map((item) => item.number), [2]);
+    assert.match(frontier.notes.join("\n"), /frontierOnly/);
   } finally {
     gh.restore();
   }
@@ -328,6 +440,15 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 const all = args.join(" ");
 appendFileSync(process.env.DECK_ARGS_FILE, JSON.stringify(args) + "\\n");
+// 与建票同一条 DSH 幂等路径：先按锚查重，查不到才建。
+if (args[0] === "search" && args[1] === "issues") {
+  console.log("[]");
+  process.exit(0);
+}
+if (args[0] === "issue" && args[1] === "list") {
+  console.log("[]");
+  process.exit(0);
+}
 if (args[1] === "repos/acme/deck/issues") {
   const title = args.find((arg) => arg.startsWith("title=")) ?? "";
   if (title.includes("坏票")) {
@@ -499,6 +620,47 @@ test("本地后端：建票 / 评论 / 改票 / 改标签都写进 .deck/，一�
     const prs = await run("deck_pull_requests_list", {}, ws);
     assert.equal(prs.isError, true);
     assert.equal(JSON.parse(prs.text).reason, "unsupported-host");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("本地 .scratch 幂等复用：不把没重写的父票 / 指派 / 阻塞边说成本次已写入", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    assert.equal((await initializeLocalScratch(ws, { name: "unit" })).ok, true);
+    const map = json(await run("deck_issue_create", { title: "容器", kind: "map", feature: "unit" }, ws));
+    assert.equal(map.number, 0);
+    const blocker = json(await run("deck_issue_create", { title: "阻塞者", kind: "issue", feature: "unit" }, ws));
+    assert.equal(blocker.number, 1);
+
+    const args = {
+      title: "重试票",
+      kind: "issue",
+      feature: "unit",
+      parentKey: "00",
+      assignees: ["alice"],
+      blockedBy: ["1"],
+      idempotencyKey: "reuse-1",
+    };
+    const first = json(await run("deck_issue_create", args, ws));
+    assert.equal(first.reused, false);
+    assert.equal(first.parent.linked, true);
+    assert.equal(first.parent.applied, true);
+    assert.equal(first.assignees.applied, true);
+    assert.equal(first.blockedBy.applied, true);
+
+    const second = json(await run("deck_issue_create", args, ws));
+    assert.equal(second.reused, true);
+    assert.equal(second.parent.linked, false);
+    assert.equal(second.parent.applied, false);
+    assert.match(second.parent.note, /复用了已有票/);
+    assert.equal(second.assignees.applied, false);
+    assert.match(second.assignees.note, /没有重新指派/);
+    assert.equal(second.blockedBy.applied, false);
+    assert.match(second.blockedBy.note, /没有重写阻塞边/);
+    assert.deepEqual(gh.calls(), []);
   } finally {
     gh.restore();
   }

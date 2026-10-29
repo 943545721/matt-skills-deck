@@ -26,6 +26,21 @@ export function record(level: LogLevel, scope: string, message: string): void {
   if (entries.length > MAX_ENTRIES) entries.splice(0, entries.length - MAX_ENTRIES);
 }
 
+/**
+ * 启动时记一条。
+ *
+ * 这条不是给「排查某个写操作」用的，而是给空面板一个解释：缓冲是什么时候开始的。
+ * 没有它，用户重载插件后打开运行页只会看到「没有日志」，分不清是坏了还是真的没事发生。
+ * 仍然走 `record`，所以关掉调试日志时它也不会出现——开关关了就一条都不记，包括这条。
+ */
+export function recordStartup(input: { version: string; node: string }): void {
+  record(
+    "info",
+    "plugin",
+    `启动 v${input.version} · node ${input.node} · pid ${process.pid} · 内存缓冲 ${MAX_ENTRIES} 条，重载即清空`,
+  );
+}
+
 export function listLogs(limit = MAX_ENTRIES): LogEntry[] {
   return entries.slice(-Math.min(Math.max(limit, 1), MAX_ENTRIES)).reverse();
 }

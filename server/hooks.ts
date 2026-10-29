@@ -4,16 +4,17 @@ import path from "node:path";
 import { record } from "./logs.ts";
 import { MCP_SERVER_NAME, PREAPPROVED_TOOL_NAMES } from "./mcp/tools.ts";
 import { pluginRoot } from "./paths.ts";
+import { TurnReporter, reportEnabledFor } from "./report.ts";
 import { getSettings } from "./settings.ts";
-import type { Backend } from "./tracker/backend.ts";
-import { resolveBackend } from "./tracker/backend.ts";
+import type { TargetFailure, WorkspaceTargets } from "./tracker/targets.ts";
+import { resolveWorkspaceTargets } from "./tracker/targets.ts";
 
 /**
  * 生命周期钩子：把 deck_* 工具挂到 Agent 身上。
  *
  * 为什么走 `before agent.create` 而不是让用户手写 MCP 配置：装插件就该能用。
  * 哪些工作区值得注入见 `shouldInjectDeckTools`：有 GitHub / GitLab 远端时一定有票可读；
- * 本地后端只有工作区里已经存在 `.deck/`（或用户在设置里明确选了 local）才注入，
+ * 本地后端只有工作区里已经存在 `.deck/` 或 `.scratch/`（或用户在设置里明确选了 local）才注入，
  * 否则每个空目录都会多出十几个工具，白白占着上下文和权限面板。
  *
  * 只读工具进 preapproved（Agent 可以自己读票），写工具不进（改票面必须经用户确认）。
@@ -86,26 +87,25 @@ export function injectionProblem(input: { entry: string; entryPresent: boolean; 
   return null;
 }
 
-/** 注入判定的纯函数：三种后端各有自己的「有票可读」条件。 */
-export function shouldInjectDeckTools(backend: Backend, localBoard: boolean): boolean {
-  if (!backend.ok) return false;
-  if (backend.kind === "github" || backend.kind === "gitlab") return true;
+/** 注入判定的纯函数：有远端仓库（一个或多个）就注入；本地后端只在已有 `.deck/` / `.scratch/` 时注入。 */
+export function shouldInjectDeckTools(targets: WorkspaceTargets | TargetFailure, localBoard: boolean): boolean {
+  if (!targets.ok) return false;
+  if (targets.kind === "repos") return targets.targets.length > 0;
   return localBoard;
 }
 
 export function registerHooks(server: PluginServerContext): void {
   server.before("agent.create", async ({ request }) => {
     try {
-      const backend = await resolveBackend(request.config.cwd);
-      const localBoard = getSettings().backend === "local" || existsSync(path.join(request.config.cwd, ".deck"));
-      if (!shouldInjectDeckTools(backend, localBoard)) {
+      const targets = await resolveWorkspaceTargets(request.config.cwd);
+      const localBoard =
+        getSettings().backend === "local" ||
+        existsSync(path.join(request.config.cwd, ".deck")) ||
+        existsSync(path.join(request.config.cwd, ".scratch"));
+      if (!shouldInjectDeckTools(targets, localBoard)) {
         // 不是「出错」，是「这个工作区没有票可读」，所以不注入也不报错，只留一行日志便于排查。
         // 日志带上实际原因（没有远端 / 不是仓库 / 没有 git），别一律写成「没有远端」。
-        const why = backend.ok
-          ? backend.kind === "local"
-            ? "本地后端尚未启用，工作区里也没有 .deck/"
-            : `远端是 ${backend.ref.host}`
-          : backend.detail;
+        const why = targets.ok ? "本地后端尚未启用，工作区里也没有 .deck/ 或 .scratch/" : targets.detail;
         record("info", SCOPE, `未注入 deck 工具（${why}）：${request.config.cwd}`);
         return request;
       }
@@ -124,6 +124,20 @@ export function registerHooks(server: PluginServerContext): void {
       // 注入失败不该拦住用户开会话：原样放行，日志里留下原因。
       record("warn", SCOPE, `注入 deck 工具失败：${error instanceof Error ? error.message : String(error)}`);
       return request;
+    }
+  });
+
+  // 子会话收尾即回传：用户要的是「一级一级往主窗口回」，这一步不接上，
+  // 派出去的活就只剩一句「那个窗口干完了」，成果得靠人一个个点开看。
+  const reporter = new TurnReporter();
+  server.on("agent.turn_ended", async ({ agent, turnId, outcome }, context) => {
+    if (!agent.parentAgentId) return;
+    try {
+      const enabled = await reportEnabledFor(agent.cwd);
+      await reporter.report(context.paseo, { agent, outcome, turnId, reportOnFinish: enabled });
+    } catch (error) {
+      // 回传失败不能影响会话本身：日志里留原因，回传件仍在 .deck/handoffs/。
+      record("warn", SCOPE, `子会话收尾回传异常：${error instanceof Error ? error.message : String(error)}`);
     }
   });
 }

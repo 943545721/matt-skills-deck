@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fakeGh } from "./helpers/fake-gh.mjs";
+import { reconcileLabelColors } from "../shared/labels.ts";
 import { normalizeColor, setLabelColors } from "../server/tracker/labels.ts";
 
 test("颜色归一：带井号、大小写、首尾空白都收成 6 位小写", () => {
@@ -52,4 +53,23 @@ esac`);
   } finally {
     gh.restore();
   }
+});
+
+test("读回核对（GitHub / GitLab 共用）：一致进 verified，缺失与不一致都算 mismatched", () => {
+  const result = reconcileLabelColors(
+    [
+      { name: "bug", color: "0e8a16" },
+      { name: "docs", color: "1d76db" },
+      { name: "gone", color: "ffffff" },
+    ],
+    [
+      { name: "bug", color: "0e8a16" },
+      { name: "docs", color: "000000" },
+    ],
+  );
+  assert.deepEqual(result.verified, [{ name: "bug", color: "0e8a16" }]);
+  assert.deepEqual(result.mismatched, [
+    { name: "docs", expected: "1d76db", actual: "000000" },
+    { name: "gone", expected: "ffffff", actual: "" },
+  ]);
 });

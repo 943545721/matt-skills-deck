@@ -5,6 +5,9 @@ import { DeckPanel } from "./client/deck/Panel";
 import { DeckSettingsScreen } from "./client/deck/SettingsView";
 import { deckMessages } from "./client/deck/i18n";
 import { DECK_PANEL_ID, DECK_SCREEN_ID, DECK_SETTINGS_ID, DECK_SIDEBAR_ID } from "./client/deck/ids";
+import { contributeSurfaces } from "./client/deck/surfaces/contribution.tsx";
+import { bindHost } from "./client/deck/surfaces/host.tsx";
+import { DeckDirectory } from "./client/deck/surfaces/registry.ts";
 
 /**
  * 客户端入口：只注册「面」，不放实现。
@@ -32,20 +35,30 @@ function DeckSidebarItem({ currentScreen, openScreen }: PluginSidebarItemProps) 
 }
 
 export default function contribute(client: PluginClientContext) {
-  client.addWorkspacePanel({
-    id: DECK_PANEL_ID,
-    title: BOARD_TITLE,
-    icon: "ListChecks",
-    locations: ["workspace", "explorer"],
-    Component: DeckPanel,
-  });
-  client.addScreen({ id: DECK_SCREEN_ID, title: BOARD_TITLE, Component: DeckHome });
-  client.addSettingsScreen({
-    id: DECK_SETTINGS_ID,
-    title: SETTINGS_TITLE,
-    icon: "Settings",
-    Component: DeckSettingsScreen,
-  });
-  client.addSidebarHeaderItem({ id: DECK_SIDEBAR_ID, title: BOARD_TITLE, Component: DeckSidebarItem });
-  return () => {};
+  // 一个 client 只建一份目录：面板与 pill / 顶栏 / agent 面板共享同一条订阅。
+  const directory = new DeckDirectory(client.paseo);
+  directory.start();
+
+  const cleanups = [
+    client.addWorkspacePanel({
+      id: DECK_PANEL_ID,
+      title: BOARD_TITLE,
+      icon: "ListChecks",
+      locations: ["workspace", "explorer"],
+      Component: bindHost(client, directory, DeckPanel),
+    }),
+    client.addScreen({ id: DECK_SCREEN_ID, title: BOARD_TITLE, Component: DeckHome }),
+    client.addSettingsScreen({
+      id: DECK_SETTINGS_ID,
+      title: SETTINGS_TITLE,
+      icon: "Settings",
+      Component: bindHost(client, directory, DeckSettingsScreen),
+    }),
+    client.addSidebarHeaderItem({ id: DECK_SIDEBAR_ID, title: BOARD_TITLE, Component: DeckSidebarItem }),
+    contributeSurfaces(client, directory),
+  ];
+  return () => {
+    for (const cleanup of cleanups) cleanup();
+    directory.dispose();
+  };
 }

@@ -14,7 +14,7 @@ import {
 } from "../../shared/issues";
 import { readableText } from "./format";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
-import { PixelButton, usePixel } from "./pixel";
+import { PixelBanner, PixelButton, PixelModalBody, usePixel } from "./pixel";
 
 type PromptMode = "general" | "diagnose" | "fix" | "research" | "take" | "complete";
 
@@ -30,6 +30,10 @@ type PromptMode = "general" | "diagnose" | "fix" | "research" | "take" | "comple
 export function IssueModal({
   theme,
   workspaceDir,
+  repoKey,
+  repoDir,
+  repoWebUrl,
+  readOnly = false,
   number,
   kind,
   isCurrent,
@@ -39,6 +43,13 @@ export function IssueModal({
 }: {
   theme: PluginTheme;
   workspaceDir: string;
+  /** 票属于哪个仓库：票号只在仓库内唯一，写操作必须带它。 */
+  repoKey: string;
+  /** 本地代码目录与远端地址：复制给 Agent 的提示词要能直接指到代码。 */
+  repoDir?: string;
+  repoWebUrl?: string | null;
+  /** 当前账号没有写权限：读与复制提示词照常，写操作整块禁用。 */
+  readOnly?: boolean;
   number: number;
   kind: ItemKind;
   isCurrent: boolean;
@@ -59,18 +70,18 @@ export function IssueModal({
   const setState = useRpc(issuesStateRpc);
 
   const detail = useQuery({
-    queryKey: ["deck", "issue", workspaceDir, kind, number],
-    queryFn: () => readIssue({ workspaceDir, number, kind }),
+    queryKey: ["deck", "issue", workspaceDir, repoKey, kind, number],
+    queryFn: () => readIssue({ workspaceDir, repoKey, number, kind }),
   });
 
   /** 写成功后就地刷新：详情与列表都会因为一次评论/改标签而变化，两边都要重取。 */
   const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ["deck", "issue", workspaceDir, kind, number] });
+    void queryClient.invalidateQueries({ queryKey: ["deck", "issue", workspaceDir, repoKey, kind, number] });
     void queryClient.invalidateQueries({ queryKey: ["deck", "issues", workspaceDir] });
   };
 
   const commentMutation = useMutation({
-    mutationFn: () => writeComment({ workspaceDir, number, body: comment.trim(), kind }),
+    mutationFn: () => writeComment({ workspaceDir, repoKey, number, body: comment.trim(), kind }),
     onSuccess: (result) => {
       if (!result.ok) {
         toast.show(`${t("issue.commentFailed")}：${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")} — ${result.detail}`, {
@@ -86,7 +97,7 @@ export function IssueModal({
   });
 
   const labelMutation = useMutation({
-    mutationFn: (labels: string[]) => setLabels({ workspaceDir, number, labels, kind }),
+    mutationFn: (labels: string[]) => setLabels({ workspaceDir, repoKey, number, labels, kind }),
     onSuccess: (result) => {
       if (!result.ok) {
         toast.show(`${t("issue.labelsFailed")}：${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")} — ${result.detail}`, {
@@ -105,7 +116,7 @@ export function IssueModal({
   });
 
   const assignMutation = useMutation({
-    mutationFn: (take: boolean) => assign({ workspaceDir, number, take }),
+    mutationFn: (take: boolean) => assign({ workspaceDir, repoKey, number, take }),
     onSuccess: (result) => {
       if (!result.ok) {
         toast.show(`${t("issue.actionFailed")}：${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")} — ${result.detail}`, {
@@ -125,7 +136,7 @@ export function IssueModal({
   });
 
   const stateMutation = useMutation({
-    mutationFn: (next: "open" | "closed") => setState({ workspaceDir, number, state: next }),
+    mutationFn: (next: "open" | "closed") => setState({ workspaceDir, repoKey, number, state: next }),
     onSuccess: (result) => {
       if (!result.ok) {
         toast.show(`${t("issue.actionFailed")}：${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")} — ${result.detail}`, {
@@ -171,6 +182,9 @@ export function IssueModal({
     };
     return [
       t("issue.promptTitle", { number: target.number, title: target.title }),
+      t("issue.promptRepo", { repo: repoKey }),
+      repoDir ? t("issue.promptCodeDir", { dir: repoDir }) : "",
+      repoWebUrl ? t("issue.promptRemote", { url: repoWebUrl }) : "",
       target.url ? t("issue.promptLink", { url: target.url }) : "",
       names ? t("issue.promptLabels", { names }) : "",
       "",
@@ -195,44 +209,57 @@ export function IssueModal({
   const styles = useMemo(
     () => ({
       body: { gap: 10 },
-      title: { color: theme.colors.foreground, fontSize: 15, fontWeight: "600" as const },
-      meta: { color: theme.colors.foregroundMuted, fontSize: 11 },
+      title: { color: skin.colors.ink, fontSize: 15, fontWeight: "700" as const, lineHeight: 21 },
+      meta: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily },
       labels: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 4 },
-      label: { fontSize: 10, paddingHorizontal: 6, paddingVertical: 1, overflow: "hidden" as const },
-      comment: { borderTopWidth: 2, borderTopColor: theme.colors.border, paddingTop: 8, gap: 3 },
-      hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
-      error: { color: theme.colors.statusDanger, fontSize: 12 },
-      actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8 },
+      label: {
+        fontSize: 10,
+        lineHeight: 16,
+        paddingHorizontal: 6,
+        overflow: "hidden" as const,
+        borderWidth: 1,
+        borderColor: skin.colors.line,
+        fontFamily: skin.mono.fontFamily,
+        fontWeight: "700" as const,
+      },
+      comment: { borderTopWidth: 1, borderTopColor: skin.colors.line, paddingTop: 8, gap: 4 },
+      hint: skin.hint,
+      error: skin.error,
+      actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 8, alignItems: "center" as const },
       blocker: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 6, alignItems: "center" as const },
+      docPlate: skin.docPlate,
       input: {
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
-        color: theme.colors.foreground,
-        padding: 8,
-        fontSize: 12,
+        ...skin.input,
         minHeight: 64,
       },
     }),
-    [theme, skin],
+    [skin],
   );
 
   return (
     <Modal title={`#${number}`} open onOpenChange={(open) => { if (!open) onClose(); }}>
       <Modal.Content>
-        <View style={styles.body}>
-          {detail.error ? <Text style={styles.error}>{detail.error.message}</Text> : null}
+        <PixelModalBody skin={skin} style={styles.body}>
+          {detail.error ? (
+            <PixelBanner skin={skin}>
+              <Text style={styles.error}>{detail.error.message}</Text>
+            </PixelBanner>
+          ) : null}
           {detail.data && !detail.data.ok ? (
-            <>
+            <PixelBanner skin={skin}>
               <Text style={styles.error}>{staticText(t, FAILURE_KEYS[detail.data.reason] ?? "failure.read")}</Text>
               <Text style={styles.hint}>{detail.data.detail}</Text>
-            </>
+            </PixelBanner>
           ) : null}
           {detail.isPending ? <Text style={styles.hint}>{t("common.loading")}</Text> : null}
 
           {issue ? (
             <>
               <Text style={styles.title}>{issue.title}</Text>
+              <Text style={styles.meta}>
+                {repoKey === "local" ? t("board.hostLocal") : repoKey}
+                {repoDir ? ` · ${t("board.codeDir", { dir: repoDir })}` : ""}
+              </Text>
               <Text style={styles.meta}>
                 {issue.merged
                   ? t("issue.merged")
@@ -271,8 +298,8 @@ export function IssueModal({
                         style={[
                           styles.label,
                           {
-                            backgroundColor: blocker.state === "OPEN" ? theme.colors.statusDanger : theme.colors.surface2,
-                            color: blocker.state === "OPEN" ? "#ffffff" : theme.colors.foregroundMuted,
+                            backgroundColor: blocker.state === "OPEN" ? skin.colors.badBg : skin.colors.stripe,
+                            color: blocker.state === "OPEN" ? skin.colors.bad : skin.colors.ink2,
                           },
                         ]}
                       >
@@ -283,7 +310,9 @@ export function IssueModal({
                 </View>
               ) : null}
 
-              <Markdown>{issue.body || t("issue.noBody")}</Markdown>
+              <View style={styles.docPlate}>
+                <Markdown>{issue.body || t("issue.noBody")}</Markdown>
+              </View>
 
               <View style={styles.actions}>
                 {issue.url ? (
@@ -331,6 +360,9 @@ export function IssueModal({
               </View>
 
               {!isPullRequest ? (
+                readOnly ? (
+                  <Text style={styles.hint}>{t("issue.readOnly")}</Text>
+                ) : (
                 <View style={styles.actions}>
                   <PixelButton
                     skin={skin}
@@ -357,6 +389,7 @@ export function IssueModal({
                     onPress={() => stateMutation.mutate("open")}
                   />
                 </View>
+                )
               ) : (
                 <Text style={styles.hint}>{t("issue.prReadOnly")}</Text>
               )}
@@ -365,7 +398,7 @@ export function IssueModal({
                 <PixelButton
                   skin={skin}
                   label={t("issue.editLabels")}
-                  disabled={labelsTruncated}
+                  disabled={labelsTruncated || readOnly}
                   onPress={() => setLabelDraft(issue.labels.map((label) => label.name).join(", "))}
                 />
               ) : null}
@@ -384,6 +417,7 @@ export function IssueModal({
                     value={labelDraft}
                     onChangeText={setLabelDraft}
                     placeholder={t("issue.labelsPlaceholder")}
+                    placeholderTextColor={skin.colors.ink2}
                     multiline
                   />
                   <View style={styles.actions}>
@@ -418,12 +452,14 @@ export function IssueModal({
                       <Text style={styles.meta}>
                         {item.author || t("issue.unknownAuthor")} · {item.createdAt.slice(0, 10)}
                       </Text>
-                      <Markdown>{item.body}</Markdown>
+                      <View style={styles.docPlate}>
+                        <Markdown>{item.body}</Markdown>
+                      </View>
                     </View>
                   ))
                 : null}
 
-              {!isPullRequest ? (
+              {!isPullRequest && !readOnly ? (
                 <>
                   <TextInput
                     accessibilityLabel={t("issue.submitComment")}
@@ -431,6 +467,7 @@ export function IssueModal({
                     value={comment}
                     onChangeText={setComment}
                     placeholder={t("issue.commentPlaceholder")}
+                    placeholderTextColor={skin.colors.ink2}
                     multiline
                   />
                   <PixelButton
@@ -449,7 +486,7 @@ export function IssueModal({
               ) : null}
             </>
           ) : null}
-        </View>
+        </PixelModalBody>
       </Modal.Content>
     </Modal>
   );

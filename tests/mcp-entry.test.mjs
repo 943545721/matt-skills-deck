@@ -157,7 +157,8 @@ test("大回包不被截断，且状态过滤下推到了 GraphQL 查询", { ski
   const sink = path.join(bin, "stdout.jsonl");
   const pipeline = `"${process.execPath}" "${entry}" --workspace "${workspace}" | ( sleep 0.5; cat > "${sink}" )`;
   const result = spawnSync("sh", ["-c", pipeline], {
-    input: line({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "deck_issues_list", arguments: {} } }),
+    // limit 用契约上限 200：默认 50 是先给规划用的，这里要的是「超过管道容量」的大回包。
+    input: line({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "deck_issues_list", arguments: { limit: 200 } } }),
     encoding: "utf8",
     timeout: 60_000,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GH_CAPTURE: capture, GH_RESPONSE: response },
@@ -170,9 +171,10 @@ test("大回包不被截断，且状态过滤下推到了 GraphQL 查询", { ski
 
   const reply = JSON.parse(replies[0]);
   const payload = JSON.parse(reply.result.content[0].text);
-  assert.equal(payload.issues.length, 400);
+  // DSH 契约：totalCount 是筛完的总数，returned 是本页条数（默认 50、上限 200）。
+  assert.equal(payload.issues.length, 200);
   assert.equal(payload.totalCount, 400);
-  assert.equal(payload.returned, 400);
+  assert.equal(payload.returned, 200);
   assert.equal(payload.hasMore, true);
 
   const captured = String(spawnSync("cat", [capture], { encoding: "utf8" }).stdout);
@@ -181,5 +183,8 @@ test("大回包不被截断，且状态过滤下推到了 GraphQL 查询", { ski
   // 字符串变量走 -f（原样），数字走 -F：-F 会做类型推断并把 @ 当读文件。
   assert.match(captured, /(^|\n)-f\nowner=acme\n/);
   assert.match(captured, /(^|\n)-f\nname=deck\n/);
+  // `first` 一个请求最多 100 条（GitHub 硬上限，200 会让整条查询被拒）；
+  // 要 200 条就翻两页，不能把 200 塞进 `first`。
   assert.match(captured, /(^|\n)-F\nfirst=100\n/);
+  assert.doesNotMatch(captured, /first=(?:2|3)\d\d/);
 });

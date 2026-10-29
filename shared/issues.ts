@@ -38,6 +38,21 @@ const blocker = z.object({
  */
 const readiness = z.enum(["ready", "claimed", "blocked", "closed"]);
 
+/** 详情页的父子边：只带能点过去的最小字段，不把子票整份正文再取一遍。 */
+const relatedIssue = z.object({
+  number: z.number().int(),
+  title: z.string(),
+  state: itemState,
+  kind: itemKind,
+  containerKind: z.enum(["map", "spec"]).nullable().optional(),
+});
+
+const parentIssue = z.object({
+  number: z.number().int(),
+  title: z.string(),
+  containerKind: z.enum(["map", "spec"]).nullable().optional(),
+});
+
 const issueSummary = z.object({
   number: z.number().int(),
   title: z.string(),
@@ -48,12 +63,45 @@ const issueSummary = z.object({
   labels: z.array(label),
   assignees: z.array(z.string()),
   isMap: z.boolean(),
+  /** DSH container identity when the detail/list request included enough body data. */
+  containerKind: z.enum(["map", "spec"]).nullable().optional(),
   kind: itemKind,
   /** PR 专用：合并后 state 仍是 CLOSED，靠这一位区分「关了」和「合了」。 */
   merged: z.boolean(),
   blockedBy: z.array(blocker),
   readiness,
+  /** 父子边：读得到时给父票号；null 表示明确没有父票；缺省表示这次没取这一列。 */
+  parentKey: z.string().nullable().optional(),
 });
+
+/**
+ * 合板里的一张票必须能回答「它属于哪个仓库」。
+ *
+ * 票号只在仓库内唯一，所以列表项带 `repoKey`；同一个 `#12` 在两个仓库里是两张不同的票，
+ * 任何写操作都必须把 repoKey 一起带上。
+ */
+const boardIssue = issueSummary.extend({
+  repoKey: z.string(),
+  /** 只在工具显式要正文时出现（判 spec / 按正文筛 query）；界面刷新不带，别让每行多背一份正文。 */
+  body: z.string().optional(),
+  containerKind: z.enum(["map", "spec"]).nullable().optional(),
+});
+
+export type BoardIssue = z.infer<typeof boardIssue>;
+
+/**
+ * 板子上的一个仓库。
+ *
+ * `dir` 是本地代码目录：Agent 修复 / 查阅时需要的正是它，光有 `owner/name` 还要再猜一次。
+ * `readOnly` 表示该仓库是否禁止写；GitLab 也可写，实际写入由每次操作的权限闸门决定。
+ */
+const repoSummary = repo.extend({
+  key: z.string(),
+  dir: z.string(),
+  readOnly: z.boolean(),
+});
+
+export type RepoSummary = z.infer<typeof repoSummary>;
 
 /**
  * 读路径的失败一律走 `ok:false` 返回值，不走抛异常。
@@ -62,27 +110,38 @@ const issueSummary = z.object({
  * 用异常会让 useQuery 把它当错误、还得多接一层 error UI；用返回值则可以直接把
  * reason 映射成一句人话，和空列表并列显示。
  */
+const failureReason = z.enum([
+  "no-repo",
+  "unsupported-host",
+  "gh-missing",
+  /** 装了 gh 但没有登录态：请求根本没到 GitHub，不能跟「远端拒绝」混成一句话。 */
+  "gh-unauth",
+  "gh-failed",
+  "not-found",
+  "invalid",
+  /** 现有标签读不全：整体替换会删掉没读到的标签，所以拒绝。 */
+  "labels-truncated",
+  /** 本地后端写文件失败（权限、磁盘、非法的票号路径）。 */
+  "local-failed",
+  /** 装了 glab 但没有登录态。 */
+  "glab-missing",
+  "glab-unauth",
+  /** glab 请求本身失败（非登录问题）。 */
+  "glab-failed",
+]);
+
+export type FailureReason = z.infer<typeof failureReason>;
+
+/** 合板里某一个仓库读取失败：不拖垮其他仓库，但要如实说清是哪一份失败。 */
+const repoFailure = z.object({
+  repoKey: z.string(),
+  reason: failureReason,
+  detail: z.string(),
+});
+
 const failure = z.object({
   ok: z.literal(false),
-  reason: z.enum([
-    "no-repo",
-    "unsupported-host",
-    "gh-missing",
-    /** 装了 gh 但没有登录态：请求根本没到 GitHub，不能跟「远端拒绝」混成一句话。 */
-    "gh-unauth",
-    "gh-failed",
-    "not-found",
-    "invalid",
-    /** 现有标签读不全：整体替换会删掉没读到的标签，所以拒绝。 */
-    "labels-truncated",
-    /** 本地后端写文件失败（权限、磁盘、非法的票号路径）。 */
-    "local-failed",
-    /** 装了 glab 但没有登录态。 */
-    "glab-missing",
-    "glab-unauth",
-    /** glab 请求本身失败（非登录问题）。 */
-    "glab-failed",
-  ]),
+  reason: failureReason,
   detail: z.string(),
   /**
    * 已经解析出来的仓库。失败时也带上：界面顶栏靠它显示「owner/name」，
@@ -90,6 +149,11 @@ const failure = z.object({
    * 远端本身就没解析出来（no-repo / unsupported-host）时没有这个字段。
    */
   repo: repo.optional(),
+  /**
+   * 写请求可能已经送达：只出现在新建票失败时。界面不能把这种失败当成
+   * 「确定没建」而提示重新提交，否则会造重复票。
+   */
+  maybeCreated: z.boolean().optional(),
 });
 
 const listView = z.enum(["all", "open", "closed", "ready", "blocked", "merged"]);
@@ -125,19 +189,26 @@ export const issuesListRpc = defineRpc({
     kind: itemKind.optional(),
     label: z.string().min(1).optional(),
     sort: sortKey.optional(),
+    /** 只读一个仓库（`owner/name`）；省略表示整个工作区里的全部仓库。 */
+    repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({
       ok: z.literal(true),
-      repo,
-      issues: z.array(issueSummary),
+      /** 只有一个仓库时仍然给：单仓库工作区的老入口靠它显示顶栏。 */
+      repo: repo.optional(),
+      /** 本次板子覆盖的仓库（合板时多个）。 */
+      repos: z.array(repoSummary),
+      issues: z.array(boardIssue),
+      /** 某个仓库读失败时只在顶部提示这一行，其余仓库照常显示。 */
+      failures: z.array(repoFailure),
       totalCount: z.number().int(),
       fetchedAt: z.string(),
       /** 远端还有更多票没取：界面要提示「这是最近 N 条」。 */
       hasMore: z.boolean(),
       counts,
-      /** GraphQL 被限流时回退 REST；界面据此提示「本页缺阻塞关系」。 */
-      source: z.enum(["graphql", "rest", "local", "gitlab"]),
+      /** GraphQL 被限流时回退 REST；合板里各仓库来源不一致时给 mixed。 */
+      source: z.enum(["graphql", "rest", "local", "gitlab", "mixed"]),
       rateLimit: z
         .object({
           limit: z.number().int(),
@@ -163,14 +234,28 @@ export const issuesDetailRpc = defineRpc({
     number: z.number().int().min(1),
     /** 不传按 issue 处理；拉取请求页签传 pull-request。编号空间共用，不能靠猜。 */
     kind: itemKind.optional(),
+    /** 票属于哪个仓库。单仓库工作区可以省略；多仓库时必须带上，否则同号票会读错。 */
+    repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({
       ok: z.literal(true),
       repo,
+      /** 回显票所属仓库，界面拿它拼 `owner/name #12`。 */
+      repoKey: z.string(),
       // labelCount 是远端这张票的标签总数：大于 labels.length 说明我们只读到一部分，
       // 界面必须禁止「整体替换」（PUT 会把没读到的标签一起删掉）。
       issue: issueSummary.extend({ body: z.string(), labelCount: z.number().int() }),
+      /** 父容器（地图/规格）：详情页要给一条能点回去的父票入口。 */
+      parent: parentIssue.nullable().optional(),
+      /** 子票：只给能点过去的最小字段；完整列表由地图详情负责。 */
+      children: z.array(relatedIssue).optional(),
+      /** 子票总数：大于 children.length 时界面要如实说「只显示了前 N 张」。 */
+      childrenTotal: z.number().int().optional(),
+      /** 反向依赖：这张票正在阻塞谁。 */
+      blocking: z.array(blocker).optional(),
+      /** true 表示反向上游还有更多边没读回来。 */
+      blockingTruncated: z.boolean().optional(),
       comments: z.array(comment),
       /** 评论总数：大于 comments.length 说明只给了最早的 100 条。 */
       commentCount: z.number().int(),
@@ -194,6 +279,7 @@ export const issuesCommentRpc = defineRpc({
     body: z.string().min(1).max(60_000),
     /** PR 的评论在 DSH 里是只读的；传 pull-request 会被明确拒绝，而不是悄悄写到同号 issue。 */
     kind: itemKind.optional(),
+    repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), comment }),
@@ -210,15 +296,32 @@ export const issuesCreateRpc = defineRpc({
     labels: z.array(z.string().min(1)).optional(),
     /** 地图票：勾上就自动带 wayfinder:map，和源仓库的 `type: map` 同义。 */
     isMap: z.boolean().optional(),
+    /** DSH 的六种票型；本地 Markdown 后端用它决定落 `.scratch` 的哪个容器。 */
+    kind: z.enum(["map", "map-ticket", "spec", "spec-ticket", "bug", "issue"]).optional(),
+    /** `.scratch/<name>` 容器名；spec 用 feature，map 用 effort。 */
+    feature: z.string().min(1).max(80).optional(),
+    effort: z.string().min(1).max(80).optional(),
+    /** 子票挂在哪张父票下（`map-ticket` / `spec-ticket`）。面板 RPC 只在本地后端生效，远端会明确拒绝。 */
+    parentKey: z.string().min(1).max(40).optional(),
+    /** 同一次提交的重试：本地 `.scratch` 用它回查；面板 RPC 的远端路径会明确拒绝。 */
+    idempotencyKey: z.string().min(1).max(200).optional(),
+    /** 目标仓库。工作区里只有一个仓库时可以省略；多个时必填（不猜）。 */
+    repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({
       ok: z.literal(true),
       number: z.number().int(),
+      /** 新票落在哪个仓库。 */
+      repoKey: z.string(),
       url: z.string(),
       labels: z.array(z.string()),
       /** 票建成了但标签没挂上：界面要分开说，别让人以为整件事失败。 */
       labelsFailed: z.boolean(),
+      /** 本地 Markdown 后端新建的文件路径。 */
+      path: z.string().optional(),
+      /** 幂等回查命中了已有的票，这次没有新建。 */
+      reused: z.boolean().optional(),
     }),
     failure,
   ]),
@@ -232,6 +335,7 @@ export const issuesSetLabelsRpc = defineRpc({
     /** 整体替换语义：这里就是「这张票应该有的标签全集」。 */
     labels: z.array(z.string().min(1)),
     kind: itemKind.optional(),
+    repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), labels: z.array(label) }),
@@ -246,6 +350,7 @@ export const issuesAssignRpc = defineRpc({
     workspaceDir: workspaceDirSchema,
     number: z.number().int().min(1),
     take: z.boolean(),
+    repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), login: z.string(), assignees: z.array(z.string()) }),
@@ -260,6 +365,7 @@ export const issuesStateRpc = defineRpc({
     workspaceDir: workspaceDirSchema,
     number: z.number().int().min(1),
     state: z.enum(["open", "closed"]),
+    repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({ ok: z.literal(true), state: itemState }),

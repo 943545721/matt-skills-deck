@@ -3,7 +3,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { copyText, FlatList, Markdown, Modal, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import {
   gitCheckRpc,
   gitCommitRpc,
@@ -15,9 +15,11 @@ import {
   gitStageRpc,
   gitStatusRpc,
   gitUnstageRpc,
+  gitWorktreesRpc,
 } from "../../shared/git";
 import type { DeckKey } from "./i18n";
 import { staticText, useDeckText } from "./i18n";
+import { PixelBanner, PixelButton, PixelCard, PixelModalBody, usePixel } from "./pixel";
 
 type Op = "commit" | "pull" | "push" | "fetch";
 
@@ -50,10 +52,12 @@ export function VersionView({
   workspaceDir: string;
 }) {
   const { t } = useDeckText();
+  const skin = usePixel(theme);
   const [message, setMessage] = useState("");
   const [diffPath, setDiffPath] = useState<string | null>(null);
   const [diffStaged, setDiffStaged] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [worktreesOpen, setWorktreesOpen] = useState(false);
   /** 多远端时让用户点一个：不替人选，也不让人手打远端名。 */
   const [choices, setChoices] = useState<{ op: Exclude<Op, "commit">; remotes: string[] } | null>(null);
   const toast = useToast();
@@ -69,6 +73,7 @@ export function VersionView({
   const push = useRpc(gitPushRpc);
   const readDiff = useRpc(gitDiffRpc);
   const readLog = useRpc(gitLogRpc);
+  const readWorktrees = useRpc(gitWorktreesRpc);
 
   const failureTextOf = (reason: string) => staticText(t, GIT_FAILURE_KEYS[reason] ?? "version.failure.git-failed");
 
@@ -88,6 +93,13 @@ export function VersionView({
     queryKey: ["deck", "git-log", workspaceDir],
     queryFn: () => readLog({ workspaceDir, limit: 20 }),
     enabled: historyOpen,
+    staleTime: 10_000,
+  });
+
+  const worktrees = useQuery({
+    queryKey: ["deck", "git-worktrees", workspaceDir],
+    queryFn: () => readWorktrees({ workspaceDir }),
+    enabled: worktreesOpen,
     staleTime: 10_000,
   });
 
@@ -188,42 +200,35 @@ export function VersionView({
     () => ({
       screen: { flex: 1, gap: 8 },
       toolbar: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 8 },
-      head: { color: theme.colors.foreground, fontSize: 12, fontWeight: "600" as const },
-      meta: { color: theme.colors.foregroundMuted, fontSize: 11 },
-      hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
-      error: { color: theme.colors.statusDanger, fontSize: 12 },
-      action: {
-        paddingVertical: 5,
-        paddingHorizontal: 10,
-        backgroundColor: theme.colors.surface2,
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-      },
-      actionText: { color: theme.colors.foreground, fontSize: 12 },
+      onChecker: skin.hintOnChecker,
+      head: { ...skin.head, color: skin.colors.tabInk, fontSize: 13 },
+      meta: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily },
+      hint: skin.hint,
+      error: skin.error,
       row: {
         flexDirection: "row" as const,
         alignItems: "center" as const,
         gap: 8,
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
         padding: 8,
         marginBottom: 6,
       },
-      code: { color: theme.colors.foregroundMuted, fontSize: 11, width: 22 },
-      path: { color: theme.colors.foreground, fontSize: 12, flexShrink: 1 },
-      badge: { fontSize: 10, paddingHorizontal: 6, paddingVertical: 1, overflow: "hidden" as const },
-      input: {
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
-        color: theme.colors.foreground,
-        padding: 8,
-        fontSize: 12,
+      code: { color: skin.colors.ink2, fontSize: 11, width: 22, fontFamily: skin.mono.fontFamily },
+      path: { color: skin.colors.ink, fontSize: 12, flexShrink: 1, fontFamily: skin.mono.fontFamily },
+      badge: {
+        ...skin.chipText,
+        fontSize: 10,
+        lineHeight: 16,
+        paddingHorizontal: 6,
+        overflow: "hidden" as const,
+        borderWidth: 1,
+        borderColor: skin.colors.line,
       },
+      input: skin.input,
+      chips: { flexDirection: "row" as const, gap: 4, flexWrap: "wrap" as const, alignItems: "center" as const },
       modalBody: { gap: 8 },
+      docPlate: skin.docPlate,
     }),
-    [theme],
+    [skin],
   );
 
   const data = status.data?.ok ? status.data : null;
@@ -266,118 +271,108 @@ export function VersionView({
             : t("common.loading")}
         </Text>
         {data && (data.branch.ahead || data.branch.behind) ? (
-          <Text style={styles.meta}>
+          <Text style={styles.onChecker}>
             {t("version.ahead", { n: data.branch.ahead })} · {t("version.behind", { n: data.branch.behind })}
           </Text>
         ) : null}
         <View style={{ marginLeft: "auto" as const }} />
-        <Pressable
-          accessibilityRole="button"
+        <PixelButton
+          skin={skin}
+          label={status.isFetching ? t("common.refreshing") : t("common.refresh")}
           accessibilityLabel={t("common.refresh")}
-          style={styles.action}
           onPress={refresh}
-        >
-          <Text style={styles.actionText}>
-            {status.isFetching ? t("common.refreshing") : t("common.refresh")}
-          </Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+        />
+        <PixelButton
+          skin={skin}
+          label={t("version.fetch")}
           accessibilityLabel={t("version.fetch")}
-          style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "fetch" })}
-        >
-          <Text style={styles.actionText}>{t("version.fetch")}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+        />
+        <PixelButton
+          skin={skin}
+          label={t("version.pull")}
           accessibilityLabel={t("version.pull")}
-          style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "pull" })}
-        >
-          <Text style={styles.actionText}>{t("version.pull")}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+        />
+        <PixelButton
+          skin={skin}
+          label={t("version.push")}
           accessibilityLabel={t("version.push")}
-          style={styles.action}
           onPress={() => remoteMutation.mutate({ op: "push" })}
-        >
-          <Text style={styles.actionText}>{t("version.push")}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+        />
+        <PixelButton
+          skin={skin}
+          label={t("version.history")}
           accessibilityLabel={t("version.history")}
-          style={styles.action}
           onPress={() => setHistoryOpen(true)}
-        >
-          <Text style={styles.actionText}>{t("version.history")}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+        />
+        <PixelButton
+          skin={skin}
+          label={t("version.worktrees")}
+          accessibilityLabel={t("version.worktrees")}
+          onPress={() => setWorktreesOpen(true)}
+        />
+        <PixelButton
+          skin={skin}
+          label={t("version.handoff")}
           accessibilityLabel={t("version.handoff")}
-          style={styles.action}
           onPress={() => void copyHandoff()}
-        >
-          <Text style={styles.actionText}>{t("version.handoff")}</Text>
-        </Pressable>
+        />
       </View>
 
       {choices ? (
         <View style={styles.toolbar}>
-          <Text style={styles.meta}>{t("version.chooseRemote")}</Text>
+          <Text style={styles.onChecker}>{t("version.chooseRemote")}</Text>
           {choices.remotes.map((remote) => (
-            <Pressable
+            <PixelButton
               key={remote}
-              accessibilityRole="button"
+              skin={skin}
+              label={remote}
               accessibilityLabel={t("version.chooseRemoteHint", { name: remote })}
-              style={styles.action}
               onPress={() => {
                 const picked = choices;
                 setChoices(null);
                 remoteMutation.mutate({ op: picked.op, remote });
               }}
-            >
-              <Text style={styles.actionText}>{remote}</Text>
-            </Pressable>
+            />
           ))}
-          <Pressable
-            accessibilityRole="button"
+          <PixelButton
+            skin={skin}
+            label={t("common.cancel")}
             accessibilityLabel={t("common.cancel")}
-            style={styles.action}
             onPress={() => setChoices(null)}
-          >
-            <Text style={styles.actionText}>{t("common.cancel")}</Text>
-          </Pressable>
+          />
         </View>
       ) : null}
 
       {failure ? (
-        <Text style={styles.error}>
-          {failureTextOf(failure.reason)}：{failure.detail}
-        </Text>
+        <PixelBanner skin={skin}>
+          <Text style={styles.error}>
+            {failureTextOf(failure.reason)}：{failure.detail}
+          </Text>
+        </PixelBanner>
       ) : null}
-      {status.error ? <Text style={styles.error}>{status.error.message}</Text> : null}
+      {status.error ? (
+        <PixelBanner skin={skin}>
+          <Text style={styles.error}>{status.error.message}</Text>
+        </PixelBanner>
+      ) : null}
 
       {data ? (
         <View style={styles.toolbar}>
-          <Pressable
-            accessibilityRole="button"
+          <PixelButton
+            skin={skin}
+            label={t("version.stageAll")}
             accessibilityLabel={t("version.stageAll")}
-            style={styles.action}
             onPress={() => stageMutation.mutate({ paths: unstaged, stage: true })}
-          >
-            <Text style={styles.actionText}>{t("version.stageAll")}</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
+          />
+          <PixelButton
+            skin={skin}
+            label={t("version.unstageAll")}
             accessibilityLabel={t("version.unstageAll")}
-            style={styles.action}
             onPress={() => stageMutation.mutate({ paths: staged, stage: false })}
-          >
-            <Text style={styles.actionText}>{t("version.unstageAll")}</Text>
-          </Pressable>
-          <Text style={styles.meta}>
+          />
+          <Text style={styles.onChecker}>
             {t("version.staged", { n: staged.length })} · {t("version.unstaged", { n: unstaged.length })}
           </Text>
         </View>
@@ -388,43 +383,39 @@ export function VersionView({
         keyExtractor={(item) => item.path}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 8 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>
+          <Text style={styles.onChecker}>
             {status.isPending ? t("common.loading") : data ? t("version.clean") : ""}
           </Text>
         }
         renderItem={({ item }) => (
-          <View style={styles.row}>
+          <PixelCard skin={skin} style={styles.row}>
             <Text style={styles.code}>{item.code}</Text>
             <Text style={styles.path} numberOfLines={1}>
               {item.path}
             </Text>
             {item.staged ? (
-              <Text style={[styles.badge, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>
+              <Text style={[styles.badge, { backgroundColor: skin.colors.okBg, color: skin.colors.ok }]}>
                 {t("version.stagedBadge")}
               </Text>
             ) : null}
-            <Pressable
-              accessibilityRole="button"
+            <PixelButton
+              skin={skin}
+              label={t("version.diff")}
               accessibilityLabel={`${t("version.diff")} ${item.path}`}
-              style={styles.action}
+              mini
               onPress={() => {
                 setDiffStaged(item.staged);
                 setDiffPath(item.path);
               }}
-            >
-              <Text style={styles.actionText}>{t("version.diff")}</Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="button"
+            />
+            <PixelButton
+              skin={skin}
+              label={item.staged ? t("version.unstage") : t("version.stage")}
               accessibilityLabel={`${item.staged ? t("version.unstage") : t("version.stage")} ${item.path}`}
-              style={styles.action}
+              mini
               onPress={() => stageMutation.mutate({ paths: [item.path], stage: !item.staged })}
-            >
-              <Text style={styles.actionText}>
-                {item.staged ? t("version.unstage") : t("version.stage")}
-              </Text>
-            </Pressable>
-          </View>
+            />
+          </PixelCard>
         )}
       />
 
@@ -435,19 +426,16 @@ export function VersionView({
           value={message}
           onChangeText={setMessage}
           placeholder={t("version.messagePlaceholder")}
+          placeholderTextColor={skin.colors.ink2}
         />
         <View style={styles.toolbar}>
-          <Pressable
-            accessibilityRole="button"
+          <PixelButton
+            skin={skin}
+            label={commitMutation.isPending ? t("version.committing") : t("version.commit")}
             accessibilityLabel={t("version.commit")}
-            style={styles.action}
             onPress={() => commitMutation.mutate()}
-          >
-            <Text style={styles.actionText}>
-              {commitMutation.isPending ? t("version.committing") : t("version.commit")}
-            </Text>
-          </Pressable>
-          <Text style={styles.hint}>{t("version.hint")}</Text>
+          />
+          <Text style={styles.onChecker}>{t("version.hint")}</Text>
         </View>
       </View>
 
@@ -459,7 +447,7 @@ export function VersionView({
         }}
       >
         <Modal.Content>
-          <View style={styles.modalBody}>
+          <PixelModalBody skin={skin} style={styles.modalBody}>
             {history.error ? <Text style={styles.error}>{history.error.message}</Text> : null}
             {history.data && !history.data.ok ? (
               <Text style={styles.error}>{failureTextOf(history.data.reason)}：{history.data.detail}</Text>
@@ -467,7 +455,7 @@ export function VersionView({
             {history.data?.ok ? (
               history.data.commits.length ? (
                 history.data.commits.map((entry) => (
-                  <View key={entry.oid} style={styles.row}>
+                  <PixelCard key={entry.oid} skin={skin} style={styles.row}>
                     <Text style={styles.code}>{entry.short}</Text>
                     <View style={{ flexShrink: 1 }}>
                       <Text style={styles.path} numberOfLines={2}>
@@ -477,7 +465,7 @@ export function VersionView({
                         {entry.author} · {entry.date.slice(0, 10)}
                       </Text>
                     </View>
-                  </View>
+                  </PixelCard>
                 ))
               ) : (
                 <Text style={styles.hint}>{t("version.historyEmpty")}</Text>
@@ -485,7 +473,68 @@ export function VersionView({
             ) : history.isPending ? (
               <Text style={styles.hint}>{t("common.loading")}</Text>
             ) : null}
-          </View>
+          </PixelModalBody>
+        </Modal.Content>
+      </Modal>
+
+      <Modal
+        title={t("version.worktreesTitle")}
+        open={worktreesOpen}
+        onOpenChange={(open) => {
+          if (!open) setWorktreesOpen(false);
+        }}
+      >
+        <Modal.Content>
+          <PixelModalBody skin={skin} style={styles.modalBody}>
+            {worktrees.error ? <Text style={styles.error}>{worktrees.error.message}</Text> : null}
+            {worktrees.data && !worktrees.data.ok ? (
+              <Text style={styles.error}>
+                {failureTextOf(worktrees.data.reason)}：{worktrees.data.detail}
+              </Text>
+            ) : null}
+            {worktrees.data?.ok ? (
+              worktrees.data.worktrees.length ? (
+                worktrees.data.worktrees.map((entry) => (
+                  <PixelCard key={entry.path} skin={skin} style={styles.row}>
+                    <View style={{ flexShrink: 1, gap: 3 }}>
+                      <View style={styles.chips}>
+                        <Text style={styles.path} numberOfLines={1}>
+                          {entry.display}
+                        </Text>
+                        {entry.current ? (
+                          <Text style={[styles.badge, { backgroundColor: skin.colors.okBg, color: skin.colors.ok }]}>
+                            {t("version.worktreesCurrent")}
+                          </Text>
+                        ) : null}
+                        {entry.locked ? (
+                          <Text style={[styles.badge, { backgroundColor: skin.colors.warnBg, color: skin.colors.warnInk }]}>
+                            {t("version.worktreesLocked")}
+                          </Text>
+                        ) : null}
+                        {entry.prunable ? (
+                          <Text style={[styles.badge, { backgroundColor: skin.colors.badBg, color: skin.colors.bad }]}>
+                            {t("version.worktreesPrunable")}
+                          </Text>
+                        ) : null}
+                        {entry.bare ? <Text style={styles.badge}>{t("version.worktreesBare")}</Text> : null}
+                        {entry.detached ? <Text style={styles.badge}>{t("version.worktreesDetached")}</Text> : null}
+                      </View>
+                      <Text style={styles.meta}>
+                        {entry.branch ?? t("version.worktreesDetached")} · {entry.head.slice(0, 7) || "—"}
+                      </Text>
+                      {entry.lockReason ? <Text style={styles.meta}>{entry.lockReason}</Text> : null}
+                      {entry.prunableReason ? <Text style={styles.meta}>{entry.prunableReason}</Text> : null}
+                    </View>
+                  </PixelCard>
+                ))
+              ) : (
+                <Text style={styles.hint}>{t("version.worktreesEmpty")}</Text>
+              )
+            ) : worktrees.isPending ? (
+              <Text style={styles.hint}>{t("common.loading")}</Text>
+            ) : null}
+            <Text style={styles.hint}>{t("version.worktreesHint")}</Text>
+          </PixelModalBody>
         </Modal.Content>
       </Modal>
 
@@ -497,7 +546,7 @@ export function VersionView({
         }}
       >
         <Modal.Content>
-          <View style={styles.modalBody}>
+          <PixelModalBody skin={skin} style={styles.modalBody}>
             {diff.error ? <Text style={styles.error}>{diff.error.message}</Text> : null}
             {diff.data && !diff.data.ok ? (
               <Text style={styles.error}>
@@ -507,14 +556,16 @@ export function VersionView({
             {diff.data?.ok ? (
               <>
                 {diff.data.truncated ? <Text style={styles.hint}>{t("version.diffTruncated")}</Text> : null}
-                <Markdown>
-                  {diff.data.diff ? `\`\`\`diff\n${diff.data.diff}\n\`\`\`` : t("version.diffEmpty")}
-                </Markdown>
+                <View style={styles.docPlate}>
+                  <Markdown>
+                    {diff.data.diff ? `\`\`\`diff\n${diff.data.diff}\n\`\`\`` : t("version.diffEmpty")}
+                  </Markdown>
+                </View>
               </>
             ) : diff.isPending ? (
               <Text style={styles.hint}>{t("common.loading")}</Text>
             ) : null}
-          </View>
+          </PixelModalBody>
         </Modal.Content>
       </Modal>
     </View>

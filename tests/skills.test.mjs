@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { listBundledSkills, readBundledSkill } from "../server/skills/catalog.ts";
 import { parseSkillFrontmatter } from "../server/skills/frontmatter.ts";
-import { installSkills, skillState } from "../server/skills/install.ts";
+import { installSkills, skillDirs, skillState } from "../server/skills/install.ts";
 
 const pluginDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDirs = [];
@@ -34,15 +34,31 @@ test("frontmatter 能读出 name 与 description，缺字段时返回 null", () 
   assert.equal(parseSkillFrontmatter("---\nname: x\n---\n"), null);
 });
 
-test("随包的 27 个技能在中英两侧都齐，且目录名与 frontmatter 一致", () => {
+test("随包的 30 个技能在中英两侧都齐，且目录名与 frontmatter 一致", () => {
   for (const lang of ["en", "zh"]) {
     const skills = listBundledSkills(pluginDir, lang);
-    assert.equal(skills.length, 27, `${lang} 侧技能数量应为 27，实际 ${skills.length}`);
+    assert.equal(skills.length, 30, `${lang} 侧技能数量应为 30，实际 ${skills.length}`);
     for (const skill of skills) {
       assert.equal(skill.id, skill.name, `${lang}/${skill.id} 的 frontmatter name 与目录名不一致`);
       assert.match(skill.id, /^[a-z0-9][a-z0-9-]*$/);
       assert.ok(skill.description.length > 0);
     }
+  }
+});
+
+test("legacy-issue-intake：中英都在，且保留只读、批准、幂等三条底线", () => {
+  for (const lang of ["zh", "en"]) {
+    const skill = readBundledSkill(pluginDir, lang, "legacy-issue-intake");
+    assert.ok(skill, `${lang} 缺 legacy-issue-intake`);
+    assert.ok(skill.description.length <= 200, `${lang} 描述过长：${skill.description.length}`);
+  }
+  const zh = readFileSync(path.join(pluginDir, "templates/skills/zh/legacy-issue-intake/SKILL.md"), "utf8");
+  for (const needle of ["只读", "批准", "幂等键", "未移动", "parentKey", "wayfinder:", "60,000 字节", "5 分钟窗口"]) {
+    assert.match(zh, new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  const en = readFileSync(path.join(pluginDir, "templates/skills/en/legacy-issue-intake/SKILL.md"), "utf8");
+  for (const needle of ["Read-only", "approval", "Idempotency key", "not moved", "parentKey", "wayfinder:", "60,000 bytes", "5-minute window"]) {
+    assert.match(en, new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
 
@@ -52,7 +68,7 @@ test("详情只按 id 取，非法 id 一律拒绝", () => {
   assert.equal(readBundledSkill(pluginDir, "zh", "不存在"), null);
 });
 
-test("安装写入两侧目录，重复安装跳过，改过内容的文件算冲突不覆盖", () => {
+test("安装写入项目里的两个目录，重复安装跳过，改过内容的文件算冲突不覆盖", () => {
   const workspace = tempWorkspace();
   const skills = listBundledSkills(pluginDir, "zh").slice(0, 1);
   const skill = skills[0];
@@ -84,4 +100,5 @@ test("工作区目录必须是已存在的绝对路径", () => {
   const skills = listBundledSkills(pluginDir, "en").slice(0, 1);
   assert.throws(() => installSkills({ skills, workspaceDir: "rel/path" }), /绝对路径/);
   assert.throws(() => installSkills({ skills, workspaceDir: "/不存在的目录-xyz" }), /不存在/);
+  assert.throws(() => skillDirs(""), /绝对路径/);
 });

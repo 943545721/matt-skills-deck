@@ -2,7 +2,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { copyText, FlatList, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { EnvCheckId } from "../../shared/env";
 import { envCheckRpc } from "../../shared/env";
@@ -11,7 +11,9 @@ import { deckSettings } from "../../shared/settings";
 import { statusRpc } from "../../shared/status";
 import type { DeckKey } from "./i18n";
 import { staticText, useDeckText } from "./i18n";
+import { GithubAuthModal } from "./GithubAuthModal";
 import { SetupGuide } from "./SetupGuide";
+import { PixelBanner, PixelButton, PixelCard, usePixel } from "./pixel";
 
 const ENV_STATUS_KEYS: Record<"ok" | "warn" | "fail" | "skip", DeckKey> = {
   ok: "diag.envStatus.ok",
@@ -52,6 +54,7 @@ export function DiagnosticsView({
   workspaceDir?: string;
 }) {
   const { t } = useDeckText();
+  const skin = usePixel(theme);
   const toast = useToast();
   const queryClient = useQueryClient();
   const readStatus = useRpc(statusRpc);
@@ -59,6 +62,7 @@ export function DiagnosticsView({
   const clearLogs = useRpc(logsClearRpc);
   const checkEnv = useRpc(envCheckRpc);
   const settings = useSettings(deckSettings);
+  const [authOpen, setAuthOpen] = useState(false);
 
   const status = useQuery({ queryKey: ["deck", "status"], queryFn: () => readStatus({}), staleTime: 30_000 });
   const logs = useQuery({ queryKey: ["deck", "logs"], queryFn: () => readLogs({ limit: 100 }), staleTime: 5_000 });
@@ -94,49 +98,36 @@ export function DiagnosticsView({
   const styles = useMemo(
     () => ({
       screen: { flex: 1, gap: 8 },
-      card: {
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
-        padding: 10,
-        gap: 4,
-      },
+      card: { padding: 10, gap: 4 },
       row: { flexDirection: "row" as const, justifyContent: "space-between" as const, gap: 12 },
-      label: { color: theme.colors.foregroundMuted, fontSize: 12 },
-      value: { color: theme.colors.foreground, fontSize: 12, flexShrink: 1, textAlign: "right" as const },
-      danger: { color: theme.colors.statusDanger, fontSize: 12 },
-      warning: { color: theme.colors.statusWarning, fontSize: 12 },
-      success: { color: theme.colors.statusSuccess, fontSize: 12 },
-      muted: { color: theme.colors.foregroundMuted, fontSize: 12 },
-      hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
-      head: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
+      onChecker: skin.hintOnChecker,
+      label: { color: skin.colors.ink2, fontSize: 12 },
+      value: { color: skin.colors.ink, fontSize: 12, flexShrink: 1, textAlign: "right" as const },
+      danger: { color: skin.colors.bad, fontSize: 12 },
+      warning: { color: skin.colors.warnInk, fontSize: 12 },
+      success: { color: skin.colors.ok, fontSize: 12 },
+      muted: { color: skin.colors.ink2, fontSize: 12 },
+      hint: skin.hint,
+      head: { ...skin.head, fontSize: 13 },
       toolbar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, flexWrap: "wrap" as const },
-      action: {
-        paddingVertical: 5,
-        paddingHorizontal: 10,
-        backgroundColor: theme.colors.surface2,
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-      },
-      actionText: { color: theme.colors.foreground, fontSize: 12 },
       checkRow: {
-        borderTopWidth: 1,
-        borderTopColor: theme.colors.border,
+        borderTopWidth: 2,
+        borderTopColor: skin.colors.stripe,
         paddingVertical: 6,
         gap: 2,
       },
-      checkHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
-      checkName: { color: theme.colors.foreground, fontSize: 12, fontWeight: "600" as const, flexShrink: 1 },
+      checkHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, flexWrap: "wrap" as const },
+      checkName: { color: skin.colors.ink, fontSize: 12, fontWeight: "700" as const, flexShrink: 1 },
       logRow: {
-        borderTopWidth: 1,
-        borderTopColor: theme.colors.border,
+        borderTopWidth: 2,
+        borderTopColor: skin.colors.stripe,
         paddingVertical: 5,
         gap: 2,
       },
-      logHead: { color: theme.colors.foregroundMuted, fontSize: 11 },
-      logMessage: { fontSize: 12, color: theme.colors.foreground },
+      logHead: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily },
+      logMessage: { fontSize: 12, color: skin.colors.ink },
     }),
-    [theme],
+    [skin],
   );
 
   const statusStyle = (value: "ok" | "warn" | "fail" | "skip") =>
@@ -149,7 +140,7 @@ export function DiagnosticsView({
 
   return (
     <View style={styles.screen}>
-      <View style={styles.card}>
+      <PixelCard skin={skin} style={styles.card}>
         <View style={styles.row}>
           <Text style={styles.label}>{t("diag.pluginVersion")}</Text>
           <Text style={styles.value}>{status.data?.pluginVersion ?? t("common.loading")}</Text>
@@ -164,27 +155,25 @@ export function DiagnosticsView({
             {status.data?.daemonCwd ?? t("common.loading")}
           </Text>
         </View>
-      </View>
+      </PixelCard>
 
       <View style={styles.toolbar}>
-        <Text style={styles.head}>{t("diag.env")}</Text>
+        <Text style={[styles.head, { color: skin.colors.tabInk }]}>{t("diag.env")}</Text>
         {env.data ? (
-          <Text style={styles.label}>
+          <Text style={styles.onChecker}>
             {t("diag.envBackend")}: {env.data.backend}
           </Text>
         ) : null}
         <View style={{ marginLeft: "auto" as const }} />
-        <Pressable
-          accessibilityRole="button"
+        <PixelButton
+          skin={skin}
+          label={env.isFetching ? t("diag.envRunning") : t("diag.envRun")}
           accessibilityLabel={t("diag.envRun")}
-          style={styles.action}
           onPress={() => void env.refetch()}
-        >
-          <Text style={styles.actionText}>{env.isFetching ? t("diag.envRunning") : t("diag.envRun")}</Text>
-        </Pressable>
+        />
       </View>
 
-      <View style={styles.card}>
+      <PixelCard skin={skin} style={styles.card}>
         {env.data ? (
           <>
             <Text style={styles.label}>
@@ -198,14 +187,22 @@ export function DiagnosticsView({
                   </Text>
                   <Text style={styles.checkName}>{staticText(t, CHECK_KEYS[check.id])}</Text>
                   {check.fix ? (
-                    <Pressable
-                      accessibilityRole="button"
+                    <PixelButton
+                      skin={skin}
+                      label={t("diag.envFix")}
                       accessibilityLabel={`${t("diag.envFix")}: ${check.fix}`}
-                      style={[styles.action, { marginLeft: "auto" as const }]}
+                      mini
                       onPress={() => copyFix(check.fix ?? "")}
-                    >
-                      <Text style={styles.actionText}>{t("diag.envFix")}</Text>
-                    </Pressable>
+                    />
+                  ) : null}
+                  {(check.id === "gh" || check.id === "gh-auth") && check.status === "fail" ? (
+                    <PixelButton
+                      skin={skin}
+                      label={t("auth.title")}
+                      accessibilityLabel={t("auth.title")}
+                      mini
+                      onPress={() => setAuthOpen(true)}
+                    />
                   ) : null}
                 </View>
                 <Text style={styles.hint}>{check.detail}</Text>
@@ -217,78 +214,75 @@ export function DiagnosticsView({
           <Text style={styles.hint}>{env.isPending ? t("diag.envRunning") : t("diag.envRun")}</Text>
         )}
         {env.error ? <Text style={styles.danger}>{env.error.message}</Text> : null}
-      </View>
+      </PixelCard>
 
       <SetupGuide theme={theme} />
 
       <View style={styles.toolbar}>
-        <Text style={styles.label}>{t("diag.logging")}</Text>
-        <Pressable
-          accessibilityRole="button"
+        <Text style={styles.onChecker}>{t("diag.logging")}</Text>
+        <PixelButton
+          skin={skin}
+          label={settings.saving ? t("diag.loggingSaving") : debugOn ? t("common.on") : t("common.off")}
           accessibilityLabel={t("diag.loggingHint")}
-          style={styles.action}
+          active={debugOn}
           onPress={toggleLogging}
-        >
-          <Text style={styles.actionText}>
-            {settings.saving ? t("diag.loggingSaving") : debugOn ? t("common.on") : t("common.off")}
-          </Text>
-        </Pressable>
-        {!debugOn ? <Text style={styles.hint}>{t("diag.loggingOff")}</Text> : null}
+        />
+        {!debugOn ? <Text style={styles.onChecker}>{t("diag.loggingOff")}</Text> : null}
       </View>
 
       <View style={styles.toolbar}>
-        <Text style={styles.label}>{t("diag.recent")}</Text>
+        <Text style={styles.onChecker}>{t("diag.recent")}</Text>
         <View style={{ marginLeft: "auto" as const }} />
-        <Pressable
-          accessibilityRole="button"
+        <PixelButton
+          skin={skin}
+          label={logs.isFetching ? t("common.refreshing") : t("common.refresh")}
           accessibilityLabel={t("diag.refreshHint")}
-          style={styles.action}
           onPress={() => void logs.refetch()}
-        >
-          <Text style={styles.actionText}>
-            {logs.isFetching ? t("common.refreshing") : t("common.refresh")}
-          </Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+        />
+        <PixelButton
+          skin={skin}
+          label={t("common.copy")}
           accessibilityLabel={t("diag.copyLogs")}
-          style={styles.action}
           onPress={() => {
             void copyText(asText || "—")
               .then(() => toast.show(t("diag.logsCopied"), { variant: "success" }))
               .catch(() => toast.error(t("common.copyFailed")));
           }}
-        >
-          <Text style={styles.actionText}>{t("common.copy")}</Text>
-        </Pressable>
-        <Pressable
-          accessibilityRole="button"
+        />
+        <PixelButton
+          skin={skin}
+          label={t("diag.clear")}
           accessibilityLabel={t("diag.clear")}
-          style={styles.action}
           onPress={() => clear.mutate()}
-        >
-          <Text style={styles.actionText}>{t("diag.clear")}</Text>
-        </Pressable>
+        />
       </View>
-      <Text style={styles.hint}>{t("diag.exportHint")}</Text>
-      {settings.saveError ? <Text style={styles.danger}>{settings.saveError}</Text> : null}
+      <Text style={styles.onChecker}>{t("diag.exportHint")}</Text>
+      {settings.saveError ? (
+        <PixelBanner skin={skin}>
+          <Text style={styles.danger}>{settings.saveError}</Text>
+        </PixelBanner>
+      ) : null}
 
       <FlatList
         data={entries}
         keyExtractor={(item, index) => `${item.at}-${index}`}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
         ListEmptyComponent={
-          <Text style={styles.hint}>{logs.isPending ? t("common.loading") : t("diag.empty")}</Text>
+          <Text style={styles.onChecker}>{logs.isPending ? t("common.loading") : t("diag.empty")}</Text>
         }
         renderItem={({ item }) => (
-          <View style={styles.logRow}>
-            <Text style={styles.logHead}>
-              {item.at.slice(11, 19)} · {item.scope} · {item.level}
-            </Text>
-            <Text style={[styles.logMessage, item.level === "error" ? styles.danger : null]}>{item.message}</Text>
-          </View>
+          <PixelCard skin={skin} style={styles.card}>
+            <View style={styles.logRow}>
+              <Text style={styles.logHead}>
+                {item.at.slice(11, 19)} · {item.scope} · {item.level}
+              </Text>
+              <Text style={[styles.logMessage, item.level === "error" ? styles.danger : null]}>{item.message}</Text>
+            </View>
+          </PixelCard>
         )}
       />
+
+      <GithubAuthModal theme={theme} open={authOpen} onClose={() => setAuthOpen(false)} />
     </View>
   );
 }

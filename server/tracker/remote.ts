@@ -10,6 +10,28 @@ export interface RemoteRef {
   name: string;
 }
 
+/**
+ * 远端地址可能带凭据（`https://user:token@host/...` 或 `?private_token=...`）。
+ * 它会进设置页、日志和错误提示，读出来之前先抹掉；scp 风格的 `git@host:` 用户名不是密钥，保留。
+ */
+export function redactRemoteUrl(raw: string): string {
+  return raw
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/gi, "$1***@")
+    .replace(/([?&](?:private_token|access_token|oauth_token|token)=)[^&#\s]+/gi, "$1***");
+}
+
+const WEB_HOSTS: Record<RemoteRef["host"], string> = {
+  github: "https://github.com",
+  gitlab: "https://gitlab.com",
+  other: "",
+};
+
+/** 仓库的网页地址；认不出的宿主返回 null（界面就不画「打开仓库」）。 */
+export function webUrlFor(ref: RemoteRef): string | null {
+  const host = WEB_HOSTS[ref.host];
+  return host ? `${host}/${ref.owner}/${ref.name}` : null;
+}
+
 const HOST_ALIASES: Record<string, "github" | "gitlab"> = {
   "github.com": "github",
   "www.github.com": "github",
@@ -90,7 +112,7 @@ export async function readRemoteUrl(workspaceDir: string): Promise<{ ok: true; u
       timeout: 5_000,
       maxBuffer: 1 << 20,
     });
-    const url = stdout.trim();
+    const url = redactRemoteUrl(stdout.trim());
     if (!url) return { ok: false, reason: "no-remote", detail: `远端 ${name} 没有地址：${workspaceDir}` };
     return { ok: true, url };
   } catch (error) {
@@ -99,6 +121,6 @@ export async function readRemoteUrl(workspaceDir: string): Promise<{ ok: true; u
     }
     const stderr = (error as { stderr?: unknown }).stderr;
     const detail = typeof stderr === "string" && stderr.trim() ? stderr.trim().slice(0, 300) : error instanceof Error ? error.message : String(error);
-    return { ok: false, reason: "not-a-repo", detail: `读不到 git 远端（${detail.slice(0, 200)}）` };
+    return { ok: false, reason: "not-a-repo", detail: `读不到 git 远端（${redactRemoteUrl(detail).slice(0, 200)}）` };
   }
 }

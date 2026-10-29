@@ -7,7 +7,7 @@ import { Pressable, Text, View } from "react-native";
 import { mapRpc } from "../../shared/map";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import type { DeckKey } from "./i18n";
-import { PixelButton, PixelCard, PixelHead, usePixel } from "./pixel";
+import { PixelBanner, PixelButton, PixelCard, PixelHead, PixelModalBody, usePixel } from "./pixel";
 
 type Suggestion = { code: string; number?: number; count?: number };
 type RouteKind = "research" | "prototype" | "grilling" | "task";
@@ -41,6 +41,7 @@ const stripBullet = (line: string) => line.replace(/^[-*]\s+/, "");
 export function MapModal({
   theme,
   workspaceDir,
+  repoKey,
   number,
   open,
   onOpenIssue,
@@ -48,6 +49,8 @@ export function MapModal({
 }: {
   theme: PluginTheme;
   workspaceDir: string;
+  /** 地图票所属仓库；路线票与建议都用同一个仓库的编号。 */
+  repoKey: string;
   number: number;
   open: boolean;
   /** 路线票可以点开：地图里看到一张票，下一步通常是看它的正文，而不是关掉地图再回列表找。 */
@@ -60,8 +63,8 @@ export function MapModal({
   const readMap = useRpc(mapRpc);
 
   const query = useQuery({
-    queryKey: ["deck", "map", workspaceDir, number],
-    queryFn: () => readMap({ workspaceDir, number }),
+    queryKey: ["deck", "map", workspaceDir, repoKey, number],
+    queryFn: () => readMap({ workspaceDir, repoKey, number }),
     enabled: open,
   });
 
@@ -69,25 +72,38 @@ export function MapModal({
     () => ({
       body: { gap: 10 },
       cardBody: { padding: 10, gap: 6 },
-      head: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const },
-      meta: { color: theme.colors.foregroundMuted, fontSize: 11, fontFamily: skin.mono.fontFamily },
-      text: { color: theme.colors.foreground, fontSize: 12, lineHeight: 18 },
-      hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
-      error: { color: theme.colors.statusDanger, fontSize: 12 },
+      head: skin.head,
+      meta: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily },
+      text: { color: skin.colors.ink, fontSize: 12, lineHeight: 18 },
+      hint: skin.hint,
+      error: skin.error,
       row: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
       item: { gap: 2 },
       badge: {
+        ...skin.chipText,
         fontSize: 10,
+        lineHeight: 16,
         paddingHorizontal: 6,
-        paddingVertical: 1,
         overflow: "hidden" as const,
-        color: theme.colors.foreground,
-        backgroundColor: theme.colors.surface2,
+        borderWidth: 1,
+        borderColor: skin.colors.line,
+        backgroundColor: skin.colors.stripe,
+        color: skin.colors.ink2,
       },
       grow: { flexShrink: 1 },
     }),
-    [theme, skin],
+    [skin],
   );
+
+  /** 分组徽标沿用原版状态色：可接绿、认领黄、阻塞红、关闭灰。 */
+  const groupTone = (readiness: "ready" | "claimed" | "blocked" | "closed") =>
+    readiness === "ready"
+      ? { backgroundColor: skin.colors.okBg, color: skin.colors.ok }
+      : readiness === "claimed"
+        ? { backgroundColor: skin.colors.warnBg, color: skin.colors.warnInk }
+        : readiness === "blocked"
+          ? { backgroundColor: skin.colors.badBg, color: skin.colors.bad }
+          : { backgroundColor: skin.colors.stripe, color: skin.colors.ink2 };
 
   const copyPrompt = (text: string) => {
     void copyText(text)
@@ -188,12 +204,12 @@ export function MapModal({
   return (
     <Modal title={t("map.title", { number })} open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <Modal.Content>
-        <View style={styles.body}>
+        <PixelModalBody skin={skin} style={styles.body}>
           {failure ? (
-            <PixelCard skin={skin} style={styles.cardBody}>
+            <PixelBanner skin={skin}>
               <Text style={styles.error}>{staticText(t, FAILURE_KEYS[failure.reason] ?? "failure.read")}</Text>
               <Text style={styles.hint}>{failure.detail}</Text>
-            </PixelCard>
+            </PixelBanner>
           ) : null}
           {query.isPending ? <Text style={styles.hint}>{t("common.loading")}</Text> : null}
 
@@ -203,7 +219,14 @@ export function MapModal({
                 <Text style={[styles.head, styles.grow]} numberOfLines={2}>
                   #{data.issue.number} {data.issue.title}
                 </Text>
-                <Text style={styles.badge}>
+                <Text
+                  style={[
+                    styles.badge,
+                    data.issue.state === "OPEN"
+                      ? { backgroundColor: skin.colors.okBg, color: skin.colors.ok }
+                      : { backgroundColor: skin.colors.stripe, color: skin.colors.ink2 },
+                  ]}
+                >
                   {data.issue.state === "OPEN" ? t("issue.open") : t("issue.closed")}
                 </Text>
               </View>
@@ -231,7 +254,9 @@ export function MapModal({
                         <PixelButton
                           skin={skin}
                           label={t("map.copyPrompt")}
-                          onPress={() => copyPrompt(view.prompt)}
+                          onPress={() =>
+                            copyPrompt(`${t("map.promptRepo", { repo: repoKey })}\n${view.prompt}`)
+                          }
                         />
                       </View>
                     );
@@ -246,7 +271,9 @@ export function MapModal({
                 {data.groups.map((group) => (
                   <View key={group.readiness} style={styles.item}>
                     <View style={styles.row}>
-                      <Text style={styles.badge}>{staticText(t, GROUP_KEY[group.readiness])}</Text>
+                      <Text style={[styles.badge, groupTone(group.readiness)]}>
+                        {staticText(t, GROUP_KEY[group.readiness])}
+                      </Text>
                       <Text style={styles.meta}>{group.numbers.length}</Text>
                     </View>
                     {group.numbers.length ? (
@@ -355,7 +382,7 @@ export function MapModal({
               ) : null}
             </>
           ) : null}
-        </View>
+        </PixelModalBody>
       </Modal.Content>
     </Modal>
   );

@@ -1,56 +1,16 @@
-import type { RemoteFailure, RemoteRef } from "../tracker/remote.ts";
-import { parseRemoteUrl, readRemoteUrl } from "../tracker/remote.ts";
+import type { Gate } from "../tracker/workspace-repo.ts";
+import { resolveWorkspaceRepo } from "../tracker/workspace-repo.ts";
 
-/** 读远端失败 → 用户看得懂的一句话。三种原因的下手处不同，不要把话术合成一句。 */
-const REMOTE_PROBLEMS: Record<RemoteFailure["reason"], string> = {
-  "no-remote": "这个工作区没有可用的 git 远端（origin / upstream），先关联一个 GitHub 仓库再试",
-  "not-a-repo": "这个工作区不是可读的 git 仓库，先确认目录里有 .git 且 git 能正常打开它",
-  "git-missing": "没有找到 git 命令：装好 git 并确认它在 PATH 里，插件靠它认仓库",
-};
+export type { Gate, GateFailure, RepoOut } from "../tracker/workspace-repo.ts";
 
-export interface RepoOut {
-  /** local 表示没有远端（或设置强制本地）：数据在 `.deck/` 里。 */
-  host: RemoteRef["host"] | "local";
-  owner: string;
-  name: string;
-  webUrl: string | null;
-}
-
-type RemoteHost = RemoteRef["host"];
-
-export type GateFailure = { ok: false; reason: "no-repo" | "unsupported-host"; detail: string };
-
-export type Gate =
-  | { ok: true; ref: RemoteRef; repo: RepoOut }
-  | GateFailure;
-
-const WEB_HOSTS: Record<RemoteHost, string> = {
-  github: "https://github.com",
-  gitlab: "https://gitlab.com",
-  other: "",
-};
-
-/** 工作区 → 仓库坐标。读写全部路径共用这一处，保证「同一个工作区看到、写到的都是同一个仓库」。 */
+/**
+ * 工作区 → 仓库坐标。读写全部路径共用这一处，保证「同一个工作区看到、写到的都是同一个仓库」。
+ *
+ * 具体解析顺序（显式选择 / 根目录 / 唯一子目录）在 `tracker/workspace-repo.ts`；
+ * 这里保留入口名，调用方不需要知道底层多了一层子目录识别。
+ */
 export async function resolveRepo(workspaceDir: string): Promise<Gate> {
-  const remote = await readRemoteUrl(workspaceDir);
-  if (!remote.ok) {
-    return { ok: false, reason: "no-repo", detail: REMOTE_PROBLEMS[remote.reason] };
-  }
-  const ref = parseRemoteUrl(remote.url);
-  if (!ref) {
-    return { ok: false, reason: "no-repo", detail: `无法识别远端地址：${remote.url}` };
-  }
-  const webHost = WEB_HOSTS[ref.host];
-  return {
-    ok: true,
-    ref,
-    repo: {
-      host: ref.host,
-      owner: ref.owner,
-      name: ref.name,
-      webUrl: webHost ? `${webHost}/${ref.owner}/${ref.name}` : null,
-    },
-  };
+  return resolveWorkspaceRepo(workspaceDir);
 }
 
 /**

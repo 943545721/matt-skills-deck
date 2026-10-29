@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { listLogs, record, resetLogs } from "../server/logs.ts";
+import { listLogs, record, recordStartup, resetLogs } from "../server/logs.ts";
 import { setSettingsForTest } from "../server/settings.ts";
 
 const settings = (debugLogging) => setSettingsForTest({ backend: "auto", refreshSeconds: 60, debugLogging });
@@ -49,4 +49,24 @@ test("日志：清空后长度归零，下一条从头开始", () => {
   assert.equal(listLogs().length, 0);
   record("info", "a", "二");
   assert.deepEqual(listLogs().map((entry) => entry.message), ["二"]);
+});
+
+test("启动行：开关打开时记一条，带版本、Node 与 pid", () => {
+  resetLogs();
+  settings(true);
+  recordStartup({ version: "0.1.0", node: "v22.0.0" });
+  const entries = listLogs();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].scope, "plugin");
+  assert.match(entries[0].message, /v0\.1\.0/);
+  assert.match(entries[0].message, /v22\.0\.0/);
+  assert.match(entries[0].message, new RegExp(String(process.pid)));
+  assert.match(entries[0].message, /重载即清空/);
+});
+
+test("启动行：调试日志关着时不记，空面板由界面解释", () => {
+  resetLogs();
+  settings(false);
+  recordStartup({ version: "0.1.0", node: "v22.0.0" });
+  assert.equal(listLogs().length, 0);
 });

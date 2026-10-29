@@ -46,6 +46,10 @@ const mapBody = z.object({
   fog: z.array(z.string()),
   outOfScope: z.array(z.string()),
 });
+const specBody = z.object({
+  problem: z.string(), solution: z.string(), userStories: z.array(z.string()), implDecisions: z.array(z.string()),
+  testDecisions: z.array(z.string()), outOfScope: z.array(z.string()), furtherNotes: z.array(z.string()),
+});
 
 /** 建议码：只说「哪种情况」，人话由客户端按当前语言组装。 */
 const suggestion = z.object({
@@ -73,6 +77,7 @@ const failure = z.object({
     "gh-failed",
     "not-found",
     "invalid",
+    "labels-truncated",
     "local-failed",
     "glab-missing",
     "glab-unauth",
@@ -87,10 +92,13 @@ export const mapRpc = defineRpc({
     workspaceDir: z.string().min(1),
     /** 地图票的票号。 */
     number: z.number().int().min(1),
+    /** 地图票所属仓库；多仓库工作区必填，路线票沿用它。 */
+    repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({
       ok: z.literal(true),
+      repoKey: z.string(),
       issue: z.object({
         number: z.number().int(),
         title: z.string(),
@@ -98,6 +106,8 @@ export const mapRpc = defineRpc({
         state: z.enum(["OPEN", "CLOSED"]),
       }),
       map: mapBody,
+      containerKind: z.enum(["map", "spec"]),
+      spec: specBody.nullable(),
       route: z.array(routeItem),
       groups: z.array(routeGroup),
       levels: z.array(routeLevel),

@@ -33,6 +33,53 @@ test("建票：标题空或过长在本地就拒绝", async () => {
   assert.equal(long.reason, "invalid");
 });
 
+test("建票：网络异常可能已送达，标 maybeCreated 并在详情里提醒先核对", async () => {
+  const gh = fakeGh('echo "error connecting to api.github.com" >&2\nexit 1');
+  try {
+    const result = await createIssue("acme", "deck", { title: "保存无响应", body: "", labels: [] });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "gh-failed");
+    assert.equal(result.maybeCreated, true);
+    assert.match(result.detail, /可能已经建好/);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("建票：服务端明确拒绝（HTTP 422）不算可能已建", async () => {
+  const gh = fakeGh('echo "gh: Validation Failed (HTTP 422)" >&2\nexit 1');
+  try {
+    const result = await createIssue("acme", "deck", { title: "保存无响应", body: "", labels: [] });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "gh-failed");
+    assert.equal(result.maybeCreated, false);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("建票：回包不是 JSON / 缺票号时也标 maybeCreated", async () => {
+  const notJson = fakeGh('echo "not json"');
+  try {
+    const result = await createIssue("acme", "deck", { title: "保存无响应", body: "", labels: [] });
+    assert.equal(result.ok, false);
+    assert.equal(result.maybeCreated, true);
+    assert.match(result.detail, /票可能已经建好/);
+  } finally {
+    notJson.restore();
+  }
+
+  const noNumber = fakeGh('echo "{\\"html_url\\":\\"https://example.test/1\\"}"');
+  try {
+    const result = await createIssue("acme", "deck", { title: "保存无响应", body: "", labels: [] });
+    assert.equal(result.ok, false);
+    assert.equal(result.maybeCreated, true);
+    assert.match(result.detail, /缺少票号/);
+  } finally {
+    noNumber.restore();
+  }
+});
+
 test("改标签：非法票号在本地就拒绝", async () => {
   const result = await replaceLabels("acme", "deck", -1, ["bug"]);
   assert.equal(result.ok, false);

@@ -4,7 +4,13 @@ import { classifyGhError, type GhFailureReason } from "./gh-error.ts";
 
 const execFileAsync = promisify(execFile);
 
-export type WriteFailure = { ok: false; reason: GhFailureReason | "invalid"; detail: string };
+export type WriteFailure = {
+  ok: false;
+  reason: GhFailureReason | "invalid";
+  detail: string;
+  /** 请求可能已经送达：失败不等于「确定没建」，界面不能直接提示重新提交。 */
+  maybeCreated?: boolean;
+};
 
 export interface Comment {
   author: string;
@@ -123,7 +129,17 @@ export async function createIssue(
     "--jq",
     ".",
   ]);
-  if (!created.ok) return created;
+  if (!created.ok) {
+    // 没装 / 没登录：请求根本没发出去，不存在「可能已建」。
+    if (created.reason === "gh-missing" || created.reason === "gh-unauth") return created;
+    // 4xx（408 除外）是服务端明确拒绝；超时、断连、5xx 都可能已经落到后端。
+    if (definitelyRejected(created)) return { ...created, maybeCreated: false };
+    return {
+      ...created,
+      maybeCreated: true,
+      detail: `${created.detail}；请求可能已送达，票可能已经建好，先刷新任务板确认`,
+    };
+  }
 
   let number = 0;
   let url = "";
@@ -133,10 +149,10 @@ export async function createIssue(
     number = typeof record?.number === "number" ? record.number : Number(record?.number);
     url = typeof record?.html_url === "string" ? record.html_url : typeof record?.url === "string" ? record.url : "";
   } catch {
-    return { ok: false, reason: "gh-failed", detail: "建票回包不是合法 JSON，票可能已经建好，刷新后确认" };
+    return { ok: false, reason: "gh-failed", maybeCreated: true, detail: "建票回包不是合法 JSON，票可能已经建好，刷新后确认" };
   }
   if (!positive(number)) {
-    return { ok: false, reason: "gh-failed", detail: "建票回包缺少票号，票可能已经建好，刷新后确认" };
+    return { ok: false, reason: "gh-failed", maybeCreated: true, detail: "建票回包缺少票号，票可能已经建好，刷新后确认" };
   }
 
   const wanted = dedupeLabels(input.labels);

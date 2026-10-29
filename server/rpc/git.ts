@@ -10,11 +10,13 @@ import type {
   gitStageRpc,
   gitStatusRpc,
   gitUnstageRpc,
+  gitWorktreesRpc,
 } from "../../shared/git.ts";
 import { record } from "../logs.ts";
 import { judge, REASON_TEXT } from "../git/check.ts";
 import { runGit } from "../git/exec.ts";
 import { indexFingerprint, readScreen } from "../git/status.ts";
+import { readWorktrees } from "../git/worktrees.ts";
 import { consumeTicket, issueTicket } from "../git/tickets.ts";
 import type { WriteOp } from "../git/tickets.ts";
 import {
@@ -38,6 +40,7 @@ type CommitInput = RpcInput<typeof gitCommitRpc>;
 type PullInput = RpcInput<typeof gitPullRpc>;
 type FetchInput = RpcInput<typeof gitFetchRpc>;
 type PushInput = RpcInput<typeof gitPushRpc>;
+type WorktreesInput = RpcInput<typeof gitWorktreesRpc>;
 
 export async function gitStatusHandler(input: StatusInput): Promise<RpcOutput<typeof gitStatusRpc>> {
   const result = await readScreen(input.workspaceDir);
@@ -190,6 +193,27 @@ export async function gitPushHandler(input: PushInput): Promise<RpcOutput<typeof
   }
   record("info", "git.push", `已推送 ${result.branch} → ${result.remote}${result.upToDate ? "（已是最新）" : ""}`);
   return { ok: true, mode: result.mode, remote: result.remote, branch: result.branch, upToDate: result.upToDate };
+}
+
+export async function gitWorktreesHandler(input: WorktreesInput): Promise<RpcOutput<typeof gitWorktreesRpc>> {
+  const result = await readWorktrees(input.workspaceDir);
+  if (!result.ok) return result;
+  return {
+    ok: true,
+    worktrees: result.worktrees.map((entry) => ({
+      path: entry.path,
+      display: entry.display,
+      head: entry.head ?? "",
+      branch: entry.branch,
+      bare: entry.bare,
+      detached: entry.detached,
+      locked: entry.locked,
+      lockReason: entry.lockReason,
+      prunable: entry.prunable,
+      prunableReason: entry.prunableReason,
+      current: entry.current,
+    })),
+  };
 }
 
 /** 供状态页复用：读一次 HEAD，读不到就给空串（不是错误，空仓库很正常）。 */

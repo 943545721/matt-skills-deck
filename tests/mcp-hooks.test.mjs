@@ -75,12 +75,17 @@ test("注入：保留别处已有的 MCP 服务与预授权，不重复追加自
   assert.equal(twice.config.toolPolicy.preapproved.length, 1 + PREAPPROVED_TOOL_NAMES.length);
 });
 
-test("注入判定：GitHub / GitLab 远端一定注入；本地后端只在已有 .deck/ 或用户明确选 local 时注入", () => {
-  const github = { ok: true, kind: "github", ref: { host: "github" }, repo: {} };
-  const gitlab = { ok: true, kind: "gitlab", ref: { host: "gitlab" }, repo: {} };
-  const local = { ok: true, kind: "local", workspaceDir: "/work/deck", repo: {} };
-  assert.equal(shouldInjectDeckTools(github, false), true);
-  assert.equal(shouldInjectDeckTools(gitlab, false), true);
+test("注入判定：有远端仓库（含多仓库工作区）就注入；本地后端只在已有 .deck/ 或用户明确选 local 时注入", () => {
+  const target = { key: "acme/deck", host: "github", owner: "acme", name: "deck", webUrl: "https://github.com/acme/deck", dir: "/work/deck", readOnly: false, ref: { host: "github", owner: "acme", name: "deck" } };
+  const local = { ok: true, kind: "local", workspaceDir: "/work/deck", repo: { host: "local", owner: "", name: "deck", webUrl: null } };
+  assert.equal(shouldInjectDeckTools({ ok: true, kind: "repos", targets: [target], defaultKey: null }, false), true);
+  assert.equal(
+    shouldInjectDeckTools(
+      { ok: true, kind: "repos", targets: [target, { ...target, key: "acme/other", dir: "/work/other" }], defaultKey: null },
+      false,
+    ),
+    true,
+  );
   assert.equal(shouldInjectDeckTools(local, false), false);
   assert.equal(shouldInjectDeckTools(local, true), true);
   assert.equal(shouldInjectDeckTools({ ok: false, reason: "no-repo", detail: "x" }, true), false);

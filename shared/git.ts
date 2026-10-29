@@ -63,6 +63,39 @@ export const gitStatusRpc = defineRpc({
   ]),
 });
 
+/**
+ * 工作树清单（`git worktree list --porcelain`）。
+ *
+ * 字段与 DSH 的 `WorktreeRecord` 对齐：locked / prunable 既可能是裸标签，也可能带原因，
+ * 原因原样带回；`branch` 已经去掉 `refs/heads/` 前缀；`display` 是「同一仓库里能区分的
+ * 最短路径后缀」，直接给人看。`current` 由服务端按路径（找不到再按分支 / oid）判定。
+ */
+export const gitWorktreesRpc = defineRpc({
+  name: "deck.git.worktrees",
+  input: z.object({ workspaceDir: workspaceDirSchema }),
+  output: z.discriminatedUnion("ok", [
+    z.object({
+      ok: z.literal(true),
+      worktrees: z.array(
+        z.object({
+          path: z.string(),
+          display: z.string(),
+          head: z.string(),
+          branch: z.string().nullable(),
+          bare: z.boolean(),
+          detached: z.boolean(),
+          locked: z.boolean(),
+          lockReason: z.string().nullable(),
+          prunable: z.boolean(),
+          prunableReason: z.string().nullable(),
+          current: z.boolean(),
+        }),
+      ),
+    }),
+    failure,
+  ]),
+});
+
 export const gitDiffRpc = defineRpc({
   name: "deck.git.diff",
   input: z.object({

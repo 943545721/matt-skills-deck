@@ -15,6 +15,8 @@ export const statusRpc = defineRpc({
     pluginVersion: z.string(),
     node: z.string(),
     daemonCwd: z.string(),
+    /** 调试日志开关：关着时运行页要说明「是关了，不是坏了」。 */
+    debugLogging: z.boolean(),
     gh: z.object({
       available: z.boolean(),
       path: z.string().nullable(),

@@ -1,247 +1,627 @@
 import type { PluginTheme } from "@getpaseo/plugin";
-import { useRpc, useSettings } from "@getpaseo/plugin/client";
-import { FlatList, TextInput } from "@getpaseo/plugin/client/ui";
-import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
+import { FlatList, TextInput, useToast } from "@getpaseo/plugin/client/ui";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import type { ItemKind, ListView, SortKey } from "../../shared/issues";
+import type { ItemKind, ListView, RepoSummary, SortKey } from "../../shared/issues";
 import { issuesListRpc } from "../../shared/issues";
-import { deckSettings } from "../../shared/settings";
-import { readableText } from "./format";
+import type { RepoTargetSummary } from "../../shared/repo";
+import { repoInfoRpc, repoSelectRpc, repoTargetsRpc } from "../../shared/repo";
+import { freshnessLevel } from "../../shared/refresh";
+import type { DeckKey } from "./i18n";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
-import { IssueModal } from "./IssueModal";
-import { MapModal } from "./MapModal";
-import { NewIssueModal } from "./NewIssueModal";
-import { PixelButton, PixelCard, usePixel } from "./pixel";
+import { GithubAuthModal } from "./GithubAuthModal";
+import { PixelBanner, PixelButton, PixelStatusLine, usePixel } from "./pixel";
+import { refreshReasonKey, usePanelText } from "./panel/panelText";
+import { TicketRow } from "./panel/TicketRow";
+import { usePanelRefresh } from "./panel/usePanelRefresh";
 
 /**
- * 任务板列表。
+ * 任务板列表（只有 issue）。
  *
- * 只负责「看到哪些票、点开哪一张」，详情与写操作都在各自的弹窗里：
- * 一个文件管一屏，改评论框时不用在列表逻辑里翻。
+ * 拉取请求移到独立页签，这个页面里不再有 kind 开关：
+ * 同号票与 PR 混在一张列表里，任何写按钮都要先猜用户点的是哪一种。
  *
- * 三种票的状态（可接 / 阻塞 / 已关闭）由服务端算好，界面只做筛选与展示：
- * 同一个判定如果客户端再算一遍，早晚会和 MCP、地图页给出不同答案。
+ * 三种票的处置状态仍由服务端算好（`readiness`），界面只筛选与展示。
+ * 关闭分页是本地分页：列表 RPC 一次最多 100 条、没有 cursor，
+ * 所以页脚只承诺「本窗口」，并明确写出远端还有更多。
  */
+
+/** 当前票：票号只在仓库内唯一，任何绑定都必须带 repoKey。 */
+export interface CurrentTicket {
+  repoKey: string;
+  number: number;
+}
+
+/** 打开一张票/PR 的引用；详情页在导航栈里，不在弹窗里。 */
+export interface TicketRef {
+  repoKey: string;
+  number: number;
+  kind: ItemKind;
+}
+
+type BoardFilterView = Extract<ListView, "all" | "open" | "ready" | "blocked" | "closed">;
+
+const PAGE_SIZE = 20;
+
+const VIEWS: { key: BoardFilterView; label: DeckKey }[] = [
+  { key: "all", label: "board.viewAll" },
+  { key: "open", label: "board.viewOpen" },
+  { key: "ready", label: "board.viewReady" },
+  { key: "blocked", label: "board.viewBlocked" },
+  { key: "closed", label: "board.viewClosed" },
+];
+
+const SORTS: { key: SortKey; label: DeckKey }[] = [
+  { key: "updated", label: "board.sortUpdated" },
+  { key: "created", label: "board.sortCreated" },
+  { key: "number", label: "board.sortNumber" },
+  { key: "title", label: "board.sortTitle" },
+];
+
 export function BoardView({
   theme,
   layout,
   workspaceDir,
   current,
   onBind,
+  onOpenIssue,
+  onOpenMap,
+  onOpenLabels,
+  onWriteGate,
 }: {
   theme: PluginTheme;
   layout: { compact: boolean };
   workspaceDir: string;
-  /** 当前票：绑在面板状态里，换工作区就换一张。 */
-  current?: number;
-  onBind(number: number | undefined): void;
+  current?: CurrentTicket;
+  onBind(ticket: CurrentTicket | undefined): void;
+  onOpenIssue(ref: TicketRef): void;
+  onOpenMap(ref: { repoKey: string; number: number }): void;
+  onOpenLabels(): void;
+  /** 把刷新策略算出的写权限交给面板，详情页沿用同一个门。 */
+  onWriteGate?(allowWrite: boolean): void;
 }) {
   const { t } = useDeckText();
+  const { t: pt } = usePanelText();
   const skin = usePixel(theme);
-  const settings = useSettings(deckSettings);
+  const toast = useToast();
 
-  const [kind, setKind] = useState<ItemKind>("issue");
-  const [view, setView] = useState<ListView>("open");
+  const [view, setView] = useState<BoardFilterView>("open");
   const [sort, setSort] = useState<SortKey>("updated");
   const [label, setLabel] = useState("");
   const [labelDraft, setLabelDraft] = useState("");
-  const [openNumber, setOpenNumber] = useState<number | null>(null);
-  const [openKind, setOpenKind] = useState<ItemKind>("issue");
-  const [creating, setCreating] = useState(false);
-  /** 地图弹窗：地图票的入口，与票面详情并列，而不是替代它。 */
-  const [mapNumber, setMapNumber] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [authOpen, setAuthOpen] = useState(false);
+  const [repoFilter, setRepoFilter] = useState<string | null | undefined>(undefined);
 
-  const refreshSeconds = settings.status === "ready" ? settings.values.refreshSeconds : 60;
   const listIssues = useRpc(issuesListRpc);
+  const repoInfo = useRpc(repoInfoRpc);
+  const repoListing = useRpc(repoTargetsRpc);
+  const selectRepo = useRpc(repoSelectRpc);
+  const queryClient = useQueryClient();
+
+  const targets = useQuery({
+    queryKey: ["deck", "repo-targets", workspaceDir],
+    queryFn: () => repoListing({ workspaceDir }),
+    staleTime: 30_000,
+  });
+  const defaultKey = targets.data?.ok ? targets.data.defaultKey : null;
+  const truncated = targets.data?.ok ? targets.data.truncated : false;
+  const activeRepo = repoFilter === undefined ? defaultKey : repoFilter;
+
+  // 仓库被删掉 / 改名后自动退回「全部」。
+  useEffect(() => {
+    if (!repoFilter || !targets.data?.ok) return;
+    if (targets.data.repos.some((item) => item.key === repoFilter)) return;
+    setRepoFilter(null);
+  }, [repoFilter, targets.data]);
+
+  const pickRepo = useMutation({
+    mutationFn: (dir: string | null) => selectRepo({ workspaceDir, repoDir: dir }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        toast.error(`${t("board.repoSelectFailed")}：${result.detail}`);
+        return;
+      }
+      toast.show(
+        result.selected ? t("board.repoDefaultSet", { dir: result.selected }) : t("board.repoDefaultCleared"),
+        { variant: "success" },
+      );
+      void queryClient.invalidateQueries({ queryKey: ["deck"] });
+    },
+    onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
+  });
+
+  /**
+   * 一次取回本窗口的 issue（打开 + 关闭），视图切换在本地做。
+   *
+   * 服务端的 `counts` 是「所有 kind」的窗口计数，会把 PR 算进任务板的 KPI；
+   * 而 `readiness` 已经由服务端算好，按它筛选只是选行，不是重算判定。
+   * 这样 KPI 与列表严格同源，切换筛选也不会额外烧额度。
+   */
   const list = useQuery({
-    queryKey: ["deck", "issues", workspaceDir, kind, view, sort, label],
+    queryKey: ["deck", "issues", workspaceDir, activeRepo ?? "all", "issue", sort, label],
+    enabled: !targets.isPending,
     queryFn: () =>
       listIssues({
         workspaceDir,
-        includeClosed: view === "all" || view === "closed",
-        view,
-        kind,
+        repoKey: activeRepo ?? undefined,
+        includeClosed: true,
+        view: "all",
+        kind: "issue",
         label: label || undefined,
         sort,
+        limit: 100,
       }),
     staleTime: 15_000,
-    refetchInterval: refreshSeconds > 0 ? refreshSeconds * 1000 : false,
   });
+
+  const rateLimit = list.data?.ok ? list.data.rateLimit : null;
+  const remaining = rateLimit && rateLimit.limit > 0 ? rateLimit.remaining / rateLimit.limit : null;
+  const refresh = usePanelRefresh({ query: list, remaining, enabled: !targets.isPending });
+
+  // 面板的详情页不在这个组件里，但写权限来自同一份额度：只上报判定结果。
+  useEffect(() => {
+    onWriteGate?.(refresh.decision.allowWrite);
+  }, [onWriteGate, refresh.decision.allowWrite]);
+
+  const listedRepos: (RepoTargetSummary | (RepoSummary & { relDir: null }))[] = targets.data?.ok
+    ? targets.data.repos
+    : list.data?.ok
+      ? list.data.repos.map((item) => ({ ...item, relDir: null }))
+      : [];
+  const repoCount = listedRepos.length;
+  const scopedKey = activeRepo ?? (repoCount === 1 ? (listedRepos[0]?.key ?? null) : null);
+  const info = useQuery({
+    queryKey: ["deck", "repo-info", workspaceDir, scopedKey],
+    queryFn: () => repoInfo({ workspaceDir, repoKey: scopedKey ?? undefined }),
+    enabled: scopedKey !== null || Boolean(list.data && !list.data.ok && list.data.repo),
+    staleTime: 5 * 60_000,
+  });
+  const detail = info.data?.ok ? info.data.repo : null;
+
+  // 筛选条件变化时关闭分页回到第一页；否则从「已关闭」切回「打开」还停在第 5 页。
+  useEffect(() => {
+    setPage(1);
+  }, [view, sort, label, activeRepo, search]);
 
   const styles = useMemo(
     () => ({
       screen: { flex: 1, gap: 8 },
-      toolbar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, flexWrap: "wrap" as const },
-      chip: {
-        paddingVertical: 3,
-        paddingHorizontal: 8,
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
+      toolbar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, flexWrap: "wrap" as const },
+      tabbar: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        gap: 2,
+        flexWrap: "wrap" as const,
+        borderBottomWidth: 1,
+        borderBottomColor: skin.colors.line,
+        paddingBottom: 2,
       },
-      chipText: { color: theme.colors.foregroundMuted, fontSize: 11, fontFamily: skin.mono.fontFamily },
-      spacer: { marginLeft: "auto" as const },
-      // 一行 = 主卡片 + 可选的地图按钮；间距放在这一层，卡片自己的投影才不会把行距吃掉。
-      item: { flexDirection: "row" as const, alignItems: "flex-start" as const, gap: 8, marginBottom: 8 },
-      // 主卡片吃掉整行宽度，地图按钮贴右；标题再长也只在卡片里折行。
-      itemMain: { flex: 1 },
-      rowBody: { padding: 10, gap: 5 },
-      rowHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, flexWrap: "wrap" as const },
-      number: { color: theme.colors.foregroundMuted, fontSize: 11, fontFamily: skin.mono.fontFamily },
-      title: { color: theme.colors.foreground, fontSize: 13, fontWeight: "600" as const, flexShrink: 1 },
-      labels: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 4 },
-      label: { fontSize: 10, paddingHorizontal: 6, paddingVertical: 1, overflow: "hidden" as const },
-      meta: { color: theme.colors.foregroundMuted, fontSize: 11 },
-      hint: { color: theme.colors.foregroundMuted, fontSize: 12, lineHeight: 18 },
-      error: { color: theme.colors.statusDanger, fontSize: 12 },
-      failureBody: { padding: 10, gap: 4 },
-      labelInput: {
-        width: 130,
-        borderWidth: 2,
-        borderColor: theme.colors.border,
-        backgroundColor: theme.colors.surface1,
-        color: theme.colors.foreground,
-        paddingVertical: 3,
+      divider: { width: 1, height: 18, backgroundColor: skin.colors.line, marginHorizontal: 6 },
+      sectionLabel: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily, marginRight: 2 },
+      repoBlock: { gap: 4, paddingBottom: 8, borderBottomWidth: 1, borderBottomColor: skin.colors.line },
+      repoTop: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, flexWrap: "wrap" as const },
+      repoLabel: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily, letterSpacing: 0.5 },
+      hostTag: {
+        borderWidth: 1,
+        borderColor: skin.colors.line,
+        backgroundColor: skin.colors.stripe,
         paddingHorizontal: 6,
-        fontSize: 11,
       },
-      freshness: { color: theme.colors.foregroundMuted, fontSize: 11, lineHeight: 16 },
+      hostText: {
+        color: skin.colors.ink2,
+        fontSize: 10,
+        lineHeight: 16,
+        fontFamily: skin.mono.fontFamily,
+        fontWeight: "700" as const,
+      },
+      openRepo: {
+        color: skin.colors.link,
+        fontSize: 11,
+        fontFamily: skin.mono.fontFamily,
+        fontWeight: "700" as const,
+      },
+      repoName: {
+        color: skin.colors.ink,
+        fontSize: 14,
+        fontFamily: skin.mono.fontFamily,
+        fontWeight: "700" as const,
+        flexShrink: 1,
+        lineHeight: 20,
+      },
+      repoRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, flexWrap: "wrap" as const },
+      repoFacts: { gap: 2, marginTop: 2 },
+      repoDescription: { color: skin.colors.ink2, fontSize: 12, lineHeight: 17 },
+      repoPicker: { gap: 4, marginTop: 4 },
+      pickerRow: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 6, alignItems: "center" as const },
+      onChecker: skin.hintOnChecker,
+      spacer: { marginLeft: "auto" as const },
+      label: {
+        fontSize: 10,
+        lineHeight: 16,
+        paddingHorizontal: 6,
+        overflow: "hidden" as const,
+        borderWidth: 1,
+        borderColor: skin.colors.line,
+        fontFamily: skin.mono.fontFamily,
+        fontWeight: "700" as const,
+      },
+      meta: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily },
+      hint: skin.hint,
+      error: skin.error,
+      actions: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const, alignItems: "center" as const },
+      labelInput: { ...skin.input, width: 130, paddingVertical: 3, paddingHorizontal: 6, fontSize: 11 },
+      searchInput: { ...skin.input, flexGrow: 1, minWidth: 160, paddingVertical: 3, paddingHorizontal: 6, fontSize: 11 },
+      freshness: skin.statuslineText,
+      kpiRow: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 16, alignItems: "flex-end" as const },
+      kpi: { gap: 0 },
+      kpiLabel: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily, letterSpacing: 0.5 },
+      kpiNum: { color: skin.colors.ink, fontSize: 18, fontFamily: skin.mono.fontFamily, fontWeight: "700" as const },
+      kpiNumAccent: { color: skin.colors.acc },
+      kpiNote: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily, marginLeft: "auto" as const },
     }),
-    [theme, skin],
+    [skin],
   );
 
-  // 失败时也显示仓库名：能读列表失败，说明远端已经解析出来了（RPC 会把它带回来）。
-  // 只有远端本身没认出来（no-repo / unsupported-host）才退回「未关联仓库」。
   const repo = list.data?.ok ? list.data.repo : list.data?.repo;
-  const header = repo ? (repo.host === "local" ? `${repo.name}（本地）` : `${repo.owner}/${repo.name}`) : null;
+  const scopedSummary = activeRepo
+    ? listedRepos.find((item) => item.key === activeRepo) ?? null
+    : repoCount === 1
+      ? listedRepos[0] ?? null
+      : null;
+  const header = scopedSummary
+    ? scopedSummary.host === "local"
+      ? scopedSummary.name
+      : scopedSummary.key
+    : repoCount > 1
+      ? t("board.repoAll")
+      : repo
+        ? repo.host === "local"
+          ? repo.name
+          : `${repo.owner}/${repo.name}`
+        : null;
+  const host = scopedSummary?.host ?? repo?.host ?? null;
+  const hostKey: DeckKey =
+    host === "github"
+      ? "board.hostGithub"
+      : host === "gitlab"
+        ? "board.hostGitlab"
+        : host === "local"
+          ? "board.hostLocal"
+          : "board.hostOther";
+  const repoWebUrl = scopedSummary?.webUrl ?? repo?.webUrl ?? null;
+
+  const dateText = (iso: string | null): string | null => {
+    if (!iso) return null;
+    const at = new Date(iso);
+    if (!Number.isFinite(at.getTime())) return null;
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  };
+
+  const visibilityKey: DeckKey =
+    detail?.visibility === "public"
+      ? "board.repoPublic"
+      : detail?.visibility === "private"
+        ? "board.repoPrivate"
+        : detail?.visibility === "internal"
+          ? "board.repoInternal"
+          : "board.repoVisibilityUnknown";
+
+  const facts: string[] = [];
+  if (detail) {
+    if (detail.host !== "local") facts.push(t(visibilityKey));
+    if (detail.localDir) facts.push(t("board.repoLocalDir", { path: detail.localDir }));
+    if (detail.language) facts.push(detail.language);
+    if (detail.stars !== null) facts.push(t("board.repoStars", { n: detail.stars }));
+    if (detail.forks !== null) facts.push(t("board.repoForks", { n: detail.forks }));
+    if (detail.openIssues !== null) facts.push(t("board.repoOpenCount", { n: detail.openIssues }));
+    if (detail.defaultBranch) facts.push(t("board.repoBranch", { name: detail.defaultBranch }));
+    if (dateText(detail.pushedAt)) facts.push(t("board.repoPushed", { when: dateText(detail.pushedAt) as string }));
+    if (detail.localIssueCount !== null && detail.localLabelCount !== null) {
+      facts.push(t("board.repoLocalCounts", { issues: detail.localIssueCount, labels: detail.localLabelCount }));
+    }
+  }
+  const extras: string[] = [];
+  if (detail) {
+    if (detail.license) extras.push(t("board.repoLicense", { name: detail.license }));
+    if (dateText(detail.createdAt)) extras.push(t("board.repoCreated", { when: dateText(detail.createdAt) as string }));
+    if (detail.topics.length) extras.push(t("board.repoTopics", { list: detail.topics.join(", ") }));
+  }
+
   const failure = list.data && !list.data.ok ? list.data : null;
   const issues = list.data?.ok ? list.data.issues : [];
-  const counts = list.data?.ok ? list.data.counts : null;
   const fetchedAt = list.data?.ok ? list.data.fetchedAt : null;
-  const rateLimit = list.data?.ok ? list.data.rateLimit : null;
   const source = list.data?.ok ? list.data.source : null;
+  const failures = list.data?.ok ? list.data.failures : [];
+  const repoNameOf = (key: string): string => listedRepos.find((item) => item.key === key)?.name ?? key;
+  const readOnlyOf = (key: string): boolean => listedRepos.find((item) => item.key === key)?.readOnly ?? false;
+  const activeEntry = activeRepo ? listedRepos.find((item) => item.key === activeRepo) : undefined;
+  const defaultEntry = defaultKey ? listedRepos.find((item) => item.key === defaultKey) : undefined;
+  const canSetDefault = Boolean(activeEntry?.relDir && defaultKey !== activeRepo);
+  const canClearDefault = Boolean(defaultEntry);
 
   const ageText = (iso: string): string => {
     const then = Date.parse(iso);
     if (!Number.isFinite(then)) return "";
     const minutes = Math.max(0, Math.round((Date.now() - then) / 60_000));
-    if (minutes < 1) return t("board.freshNow");
-    if (minutes < 60) return t("board.freshMinutes", { n: minutes });
+    if (minutes < 1) return pt("board.freshNow");
+    if (minutes < 60) return pt("board.freshMinutes", { n: minutes });
     const hours = Math.round(minutes / 60);
-    if (hours < 24) return t("board.freshHours", { n: hours });
-    return t("board.freshDays", { n: Math.round(hours / 24) });
+    if (hours < 24) return pt("board.freshHours", { n: hours });
+    return pt("board.freshDays", { n: Math.round(hours / 24) });
   };
 
-  const views: { key: ListView; label: string }[] = [
-    { key: "all", label: t("board.viewAll") },
-    { key: "open", label: t("board.viewOpen") },
-    { key: "ready", label: t("board.viewReady") },
-    { key: "blocked", label: t("board.viewBlocked") },
-    { key: "closed", label: t("board.viewClosed") },
-    { key: "merged", label: t("board.viewMerged") },
-  ];
-  const sorts: { key: SortKey; label: string }[] = [
-    { key: "updated", label: t("board.sortUpdated") },
-    { key: "created", label: t("board.sortCreated") },
-    { key: "number", label: t("board.sortNumber") },
-    { key: "title", label: t("board.sortTitle") },
-  ];
-
-  const openIssue = (number: number, itemKind: ItemKind) => {
-    setOpenKind(itemKind);
-    setOpenNumber(number);
+  // 视图筛选只选行：readiness 是服务端算好的单一事实，客户端不重新推导阻塞关系。
+  const viewRows =
+    view === "all"
+      ? issues
+      : view === "open"
+        ? issues.filter((item) => item.state === "OPEN")
+        : view === "closed"
+          ? issues.filter((item) => item.state === "CLOSED")
+          : issues.filter((item) => item.readiness === view);
+  const needle = search.trim().toLowerCase();
+  const filtered = needle
+    ? viewRows.filter(
+        (item) =>
+          item.title.toLowerCase().includes(needle) ||
+          `#${item.number}`.includes(needle) ||
+          String(item.number) === needle ||
+          item.labels.some((itemLabel) => itemLabel.name.toLowerCase().includes(needle)),
+      )
+    : viewRows;
+  const shownIssues = view === "closed" ? filtered.slice(0, page * PAGE_SIZE) : filtered;
+  /** KPI 与列表来自同一窗口、同一 kind；不读服务端那份含 PR 的 counts。 */
+  const windowCounts = {
+    total: issues.length,
+    ready: issues.filter((item) => item.readiness === "ready").length,
+    claimed: issues.filter((item) => item.readiness === "claimed").length,
+    blocked: issues.filter((item) => item.readiness === "blocked").length,
+    closed: issues.filter((item) => item.state === "CLOSED").length,
   };
+  const hasLocalMore = view === "closed" && shownIssues.length < filtered.length;
+  const freshness = fetchedAt ? freshnessLevel(Date.now() - Date.parse(fetchedAt)) : "fresh";
+  const isBound = (repoKey: string, number: number): boolean =>
+    current?.repoKey === repoKey && current.number === number;
+
+  const statusText = [
+    fetchedAt ? pt("board.freshness", { age: ageText(fetchedAt) }) : "",
+    list.data?.ok
+      ? pt("board.kpi.window", { shown: windowCounts.total, total: list.data.totalCount })
+      : "",
+    rateLimit ? t("board.rateLimit", { remaining: rateLimit.remaining, limit: rateLimit.limit }) : "",
+    source === "rest" ? t("board.restNotice") : "",
+    source === "local" ? t("board.localNotice") : "",
+    pt(refreshReasonKey(refresh.decision.reason)),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const kpis = list.data?.ok
+    ? [
+        { key: "ready", label: pt("board.kpi.ready"), value: windowCounts.ready, accent: true },
+        { key: "claimed", label: pt("board.kpi.claimed"), value: windowCounts.claimed, accent: false },
+        { key: "blocked", label: pt("board.kpi.blocked"), value: windowCounts.blocked, accent: false },
+        { key: "closed", label: pt("board.kpi.closed"), value: windowCounts.closed, accent: false },
+      ]
+    : [];
 
   return (
     <View style={styles.screen}>
-      <View style={styles.toolbar}>
-        <View style={styles.chip}>
-          <Text style={styles.chipText} numberOfLines={1}>
+      <View style={styles.repoBlock}>
+        <View style={styles.repoTop}>
+          <Text style={styles.repoLabel}>{t("board.repoLabel")}</Text>
+          {host ? (
+            <View style={styles.hostTag}>
+              <Text style={styles.hostText}>{t(hostKey)}</Text>
+            </View>
+          ) : null}
+          {repoCount > 1 ? (
+            <View style={styles.hostTag}>
+              <Text style={styles.hostText}>{t("board.repoCount", { n: repoCount })}</Text>
+            </View>
+          ) : null}
+          {repoWebUrl ? (
+            <Pressable
+              accessibilityRole="link"
+              accessibilityLabel={t("board.openRepo")}
+              onPress={() => void openExternalUrl(repoWebUrl).catch(() => toast.error(t("board.openRepoFailed")))}
+            >
+              <Text style={styles.openRepo}>{t("board.openRepo")} ↗</Text>
+            </Pressable>
+          ) : null}
+        </View>
+        <View style={styles.repoRow}>
+          <Text style={styles.repoName} numberOfLines={1}>
             {header ?? t("board.unbound")}
           </Text>
+          {scopedSummary?.readOnly ? (
+            <Text style={[styles.label, { backgroundColor: skin.colors.stripe, color: skin.colors.ink2 }]}>
+              {t("board.repoReadOnly")}
+            </Text>
+          ) : null}
+          {list.data?.ok ? (
+            <Text style={styles.meta}>
+              {t("board.count", { shown: list.data.issues.length, total: list.data.totalCount })}
+            </Text>
+          ) : null}
+          <View style={styles.spacer} />
+          <PixelButton
+            skin={skin}
+            label={list.isFetching ? t("common.refreshing") : t("common.refresh")}
+            accessibilityLabel={t("board.refreshHint")}
+            onPress={() => {
+              void targets.refetch();
+              refresh.refreshNow();
+              void info.refetch();
+            }}
+          />
         </View>
-        <Text style={styles.chipText}>
-          {list.data?.ok
-            ? t("board.count", { shown: list.data.issues.length, total: list.data.totalCount })
-            : ""}
-        </Text>
-        <View style={styles.spacer} />
-        <PixelButton skin={skin} label={t("board.new")} onPress={() => setCreating(true)} />
-        <PixelButton
-          skin={skin}
-          label={list.isFetching ? t("common.refreshing") : t("common.refresh")}
-          accessibilityLabel={t("board.refreshHint")}
-          onPress={() => void list.refetch()}
-        />
-      </View>
 
-      {/* 页签：票与拉取请求共用编号空间，但写操作完全不同，所以分面展示。 */}
-      <View style={styles.toolbar}>
-        <PixelButton
-          skin={skin}
-          label={t("board.tabIssues")}
-          active={kind === "issue"}
-          onPress={() => setKind("issue")}
-        />
-        <PixelButton
-          skin={skin}
-          label={t("board.tabPullRequests")}
-          active={kind === "pull-request"}
-          onPress={() => setKind("pull-request")}
-        />
-        <View style={styles.spacer} />
-        {counts ? (
-          <>
-            <PixelButton
-              skin={skin}
-              label={t("board.kpiReady", { n: counts.ready })}
-              accessibilityLabel={t("board.kpiHint", { label: t("board.viewReady") })}
-              active={view === "ready"}
-              onPress={() => setView(view === "ready" ? "open" : "ready")}
-            />
-            <PixelButton
-              skin={skin}
-              label={t("board.kpiBlocked", { n: counts.blocked })}
-              accessibilityLabel={t("board.kpiHint", { label: t("board.viewBlocked") })}
-              active={view === "blocked"}
-              onPress={() => setView(view === "blocked" ? "open" : "blocked")}
-            />
-            <PixelButton
-              skin={skin}
-              label={t("board.kpiClosed", { n: counts.closed })}
-              accessibilityLabel={t("board.kpiHint", { label: t("board.viewClosed") })}
-              active={view === "closed"}
-              onPress={() => setView(view === "closed" ? "open" : "closed")}
-            />
-          </>
+        {repoCount > 1 ? (
+          <View style={styles.repoPicker}>
+            <View style={styles.pickerRow}>
+              <PixelButton
+                skin={skin}
+                mini
+                variant="tab"
+                label={t("board.repoAll")}
+                active={activeRepo === null}
+                onPress={() => setRepoFilter(null)}
+              />
+              {listedRepos.map((item) => (
+                <PixelButton
+                  key={item.key}
+                  skin={skin}
+                  mini
+                  variant="tab"
+                  label={item.name}
+                  accessibilityLabel={item.key}
+                  active={activeRepo === item.key}
+                  onPress={() => setRepoFilter(item.key)}
+                />
+              ))}
+            </View>
+          </View>
+        ) : null}
+        {truncated ? <Text style={styles.meta}>{t("board.repoScanTruncated")}</Text> : null}
+        {scopedSummary && scopedSummary.host !== "local" ? (
+          <Text style={styles.meta}>{t("board.codeDir", { dir: scopedSummary.dir })}</Text>
+        ) : null}
+        {canSetDefault || canClearDefault || (defaultKey !== null && defaultKey === activeRepo) ? (
+          <View style={styles.pickerRow}>
+            {defaultKey !== null && defaultKey === activeRepo ? (
+              <Text style={styles.meta}>
+                {t("board.repoDefaultSet", { dir: defaultEntry?.relDir ?? defaultKey })}
+              </Text>
+            ) : null}
+            {canSetDefault ? (
+              <PixelButton
+                skin={skin}
+                mini
+                variant="ghost"
+                label={t("board.repoSetDefault")}
+                disabled={pickRepo.isPending}
+                onPress={() => {
+                  if (activeEntry?.relDir) pickRepo.mutate(activeEntry.relDir);
+                }}
+              />
+            ) : null}
+            {canClearDefault ? (
+              <PixelButton
+                skin={skin}
+                mini
+                variant="ghost"
+                label={t("board.repoUseRoot")}
+                disabled={pickRepo.isPending}
+                onPress={() => pickRepo.mutate(null)}
+              />
+            ) : null}
+          </View>
+        ) : null}
+        {detail ? (
+          <View style={styles.repoFacts}>
+            {detail.description ? (
+              <Text style={styles.repoDescription} numberOfLines={3}>
+                {detail.description}
+              </Text>
+            ) : null}
+            {facts.length ? <Text style={styles.meta}>{facts.join(" · ")}</Text> : null}
+            {extras.length ? <Text style={styles.meta}>{extras.join(" · ")}</Text> : null}
+          </View>
+        ) : info.data && !info.data.ok && scopedKey !== null ? (
+          <Text style={styles.meta}>
+            {t("board.repoInfoFailed")} · {info.data.detail}
+          </Text>
         ) : null}
       </View>
 
-      <View style={styles.toolbar}>
-        {views.map((item) => (
-          <PixelButton
-            key={item.key}
-            skin={skin}
-            label={item.label}
-            active={view === item.key}
-            onPress={() => setView(item.key)}
-          />
-        ))}
+      {!refresh.decision.allowWrite ? (
+        <PixelBanner skin={skin} tone="warning">
+          <Text style={styles.hint}>{pt("refresh.writePaused")}</Text>
+        </PixelBanner>
+      ) : null}
+
+      {failures.length ? (
+        <PixelBanner skin={skin}>
+          <Text style={styles.error}>{t("board.repoFailures")}</Text>
+          {failures.map((item) => (
+            <Text key={item.repoKey} style={styles.hint}>
+              {item.repoKey} · {staticText(t, FAILURE_KEYS[item.reason] ?? "failure.read")} — {item.detail}
+            </Text>
+          ))}
+        </PixelBanner>
+      ) : null}
+
+      {kpis.length ? (
+        <View style={styles.kpiRow}>
+          {kpis.map((kpi) => (
+            <View key={kpi.key} style={styles.kpi}>
+              <Text style={styles.kpiLabel}>{kpi.label}</Text>
+              <Text style={[styles.kpiNum, kpi.accent ? styles.kpiNumAccent : null]}>{kpi.value}</Text>
+            </View>
+          ))}
+          <Text style={styles.kpiNote}>{pt("board.kpi.windowHint")}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.tabbar}>
+        {VIEWS.map((item) => {
+          const n = !list.data?.ok
+            ? null
+            : item.key === "ready"
+              ? windowCounts.ready
+              : item.key === "blocked"
+                ? windowCounts.blocked
+                : item.key === "closed"
+                  ? windowCounts.closed
+                  : null;
+          return (
+            <PixelButton
+              key={item.key}
+              skin={skin}
+              variant="tab"
+              label={n === null ? staticText(t, item.label) : `${staticText(t, item.label)} ${n}`}
+              active={view === item.key}
+              onPress={() => setView(item.key)}
+            />
+          );
+        })}
+        <View style={styles.divider} />
+        <PixelButton skin={skin} mini variant="tab" label={pt("nav.labels")} onPress={onOpenLabels} />
       </View>
 
       <View style={styles.toolbar}>
-        <Text style={styles.chipText}>{t("board.sortLabel")}</Text>
-        {sorts.map((item) => (
+        <Text style={styles.sectionLabel}>{t("board.sortLabel")}</Text>
+        {SORTS.map((item) => (
           <PixelButton
             key={item.key}
             skin={skin}
-            label={item.label}
+            variant="tab"
+            label={staticText(t, item.label)}
             active={sort === item.key}
             onPress={() => setSort(item.key)}
           />
         ))}
-        <View style={styles.spacer} />
+      </View>
+
+      <View style={styles.toolbar}>
+        <TextInput
+          accessibilityLabel={pt("board.searchPlaceholder")}
+          style={styles.searchInput}
+          value={search}
+          onChangeText={setSearch}
+          placeholder={pt("board.searchPlaceholder")}
+          placeholderTextColor={skin.colors.ink2}
+          autoCapitalize="none"
+        />
+        {search ? (
+          <PixelButton skin={skin} mini variant="ghost" label={pt("board.searchClear")} onPress={() => setSearch("")} />
+        ) : null}
         <TextInput
           accessibilityLabel={t("board.labelFilter")}
           style={styles.labelInput}
@@ -249,12 +629,14 @@ export function BoardView({
           onChangeText={setLabelDraft}
           onSubmitEditing={() => setLabel(labelDraft.trim())}
           placeholder={t("board.labelFilterPlaceholder")}
+          placeholderTextColor={skin.colors.ink2}
           autoCapitalize="none"
         />
         <PixelButton skin={skin} label={t("board.apply")} onPress={() => setLabel(labelDraft.trim())} />
         {label ? (
           <PixelButton
             skin={skin}
+            variant="ghost"
             label={t("board.clear", { label })}
             onPress={() => {
               setLabel("");
@@ -263,153 +645,117 @@ export function BoardView({
           />
         ) : null}
       </View>
+      {search ? (
+        <Text style={styles.meta}>
+          {pt("board.searchCount", { n: filtered.length })} · {pt("board.localQuery")}
+        </Text>
+      ) : null}
 
       {failure ? (
-        <PixelCard skin={skin} style={styles.failureBody}>
+        <PixelBanner skin={skin}>
           <Text style={styles.error}>{staticText(t, FAILURE_KEYS[failure.reason] ?? "failure.read")}</Text>
           <Text style={styles.hint}>{failure.detail}</Text>
-        </PixelCard>
+          {failure.reason === "gh-unauth" || failure.reason === "gh-missing" ? (
+            <>
+              <Text style={styles.hint}>
+                {failure.reason === "gh-missing" ? t("auth.ghMissingHint") : t("auth.inlineHint")}
+              </Text>
+              <View style={styles.actions}>
+                <PixelButton skin={skin} label={t("auth.title")} active onPress={() => setAuthOpen(true)} />
+              </View>
+            </>
+          ) : null}
+          {activeRepo !== null ? (
+            <View style={styles.actions}>
+              <PixelButton skin={skin} label={t("board.repoAll")} onPress={() => setRepoFilter(null)} />
+            </View>
+          ) : null}
+        </PixelBanner>
       ) : null}
-      {list.error ? <Text style={styles.error}>{list.error.message}</Text> : null}
+      {list.error ? (
+        <PixelBanner skin={skin}>
+          <Text style={styles.error}>{list.error.message}</Text>
+          <PixelButton skin={skin} label={pt("common.retry")} onPress={refresh.refreshNow} />
+        </PixelBanner>
+      ) : null}
 
-      <Text style={styles.freshness}>
-        {[
-          fetchedAt ? ageText(fetchedAt) : "",
-          counts ? t("board.window", { shown: counts.total, total: list.data?.ok ? list.data.totalCount : 0 }) : "",
-          rateLimit ? t("board.rateLimit", { remaining: rateLimit.remaining, limit: rateLimit.limit }) : "",
-          source === "rest" ? t("board.restNotice") : "",
-          source === "local" ? t("board.localNotice") : "",
-        ]
-          .filter(Boolean)
-          .join(" · ")}
-      </Text>
+      {statusText ? (
+        <PixelStatusLine skin={skin}>
+          <Text style={styles.freshness}>{statusText}</Text>
+        </PixelStatusLine>
+      ) : null}
+      {freshness !== "fresh" ? (
+        <Text style={styles.hint}>
+          {freshness === "red" ? pt("board.staleRed") : pt("board.staleYellow")}
+        </Text>
+      ) : null}
 
       <FlatList
-        data={issues}
-        keyExtractor={(item) => `${item.kind}-${item.number}`}
+        data={shownIssues}
+        keyExtractor={(item) => `${item.repoKey}-${item.number}`}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
+        onEndReachedThreshold={0.2}
+        onEndReached={() => {
+          if (hasLocalMore) setPage((prev) => prev + 1);
+        }}
         ListEmptyComponent={
-          <Text style={styles.hint}>
+          <Text style={styles.onChecker}>
             {list.isPending
-              ? t("common.loading")
+              ? pt("common.loading")
               : failure
-                ? t("board.emptyAfterFailure")
-                : kind === "pull-request"
-                  ? t("board.emptyPrs")
-                  : view === "all" || view === "open"
-                    ? t("board.empty")
-                    : t("board.emptyView")}
+                ? pt("board.emptyAfterFailure")
+                : search
+                  ? pt("board.emptySearch")
+                  : pt("board.empty")}
           </Text>
         }
         ListFooterComponent={
-          list.data?.ok && list.data.hasMore ? <Text style={styles.hint}>{t("board.hasMore")}</Text> : null
-        }
-        renderItem={({ item }) => (
-          <View style={styles.item}>
-            <View style={styles.itemMain}>
-              <PixelCard skin={skin}>
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`#${item.number} ${item.title}`}
-                  style={styles.rowBody}
-                  onPress={() => openIssue(item.number, item.kind)}
-                >
-                  <View style={styles.rowHead}>
-                    <Text style={styles.number}>#{item.number}</Text>
-                    {item.kind === "pull-request" ? (
-                      <Text style={[styles.label, { backgroundColor: "#8250df", color: "#ffffff" }]}>
-                        {item.merged ? t("board.merged") : t("board.pr")}
-                      </Text>
-                    ) : null}
-                    {current === item.number && item.kind === "issue" ? (
-                      <Text style={[styles.label, { backgroundColor: theme.colors.accent, color: "#000000" }]}>
-                        {t("board.current")}
-                      </Text>
-                    ) : null}
-                    {item.state === "CLOSED" && !item.merged ? (
-                      <Text style={[styles.label, { backgroundColor: theme.colors.statusSuccess, color: "#000000" }]}>
-                        {t("board.closed")}
-                      </Text>
-                    ) : null}
-                    {item.readiness === "blocked" ? (
-                      <Text style={[styles.label, { backgroundColor: theme.colors.statusDanger, color: "#ffffff" }]}>
-                        {t("board.blockedBadge")}
-                      </Text>
-                    ) : null}
-                    {item.readiness === "claimed" ? (
-                      <Text style={[styles.label, { backgroundColor: theme.colors.statusWarning, color: "#000000" }]}>
-                        {t("board.claimedBadge")}
-                      </Text>
-                    ) : null}
-                    <Text style={styles.title} numberOfLines={2}>
-                      {item.title}
-                    </Text>
-                  </View>
-                  {item.labels.length ? (
-                    <View style={styles.labels}>
-                      {item.labels.map((label) => (
-                        <Text
-                          key={label.name}
-                          style={[styles.label, { backgroundColor: `#${label.color}`, color: readableText(label.color) }]}
-                        >
-                          {label.name}
-                        </Text>
-                      ))}
-                    </View>
-                  ) : null}
-                  {item.assignees.length ? (
-                    <Text style={styles.meta}>{t("board.assignees", { names: item.assignees.join(", ") })}</Text>
-                  ) : null}
-                  {item.blockedBy.length ? (
-                    <Text style={styles.meta}>
-                      {t("board.blockedBy", {
-                        list: item.blockedBy.map((blocker) => `#${blocker.number}`).join("、"),
-                      })}
-                    </Text>
-                  ) : null}
-                </Pressable>
-              </PixelCard>
-            </View>
-            {item.isMap && item.kind === "issue" ? (
-              <PixelButton skin={skin} label={t("map.open")} onPress={() => setMapNumber(item.number)} />
+          <View style={{ gap: 6 }}>
+            {view === "closed" ? (
+              <Text style={styles.onChecker}>
+                {pt("board.paging", { shown: shownIssues.length, loaded: filtered.length })}
+              </Text>
+            ) : null}
+            {hasLocalMore ? (
+              <PixelButton
+                skin={skin}
+                label={pt("board.loadMore")}
+                onPress={() => setPage((prev) => prev + 1)}
+              />
+            ) : null}
+            {list.data?.ok && list.data.hasMore ? (
+              <>
+                <Text style={styles.onChecker}>{pt("board.hasMore", { n: list.data.issues.length })}</Text>
+                {repoWebUrl ? (
+                  <PixelButton
+                    skin={skin}
+                    variant="ghost"
+                    label={pt("board.openWeb")}
+                    onPress={() =>
+                      void openExternalUrl(`${repoWebUrl}/issues`).catch(() => toast.error(t("board.openRepoFailed")))
+                    }
+                  />
+                ) : null}
+              </>
             ) : null}
           </View>
+        }
+        renderItem={({ item }) => (
+          <TicketRow
+            skin={skin}
+            item={item}
+            showRepo={activeRepo === null && repoCount > 1}
+            repoName={repoNameOf(item.repoKey)}
+            readOnly={readOnlyOf(item.repoKey)}
+            bound={isBound(item.repoKey, item.number)}
+            onOpen={(ref) => onOpenIssue(ref)}
+            onOpenMap={(ref) => onOpenMap(ref)}
+          />
         )}
       />
 
-      {openNumber !== null ? (
-        <IssueModal
-          theme={theme}
-          workspaceDir={workspaceDir}
-          number={openNumber}
-          kind={openKind}
-          isCurrent={openKind === "issue" && current === openNumber}
-          onBind={() => onBind(current === openNumber ? undefined : openNumber)}
-          onOpenRelated={(number) => openIssue(number, "issue")}
-          onClose={() => setOpenNumber(null)}
-        />
-      ) : null}
 
-      {mapNumber !== null ? (
-        <MapModal
-          theme={theme}
-          workspaceDir={workspaceDir}
-          number={mapNumber}
-          open
-          onOpenIssue={(number) => {
-            setMapNumber(null);
-            openIssue(number, "issue");
-          }}
-          onClose={() => setMapNumber(null)}
-        />
-      ) : null}
-
-      <NewIssueModal
-        theme={theme}
-        workspaceDir={workspaceDir}
-        open={creating}
-        onClose={() => setCreating(false)}
-      />
+      <GithubAuthModal theme={theme} open={authOpen} onClose={() => setAuthOpen(false)} />
     </View>
   );
 }

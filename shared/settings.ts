@@ -4,10 +4,14 @@ import { z } from "zod";
 /**
  * 插件设置（宿主级，跟随这台机器而不是某个工作区）。
  *
- * 三项都直接影响服务端行为：后端选择决定读写落到哪，刷新间隔决定界面多久自己重读，
- * 调试日志决定 `record()` 还写不写缓冲。设置与行为必须一一对应，
+ * 后端选择决定读写落到哪，刷新间隔决定界面多久自己重读，调试日志决定 `record()`
+ * 还写不写缓冲，外观决定用哪套像素皮肤。设置与行为必须一一对应，
  * 不做「存了但没人读」的装饰性开关。
  */
+export const APPEARANCES = ["auto", "dark", "light", "classic"] as const;
+
+export type Appearance = (typeof APPEARANCES)[number];
+
 export const deckSettings = defineSettings({
   id: "deck",
   scope: "host",
@@ -19,6 +23,8 @@ export const deckSettings = defineSettings({
     refreshSeconds: z.number().int().min(0).max(600).default(60),
     /** 关掉后 `record()` 不再累积日志（已有的仍可读、可清空）。 */
     debugLogging: z.boolean().default(true),
+    /** auto 跟随宿主；dark / light 是真正的深底浅字 / 纯白底黑字；classic 是 DSH 原版两套像素皮肤。 */
+    appearance: z.enum(APPEARANCES).default("auto"),
   }),
 });
 

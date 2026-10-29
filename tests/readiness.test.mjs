@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fakeGh } from "./helpers/fake-gh.mjs";
 import { listIssues, mapIssueNodes, mapRestIssues } from "../server/tracker/github.ts";
@@ -159,16 +160,19 @@ test("REST 回退映射：pull_request 字段决定这是 PR，merged_at 决定�
 });
 
 test("列表：一次 GraphQL 同时取 issue 与 PR，并带回额度", async () => {
+  // 形如真实 GitHub：rateLimit 在 Query 根上，与 repository 平级。
   const gh = fakeGh(`cat <<'JSON'
-{"data":{"repository":{
-  "issues":{"totalCount":2,"pageInfo":{"hasNextPage":false},"nodes":[
-    {"number":1,"title":"票","state":"OPEN","url":"u1","updatedAt":"2026-10-01T00:00:00Z","createdAt":"2026-09-01T00:00:00Z","labels":{"nodes":[]},"assignees":{"nodes":[]},"blockedBy":{"nodes":[]}}
-  ]},
-  "pullRequests":{"totalCount":1,"pageInfo":{"hasNextPage":true},"nodes":[
-    {"number":2,"title":"PR","state":"OPEN","url":"u2","updatedAt":"2026-10-02T00:00:00Z","createdAt":"2026-09-02T00:00:00Z","mergedAt":null,"labels":{"nodes":[]},"assignees":{"nodes":[]}}
-  ]},
-  "rateLimit":{"limit":5000,"remaining":4999,"resetAt":"2026-10-01T01:00:00Z"}
-}}}
+{"data":{
+  "rateLimit":{"limit":5000,"remaining":4999,"resetAt":"2026-10-01T01:00:00Z"},
+  "repository":{
+    "issues":{"totalCount":2,"pageInfo":{"hasNextPage":false},"nodes":[
+      {"number":1,"title":"票","state":"OPEN","url":"u1","updatedAt":"2026-10-01T00:00:00Z","createdAt":"2026-09-01T00:00:00Z","labels":{"nodes":[]},"assignees":{"nodes":[]},"blockedBy":{"nodes":[]}}
+    ]},
+    "pullRequests":{"totalCount":1,"pageInfo":{"hasNextPage":true},"nodes":[
+      {"number":2,"title":"PR","state":"OPEN","url":"u2","updatedAt":"2026-10-02T00:00:00Z","createdAt":"2026-09-02T00:00:00Z","mergedAt":null,"labels":{"nodes":[]},"assignees":{"nodes":[]}}
+    ]}
+  }
+}}
 JSON`);
   try {
     const result = await listIssues("acme", "deck");
@@ -179,6 +183,28 @@ JSON`);
     assert.equal(result.hasMore, true);
     assert.equal(result.source, "graphql");
     assert.equal(result.rateLimit.remaining, 4999);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("列表查询把 rateLimit 放在 Query 根上：Repository 没有这个字段", async () => {
+  const gh = fakeGh(`printf '%s\\n' "$@" > "$GH_LOG.query"
+cat <<'JSON'
+{"data":{"rateLimit":{"limit":5000,"remaining":4999,"resetAt":""},"repository":{
+  "issues":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]},
+  "pullRequests":{"totalCount":0,"pageInfo":{"hasNextPage":false},"nodes":[]}
+}}}
+JSON`);
+  try {
+    const result = await listIssues("acme", "deck");
+    assert.equal(result.ok, true);
+    const query = readFileSync(`${gh.dir}/gh.log.query`, "utf8");
+    const rate = query.indexOf("rateLimit");
+    const repository = query.indexOf("repository(");
+    assert.ok(rate > 0, "查询里应该有 rateLimit");
+    assert.ok(rate < repository, "rateLimit 必须在 repository 之前（Query 根字段）");
+    assert.equal(query.split("rateLimit").length - 1, 1, "只查询一次，别两边都写");
   } finally {
     gh.restore();
   }

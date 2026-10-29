@@ -24,12 +24,12 @@ test("初始化：回客户端给的版本；给不认识的版本时回退到�
   assert.equal(missing.result.protocolVersion, FALLBACK_PROTOCOL_VERSION);
 });
 
-test("工具清单：与实现同源，全部带 deck_ 前缀且都有输入 schema", async () => {
+test("工具清单：与实现同源，deck_ 工具和 suggest_next_steps 都带输入 schema", async () => {
   const response = await call({ jsonrpc: "2.0", id: 1, method: "tools/list" });
   const listed = response.result.tools;
   assert.equal(listed.length, MCP_TOOLS.length);
   for (const tool of listed) {
-    assert.match(tool.name, /^deck_[a-z_]+$/);
+    assert.match(tool.name, /^(deck_[a-z_]+|suggest_next_steps)$/);
     assert.equal(tool.inputSchema.type, "object");
     assert.ok(tool.description.length > 20);
   }
@@ -37,6 +37,17 @@ test("工具清单：与实现同源，全部带 deck_ 前缀且都有输入 sch
     listed.map((tool) => tool.name).sort(),
     MCP_TOOLS.map((tool) => tool.name).sort(),
   );
+});
+
+test("deck_map_link 的描述：只补父子 / 阻塞边，写前成环预检、写后读回", () => {
+  const tool = MCP_TOOLS.find((item) => item.name === "deck_map_link");
+  assert.ok(tool);
+  assert.match(tool.description, /parent \(hierarchy\) and blockedBy \(dependency\)/);
+  assert.match(tool.description, /cycle-checked before any write/);
+  assert.match(tool.description, /every write is read back/);
+  assert.doesNotMatch(tool.description, /wayfinder:<kind>/);
+  assert.deepEqual(tool.inputSchema.required, undefined);
+  assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), ["blockedBy", "edges", "key", "parentKey", "repo", "workRouteDetail"]);
 });
 
 test("通知不回包：notifications/initialized 与未知通知都返回 null", async () => {

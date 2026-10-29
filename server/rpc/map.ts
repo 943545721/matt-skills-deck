@@ -3,6 +3,8 @@ import type { mapRpc } from "../../shared/map.ts";
 import { parseMapBody } from "../tracker/map-body.ts";
 import { groupRoute, routeFromIssues, routeLevels, suggestNextSteps } from "../tracker/map-route.ts";
 import { readBoard, readIssue } from "../tracker/read.ts";
+import { containerKindOf } from "../../shared/container-kind.ts";
+import { parseSpecBody } from "../../shared/spec-body.ts";
 
 type MapInput = RpcInput<typeof mapRpc>;
 
@@ -13,19 +15,21 @@ type MapInput = RpcInput<typeof mapRpc>;
  * 「雾里还剩两条」可能对应一张已经关掉的票。
  */
 export async function mapHandler(input: MapInput): Promise<RpcOutput<typeof mapRpc>> {
-  const read = await readIssue(input.workspaceDir, input.number);
+  const read = await readIssue(input.workspaceDir, input.number, { repoKey: input.repoKey });
   if (!read.ok) return read;
   const detail = read.result;
   if (!detail.ok) return { ok: false, reason: detail.reason, detail: detail.detail };
 
-  const board = await readBoard(input.workspaceDir, { limit: 100 });
+  // 地图正文里的编号是仓库内编号：路线必须读同一个仓库，不能把别的仓库的同号票拼进来。
+  const board = await readBoard(input.workspaceDir, { limit: 100, repoKey: read.repoKey });
   if (!board.ok) return board;
-  if (!board.result.ok) return { ok: false, reason: board.result.reason, detail: board.result.detail };
 
   const map = parseMapBody(detail.issue.body);
-  const route = routeFromIssues(board.result.issues);
+  const containerKind = containerKindOf(detail.issue);
+  const route = routeFromIssues(board.issues);
   return {
     ok: true,
+    repoKey: read.repoKey,
     issue: {
       number: detail.issue.number,
       title: detail.issue.title,
@@ -33,6 +37,8 @@ export async function mapHandler(input: MapInput): Promise<RpcOutput<typeof mapR
       state: detail.issue.state,
     },
     map,
+    containerKind: containerKind === "spec" ? "spec" : "map",
+    spec: containerKind === "spec" ? parseSpecBody(detail.issue.body) : null,
     route,
     groups: groupRoute(route),
     levels: routeLevels(route),
