@@ -65,7 +65,7 @@ intake 工作流的 job 级条件是 `contains(github.event.issue.labels.*.name,
     "media": [],
     "translations": {
       "zh-CN": {
-        "description": "工作区标签页：GitHub 任务板、wayfinder 地图、30 个中英双语工程技能（可一键装进工作区），以及给 Agent 用的读写 MCP 工具。"
+        "description": "工作区标签页：GitHub 任务板、wayfinder 地图、31 个中英双语工程技能（可一键装进工作区），以及给 Agent 用的读写 MCP 工具。"
       }
     }
   }

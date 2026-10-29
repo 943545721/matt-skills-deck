@@ -1,7 +1,7 @@
 # MattSkillsDeck for Paseo
 
 把 [dsh-mattpocock-skills-deck](https://github.com/FeatherHunter/dsh-mattpocock-skills-deck) 移植成 Paseo 插件：
-27 个 Matt Pocock 工程技能 + 1 个架构图纸技能，加上多后端工作票面、地图与一组给 Agent 用的 `deck_*` 工具。
+31 个中英双语工程技能（Matt Pocock 那套 + 架构图纸 + 项目梳理），加上多后端工作票面、地图与一组给 Agent 用的 `deck_*` 工具。
 
 当前状态：**DSH 版 A1–A26 已逐项落地**（P0–P19 代码侧完成，P19 为八线全量吸收；仓库公开在 GitHub，打了 `v0.1.0` / `v0.1.1`，可用 git 源安装）。
 26 项里 13 项完全对齐、7 项已有但换了出口、2 项以最近等价面承载、4 项部分、0 项未做；逐项证据与剩余差异见
@@ -28,7 +28,7 @@
   由你检查后自己按发送；新建会话在创建时带规则标题，已有会话不能改名。可导出 AI 交接。
 - **地图**：`wayfinder:map` 票会多一个「打开地图」入口，一屏给出目标、已定决策、雾、路线、层级与每层进度、
   子票分组（可接 / 认领 / 阻塞 / 关闭），以及可复制的下一步建议。
-- **技能**：30 个技能中英双语随包分发，可看原文、可复制原文，按工作区一键安装到 `.claude/skills` 与 `.agents/skills`；
+- **技能**：31 个技能中英双语随包分发，可看原文、可复制原文，按工作区一键安装到 `.claude/skills` 与 `.agents/skills`；
   安装前先列出要写的文件，不自动写入。
 - **Agent 工具**：17 个 MCP 工具（DSH 九颗冻结工具 + 评论、标签、PR、`deck_next_steps`、`deck_probe`、`deck_handoff`、`deck_dispatch_plan`、`suggest_next_steps` 八个扩展）。
   8 个只读工具 + `deck_handoff`（只写自己名下的回传件）预授权，其余写工具每次都要人确认；GitHub / GitLab / 本地 Markdown 三种后端共用同一套工具。
@@ -43,6 +43,13 @@
   `PASEO_AGENT_ID` 就失败），收尾时插件把它回传给创建它的窗口，一层一层往主窗口走；
   上一级那个窗口已经归档发不进去时改送主沟通窗口并在正文里写明绕道，页签里的会话树显示这条链路。
   注入 `env` 时会把该客户端已有的键一起提交——宿主落盘是整块替换，只交新键会把别的键冲掉。
+- **多项目工作区**：`.paseo-deck.json` 可以写成 v2 项目清单（`version` / `projects[]` / `coordination`），
+  每个项目有自己的目录、仓库、角色（后端 / 前端 / 小程序 / 授权 / 运维）与模块清单（area）；
+  任务板多出一条项目条，按项目显示开 / 闭 / 可接 / 阻塞，筛选条能按 area 与角色叠着筛；
+  跨仓库依赖在正文写固定一行 `Blocked by: 项目键#12`（也认 `owner/repo#12`），读的时候合成一条边，
+  对方仓库读不到就标「引用失效」而不是当成已解决；地图页把这类引用单列并给出对方票的状态与外链。
+  标签页按清单补齐 `area:*` / `role:*`；诊断页可按项目补齐 `.github/ISSUE_TEMPLATE` 四类模板（只补缺失，绝不覆盖）。
+  v1 的 `{"repoDir": "..."}` 照旧能读，插件不替你改写成 v2。细则见 [`docs/multi-project-workspace.md`](docs/multi-project-workspace.md)。
 - **其他页**：标签配色（读、改、读回核对、复制配色提示词）、版本管理（状态、diff、提交历史、stage / commit / pull / push、AI 交接、git worktree 多工作树一览）、
   诊断（16 项检查目录 + 六步仓库初始化引导 + 日志开关 / 复制 / 清空；修复动作全部接线，认不出的动作明示「未支持」，不放空按钮）、
   插件设置（后端、刷新间隔、调试日志、更新检查）。
@@ -116,12 +123,15 @@ index.client.tsx     注册面：工作区面板、整页界面、侧栏行、�
 index.server.ts      注册 RPC 与生命周期钩子
 shared/              两端共用的 RPC 契约（Zod）：issues、map、repo、labels、env、logs、settings、requirement、update、auth、session、checks、publish
 client/deck/         插件界面：任务板、地图、技能、标签、版本、诊断、设置、初始化引导、像素皮肤
+client/deck/board/   任务板的项目条与 area / role 筛选（纯计算单独成文件，node 直接可测）
+client/deck/skills/  技能页的项目 × 客户端矩阵
 client/deck/surfaces/ 原生座位：胶囊、页头、助手面板、命令中心、斜杠命令、附件源、时间线
 client/deck/session/  SessionSheet + prefill：填入当前 / 新建会话输入框、复制兜底
 client/deck/panel/    助手面板页签（检查目录等）
 server/tracker/      票面领域逻辑：多后端分派、gh / glab / 本地 Markdown 读写、地图正文、路线与建议
 server/rpc/          RPC 处理器（一条 RPC 一个文件）
-server/mcp/          给 Agent 的 MCP 服务端（协议层 + 17 个工具）
+server/workspace/    多项目工作区的落盘动作：issue 模板、标签同步的计划与执行
+server/mcp/          给 Agent 的 MCP 服务端（协议层 + 17 个工具，含多项目的 repo 作用域）
 server/session.ts    会话创建 / 发送 RPC（兼容保留）、技能可用性核实、台账附注
 server/ledger.ts     agent / workspace 两个作用域的本地台账
 server/checks.ts     16 项检查目录与六步引导
@@ -129,7 +139,7 @@ server/publish.ts    发布计划 / dry-run（不执行 git / gh）
 server/hooks.ts      before agent.create：按工作区后端注入 deck 工具
 server/env.ts        环境检查的逐项规则
 server/update.ts     远端 tag 检查
-templates/skills/    随包的 30 个技能（中英双语）
+templates/skills/    随包的 31 个技能（中英双语）
 ```
 
 分层硬规则：`client/` 不 import `node:*`，`server/` 不 import `client/`，跨边界数据一律过 `shared/` 的 Zod 契约。
