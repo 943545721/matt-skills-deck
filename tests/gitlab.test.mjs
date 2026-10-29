@@ -188,6 +188,15 @@ test("正文行：Blocked by 解析去重，Part of 只认独立成行的父票"
   assert.equal(parsePartOfLine("see Part of #12 inline"), null);
 });
 
+test("正文行：跨仓库隐藏区段里的 Blocked by 不算原生阻塞边", () => {
+  // 不摘掉这段，GitLab 会把它当成一张永远 OPEN 的原生边：对方关票也解除不了。
+  const body = "正文\n\n<!-- DSH-CROSS-REPO-BLOCKED-BY\nBlocked by: one/alpha#3\n-->\n";
+  assert.deepEqual(parseBlockedByLine(body), []);
+  // 可见行与隐藏区段同时存在时，只认可见那一行。
+  const both = "Blocked by: #5\n\n<!-- DSH-CROSS-REPO-BLOCKED-BY\nBlocked by: one/alpha#3\n-->\n";
+  assert.deepEqual(parseBlockedByLine(both), ["5"]);
+});
+
 test("列票：opened/closed/all 下推，per_page 有上限，merged 视图不碰远端", async () => {
   const gh = fakeGlab(`printf '%s\\n' '${JSON.stringify([issuePayload(1)])}'`);
   try {

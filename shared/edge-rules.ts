@@ -245,3 +245,233 @@ export function statusOfItems(items: readonly { status?: string }[]): "ok" | "pa
   if (failed === 0) return "ok";
   return failed === items.length ? "unsupported" : "partial";
 }
+
+/* ------------------------------------------------------------------ 跨仓库依赖 */
+
+/**
+ * 跨仓库依赖在正文里的隐藏区段。
+ *
+ * 为什么是这个形状：票面已有的隐藏标记（`DSH-ISSUE-KIND`、`DSH-IDEMPOTENCY-KEY`）都是
+ * HTML 注释，所以这里沿用同一套，只换名字，不另造语法。整段是注释，渲染出来看不见；
+ * 里面的 `Blocked by:` 行保持人写得出来的固定写法，抄进别的工具也能认。
+ *
+ *   <!-- DSH-CROSS-REPO-BLOCKED-BY
+ *   Blocked by: owner/repo#12, key#34
+ *   -->
+ *
+ * 多个引用**一行**写完（逗号分隔）：一行才有一行可幂等替换，多行就要处理「删哪几行」。
+ */
+export const CROSS_REPO_BLOCKED_BY = "DSH-CROSS-REPO-BLOCKED-BY";
+
+const CROSS_REPO_BLOCK_RE = new RegExp(
+  "^[ \\t]*<!--[ \\t]*" + CROSS_REPO_BLOCKED_BY + "[ \\t]*\\r?\\n([\\s\\S]*?)\\r?\\n[ \\t]*-->[ \\t]*$",
+  "m",
+);
+
+const BLOCKED_BY_TEXT_RE = /^[ \t]*(?:\*\*)?Blocked[ \t]+by[ \t]*[:：][ \t]*(?:\*\*)?[ \t]*(.*)$/m;
+
+/** 一条引用在正文里的写法：`owner/repo#12`。渲染与解析共用这一个函数。 */
+export const crossRepoRefText = (repo: string, number: number): string => `${repo}#${number}`;
+
+function uniqueValues(values: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of values) {
+    const value = String(raw ?? "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+/** 把一行 `Blocked by:` 的内容拆成条目；中文逗号与顿号也认（人写的行不挑标点）。 */
+function splitRefs(text: string): string[] {
+  return uniqueValues(String(text ?? "").split(/[,，、]+/));
+}
+
+/** 固定行本身；没有引用时回空串（表示这一行不该存在）。 */
+export function crossRepoBlockedByLine(refs: readonly string[]): string {
+  const unique = uniqueValues(refs);
+  return unique.length ? `Blocked by: ${unique.join(", ")}` : "";
+}
+
+/** 整段隐藏区段；没有引用时回空串。 */
+export function renderCrossRepoBlock(refs: readonly string[]): string {
+  const line = crossRepoBlockedByLine(refs);
+  return line ? `<!-- ${CROSS_REPO_BLOCKED_BY}\n${line}\n-->` : "";
+}
+
+/** 读隐藏区段里的条目（原样，不归一仓库）。区段不存在或没有固定行时回空数组。 */
+export function parseCrossRepoBlockRefs(body: unknown): string[] {
+  const text = typeof body === "string" ? body : "";
+  const block = CROSS_REPO_BLOCK_RE.exec(text);
+  if (!block) return [];
+  const line = BLOCKED_BY_TEXT_RE.exec(block[1] ?? "");
+  if (!line) return [];
+  return splitRefs(line[1] ?? "");
+}
+
+/**
+ * 把正文拆成「给人看的部分」与「隐藏区段」。
+ *
+ * 写路径要用它保住区段：重写可见的 `Blocked by:` 行时如果把整份正文换掉，
+ * 隐藏区段会连同跨仓库引用一起被抹掉。
+ */
+export function splitCrossRepoBlock(body: unknown): { visible: string; block: string } {
+  const text = typeof body === "string" ? body : "";
+  const match = CROSS_REPO_BLOCK_RE.exec(text);
+  if (!match) return { visible: text, block: "" };
+  const visible = `${text.slice(0, match.index)}${text.slice(match.index + match[0].length)}`.replace(/\s+$/, "");
+  return { visible, block: match[0].trim() };
+}
+
+/**
+ * 把隐藏区段从正文里摘掉。
+ *
+ * GitLab 的原生阻塞边回退就是读正文里第一条 `Blocked by:` 行；不摘掉我们的区段，
+ * 它会把自己那行跨仓库引用当成原生边，而且永远读成 OPEN——关掉对方也解除不了。
+ */
+export function stripCrossRepoBlock(body: unknown): string {
+  return splitCrossRepoBlock(body).visible;
+}
+
+/**
+ * 幂等写入隐藏区段：已有整段替换（不叠加第二行），引用清空时整段删掉。
+ *
+ * 放在正文末尾而不是文件头：正文头部已经是幂等锚、票面类型标记的地盘，
+ * 再挤进去会让「第一行是什么」这条判据变得难读；末尾对渲染没有影响。
+ */
+export function upsertCrossRepoBlockedBy(body: unknown, refs: readonly string[]): { body: string; changed: boolean } {
+  const text = typeof body === "string" ? body : "";
+  const block = renderCrossRepoBlock(refs);
+  const existing = CROSS_REPO_BLOCK_RE.exec(text);
+  if (existing) {
+    if (!block) {
+      const next = (text.slice(0, existing.index) + text.slice(existing.index + existing[0].length))
+        .replace(/\n{3,}/g, "\n\n")
+        .replace(/^\n+/, "")
+        .replace(/\s+$/, "");
+      return { body: next, changed: next !== text };
+    }
+    const next = text.slice(0, existing.index) + block + text.slice(existing.index + existing[0].length);
+    return { body: next, changed: next !== text };
+  }
+  if (!block) return { body: text, changed: false };
+  const trimmed = text.replace(/\s+$/, "");
+  return { body: trimmed ? `${trimmed}\n\n${block}\n` : `${block}\n`, changed: true };
+}
+
+/**
+ * 一条引用能指向哪个仓库。
+ *
+ * `projects` 是 `.paseo-deck.json` 的项目清单（写路径只认它）；`repos` 是读路径额外知道的
+ * 工作区仓库清单——写的时候不允许引用的仓库，读的时候可能已经在正文里了，那要如实读出来。
+ */
+export interface DependencyScope {
+  projects: readonly { key: string; repo: string | null }[];
+  /** 当前票所在仓库；本地 Markdown 后端为 null。 */
+  currentRepo: string | null;
+  /** 读路径专用：工作区里能连上的仓库键。写路径不传，避免拿它绕过配置校验。 */
+  repos?: readonly string[];
+}
+
+export type DependencyRef =
+  | { ok: true; local: true; number: number }
+  | { ok: true; local: false; repo: string; number: number; ref: string }
+  | { ok: false; detail: string };
+
+function knownRepoKeys(scope: DependencyScope): string[] {
+  const out: string[] = [];
+  const add = (value: string | null) => {
+    if (value && !out.includes(value)) out.push(value);
+  };
+  add(scope.currentRepo);
+  for (const project of scope.projects) add(project.repo);
+  for (const repo of scope.repos ?? []) add(repo);
+  return out;
+}
+
+/**
+ * 把一条 `blockedBy` 入参归一成「本仓库票号」或「跨仓库引用」。
+ *
+ * 认三种写法：`#12` / `12`（本仓库，走原生依赖边）、`owner/repo#12`、`项目键#12`。
+ * 认不出来就拒绝并说清能写什么——不猜仓库，猜错会在别的仓库关掉同号票。
+ */
+export function dependencyRefOf(raw: unknown, scope: DependencyScope): DependencyRef {
+  const text = typeof raw === "number" ? String(raw) : typeof raw === "string" ? raw.trim() : "";
+  if (!text) return { ok: false, detail: "blockedBy 里有空项" };
+
+  const bare = /^#?(\d{1,10})$/.exec(text);
+  if (bare) {
+    const number = Number(bare[1]);
+    if (!Number.isInteger(number) || number <= 0) return { ok: false, detail: `blockedBy 里的「${text}」不是合法票号` };
+    return { ok: true, local: true, number };
+  }
+
+  const cross = /^([^#\s]+)#(\d{1,10})$/.exec(text);
+  if (!cross) {
+    return {
+      ok: false,
+      detail: `blockedBy 里的「${text}」认不出来：写成 #12 / 12（本仓库）、owner/repo#12，或项目键#12`,
+    };
+  }
+  const number = Number(cross[2]);
+  if (!Number.isInteger(number) || number <= 0) return { ok: false, detail: `blockedBy 里的「${text}」票号不合法` };
+
+  const part = (cross[1] ?? "").trim();
+  if (!part.includes("/")) {
+    const project = scope.projects.find((item) => item.key === part);
+    if (!project) {
+      const keys = scope.projects.map((item) => item.key);
+      return {
+        ok: false,
+        detail: `项目键「${part}」不在 .paseo-deck.json 里${keys.length ? `；能用的键：${keys.join("、")}` : "（这个工作区没有 v2 项目清单）"}`,
+      };
+    }
+    if (!project.repo) {
+      return { ok: false, detail: `项目「${part}」没有写 repo，解析不出是哪个仓库，不能当阻塞引用` };
+    }
+    return { ok: true, local: false, repo: project.repo, number, ref: crossRepoRefText(project.repo, number) };
+  }
+
+  if (!knownRepoKeys(scope).includes(part)) {
+    const known = knownRepoKeys(scope);
+    return {
+      ok: false,
+      detail: `仓库「${part}」不在配置里${known.length ? `；能引用的仓库：${known.join("、")}` : "：这个工作区没有 v2 项目清单，只能用当前仓库自己的 owner/repo#n"}`,
+    };
+  }
+  return { ok: true, local: false, repo: part, number, ref: crossRepoRefText(part, number) };
+}
+
+/** 正文里的一个条目（读路径）：解析不出仓库就回 null，调用方按「引用失效」处理。 */
+export function bodyDependencyRef(raw: string, scope: DependencyScope): { repo: string; number: number } | null {
+  const parsed = dependencyRefOf(raw, scope);
+  if (!parsed.ok) return null;
+  if (parsed.local) return { repo: scope.currentRepo ?? "local", number: parsed.number };
+  return { repo: parsed.repo, number: parsed.number };
+}
+
+export type ResolvedDependencies = { ok: true; local: number[]; cross: string[] } | { ok: false; detail: string };
+
+/**
+ * 整组 `blockedBy` 归一。
+ *
+ * 任何一项写错就整组拒绝，并说明是哪一项：只接受一半的阻塞集合，比拒绝更危险——
+ * 用户以为「后端改完前端才能动」写信了，其实没写。
+ */
+export function resolveDependencyRefs(raw: readonly unknown[], scope: DependencyScope): ResolvedDependencies {
+  const local: number[] = [];
+  const cross: string[] = [];
+  for (const entry of raw) {
+    const parsed = dependencyRefOf(entry, scope);
+    if (!parsed.ok) return { ok: false, detail: parsed.detail };
+    if (parsed.local) {
+      if (!local.includes(parsed.number)) local.push(parsed.number);
+    } else if (!cross.includes(parsed.ref)) {
+      cross.push(parsed.ref);
+    }
+  }
+  return { ok: true, local, cross };
+}

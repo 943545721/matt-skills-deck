@@ -6,6 +6,7 @@ import type { BlockerRef, ItemKind, ListView } from "../../shared/issues.ts";
 import type { Issue, IssueComment, IssueDetailResult, ListIssuesResult, ListOptions } from "./github.ts";
 import { readinessOf } from "./readiness.ts";
 import { containerKindOf } from "../../shared/container-kind.ts";
+import { splitCrossRepoBlock, stripCrossRepoBlock } from "../../shared/edge-rules.ts";
 const execFileAsync = promisify(execFile);
 /**
  * GitLab 后端：25 项读/写，全部走 `glab api` 参数数组（无 shell）。
@@ -123,9 +124,14 @@ function mapLabels(raw: unknown): { name: string; color: string }[] {
     return [{ name, color: typeof item === "string" ? "cccccc" : normalizeGitLabColor(rec(item)?.color) }];
   });
 }
-/** 正文里的 `Blocked by: #1, #2` 行。 */
+/**
+ * 正文里的 `Blocked by: #1, #2` 行。
+ *
+ * 只看可见部分：跨仓库引用的隐藏区段里也有一行 `Blocked by:`，
+ * 把它当成原生边会让「对方仓库的票」永远读成 OPEN，关掉也解除不了。
+ */
 export function parseBlockedByLine(body: string): string[] {
-  const match = /^Blocked by:\s*(.+)$/m.exec(body);
+  const match = /^Blocked by:\s*(.+)$/m.exec(stripCrossRepoBlock(body));
   if (!match) return [];
   const seen = new Set<string>();
   const out: string[] = [];
@@ -138,9 +144,22 @@ export function parseBlockedByLine(body: string): string[] {
   return out;
 }
 function rewriteBlockedByLine(body: string, keys: readonly string[]): string {
+  // 隐藏区段原样接回末尾：重写可见行时把它抹掉，等于悄悄删掉用户的跨仓库引用。
+  const { visible, block } = splitCrossRepoBlock(body);
   const line = keys.length ? `Blocked by: ${keys.map((key) => `#${key}`).join(", ")}` : "";
-  if (/^Blocked by:\s*.+$/m.test(body)) return line ? body.replace(/^Blocked by:\s*.+$/m, line) : body.replace(/^Blocked by:\s*.+$/m, "").replace(/^\n+/, "");
-  return line ? (body ? `${line}\n\n${body}` : line) : body;
+  const next = /^Blocked by:\s*.+$/m.test(visible)
+    ? line
+      ? visible.replace(/^Blocked by:\s*.+$/m, line)
+      : visible.replace(/^Blocked by:\s*.+$/m, "").replace(/^\n+/, "")
+    : line
+      ? visible
+        ? `${line}\n\n${visible}`
+        : line
+      : visible;
+  if (!block) return next;
+  const head = next.replace(/\s+$/, "");
+  const tail = /\n$/.test(body) ? "\n" : "";
+  return `${head ? `${head}\n\n` : ""}${block}${tail}`;
 }
 /** 父子归属的唯一真相。 */
 export function parsePartOfLine(body: string): string | null {
@@ -164,13 +183,15 @@ export function mapGitLabIssues(raw: unknown): Issue[] {
     if (!positive(number)) return [];
     const labels = mapLabels(Array.isArray(record?.labels_details) ? record.labels_details : record?.labels);
     const body = str(record?.description);
+    // 判票面身份、父子行只看可见部分；正文原样带出去，读路径要靠隐藏区段解析跨仓库引用。
+    const visible = stripCrossRepoBlock(body);
     const base = {
       number, title: str(record?.title, `#${number}`) || `#${number}`,
       state: str(record?.state) === "closed" ? ("CLOSED" as const) : ("OPEN" as const),
       url: str(record?.web_url), updatedAt: str(record?.updated_at), createdAt: str(record?.created_at) || str(record?.updated_at),
       labels, assignees: (Array.isArray(record?.assignees) ? record.assignees : []).map((entry) => str(rec(entry)?.username)).filter(Boolean),
-      isMap: labels.some((label) => label.name === "wayfinder:map"), containerKind: containerKindOf({ labels, body, isMap: labels.some((label) => label.name === "wayfinder:map") }), kind: "issue" as const, merged: false, blockedBy: blockersFromLine(body),
-      parentKey: parsePartOfLine(body),
+      isMap: labels.some((label) => label.name === "wayfinder:map"), containerKind: containerKindOf({ labels, body: visible, isMap: labels.some((label) => label.name === "wayfinder:map") }), kind: "issue" as const, merged: false, blockedBy: blockersFromLine(body),
+      parentKey: parsePartOfLine(visible),
       body,
     };
     return [{ ...base, readiness: readinessOf(base) }];

@@ -221,7 +221,11 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
           description:
             "Parent issue number. Required for map-ticket (parent must be a map) and spec-ticket (parent must be a spec). Not accepted for map and spec; optional for bug and issue (must be a map or spec when given).",
         },
-        blockedBy: stringArray("Issue numbers (or keys) that block this one after creation; whole-batch replace. Only tickets in this repository."),
+        blockedBy: stringArray(
+          "Blockers for this issue, whole-batch replace. Accepts #12 / 12 (this repository, written as a native dependency edge), " +
+            "owner/repo#12 (another repository) and projectKey#12 (a key from .paseo-deck.json). " +
+            "Cross-repository refs are written into a hidden `Blocked by:` section of the body; an unknown repo or a bad ref rejects the whole call.",
+        ),
         labels: stringArray(
           "Extra labels beyond the required ones. Do not add type labels (wayfinder:map / wayfinder:research / wayfinder:prototype / wayfinder:grilling / wayfinder:task / bug): kind and label decide those.",
         ),
@@ -312,8 +316,9 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
 
   deck_issue_patch: {
     description:
-      "Change one issue: comment, labels, assignees, close, title, body, progress section, maintainer-words section; only the fields you pass are touched. " +
+      "Change one issue: comment, labels, assignees, close, title, body, blockedBy, progress section, maintainer-words section; only the fields you pass are touched. " +
       "Reopening is not available here (a human does it in the backend). Closing a map requires a comment in the same call. " +
+      "blockedBy replaces the whole blocker set: this-repository refs go to native dependency edges, cross-repository refs (owner/repo#12 or projectKey#12) into the body's hidden `Blocked by:` section. " +
       "originalWords is idempotent on the same text + source pair; bodies over 60 KB are refused. Requires user approval.",
     inputSchema: objectSchema(
       {
@@ -326,6 +331,10 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
         title: { type: "string", description: "New title." },
         body: { type: "string", description: "New full Markdown body (replaces the old one)." },
         originalWords: originalWordsProperty,
+        blockedBy: stringArray(
+          "Whole-set replacement of this issue's blockers. Accepts #12 / 12 (this repository, native edge), owner/repo#12 and projectKey#12. " +
+            "Cross-repository refs land in the body's hidden `Blocked by:` section; an empty array clears every blocker.",
+        ),
         progress: {
           type: "object",
           description:
@@ -635,6 +644,15 @@ export const issueKindSchema = z.enum(["map", "map-ticket", "spec", "spec-ticket
 export const workRouteDetailSchema = z.enum(["core", "standard"]);
 const keyValueSchema = z.union([z.string().min(1).max(40), z.number().int().min(1)]);
 
+/**
+ * 一条依赖引用：`#12` / `12`（本仓库），或 `owner/repo#12` / `项目键#12`（跨仓库）。
+ *
+ * 比 `keyValueSchema` 宽：`group/sub/name#123` 这种 GitLab 路径装不进 40 个字符。
+ * 写法是否合法（仓库在不在配置里、票号有没有）由工具层的 `dependencyRefOf` 判，
+ * 这里只挡住空串和离谱的长串。
+ */
+const dependencyRefSchema = z.union([z.string().min(1).max(300), z.number().int().min(1)]);
+
 const originalWordsSchema = z.strictObject({
   text: z.string().min(1).max(BODY_LIMIT_BYTES),
   source: z.string().min(1).max(2_000),
@@ -692,7 +710,7 @@ export const createSchema = z.strictObject({
   kind: issueKindSchema,
   label: mapTicketLabelSchema.optional(),
   parentKey: keyValueSchema.optional(),
-  blockedBy: z.array(keyValueSchema).max(50).optional(),
+  blockedBy: z.array(dependencyRefSchema).max(50).optional(),
   labels: z.array(z.string().min(1)).max(50).optional(),
   assignees: z.array(z.string().min(1)).max(50).optional(),
   idempotencyKey: z.string().min(1).max(200).optional(),
@@ -716,6 +734,8 @@ export const patchSchema = z.strictObject({
   body: z.string().max(BODY_LIMIT_BYTES).optional(),
   originalWords: originalWordsSchema.optional(),
   progress: progressSchema.optional(),
+  /** 阻塞边的整组替换：本仓库项走原生依赖，跨仓库项写进正文隐藏区段。 */
+  blockedBy: z.array(dependencyRefSchema).max(100).optional(),
   close: z.boolean().optional(),
   closeReason: z.string().min(1).max(2_000).optional(),
   workRouteDetail: workRouteDetailSchema.optional(),

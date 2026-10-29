@@ -28,6 +28,13 @@ test("阻塞：任意一个阻塞者仍打开就不可接，优先于认领", ()
   assert.equal(readinessOf({ state: "CLOSED", assignees: [], blockedBy: [blocker("OPEN")] }), "closed");
 });
 
+test("阻塞：跨仓库引用读不到（UNKNOWN）仍算阻塞，不能当成已解除", () => {
+  const unknown = { number: 7, title: "two/beta#7", state: "UNKNOWN", kind: "issue", repo: "two/beta", source: "body", stale: true };
+  assert.equal(readinessOf({ state: "OPEN", assignees: [], blockedBy: [unknown] }), "blocked");
+  // 只有明确读到「对方已关闭」才放行。
+  assert.equal(readinessOf({ state: "OPEN", assignees: [], blockedBy: [{ ...unknown, state: "CLOSED", stale: false }] }), "ready");
+});
+
 test("认领：有人接手但没被阻塞时是 claimed，不是 ready", () => {
   assert.equal(readinessOf({ state: "OPEN", assignees: ["octocat"], blockedBy: [] }), "claimed");
   assert.equal(readinessOf({ state: "OPEN", merged: true, assignees: [], blockedBy: [] }), "closed");

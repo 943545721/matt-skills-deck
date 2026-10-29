@@ -42,8 +42,10 @@ import { buildDispatchPreamble, planDispatch } from "../../shared/orchestration.
 import { updateWorkRouteLedger } from "../ledger.ts";
 import { applyWorkRouteEvent, summarizeWorkRoute, ticketKeyOf } from "../../shared/work-route.ts";
 import {
-  childrenOf, landingOf, refuseCyclicBlockBatch, statusOfItems, type EdgeEvidence,
+  childrenOf, landingOf, refuseCyclicBlockBatch, resolveDependencyRefs, statusOfItems, upsertCrossRepoBlockedBy,
+  type DependencyScope, type EdgeEvidence,
 } from "../../shared/edge-rules.ts";
+import { readWorkspaceConfig } from "../tracker/workspace-repo.ts";
 
 /**
  * 给 Agent 用的 deck_* 工具。
@@ -118,6 +120,21 @@ const readOne = (backend: WritableBackend, number: number) => {
   if (backend.kind === "gitlab") return getGitLabIssue(backend.ref.owner, backend.ref.name, number);
   return getLocalIssue(backend.workspaceDir, number);
 };
+
+/**
+ * 写路径的依赖作用域。
+ *
+ * 只认 `.paseo-deck.json` 的项目清单：能写进正文的跨仓库引用，必须指向配置里写明的仓库。
+ * 拿「目录里碰巧有个仓库」当依据，会让引用指向一张没人认的票，而且写失败也没人发现。
+ */
+async function dependencyScopeOf(workspaceDir: string, backend: WritableBackend): Promise<DependencyScope> {
+  const read = await readWorkspaceConfig(workspaceDir);
+  return {
+    projects: read.ok ? read.config.projects.map((project) => ({ key: project.key, repo: project.repo })) : [],
+    // 本地 Markdown 后端没有远端坐标：正文里的裸 `#12` 就是同一份 `.deck` 里的票。
+    currentRepo: backend.kind === "local" ? null : backend.key,
+  };
+}
 
 /* ------------------------------------------------------------------ handlers */
 
@@ -381,12 +398,19 @@ async function runIssueCreate(args: unknown, context: ToolContext): Promise<Tool
   /* ---------------- 标签 / 阻塞边 / 指派 / 幂等锚 ---------------- */
   const ensured = ensureLabels(argued.labels, position, fullLabel);
   const labels = ensured.labels;
-  const blockedKeys = (input.blockedBy ?? []).map((entry) => String(entry).trim().replace(/^#/, "")).filter(Boolean);
-  const blockedNumbers: number[] = [];
-  for (const key of blockedKeys) {
-    const number = parseKey(key);
-    if (number === null) return fail("invalid", `blockedBy 里的「${key}」不是本仓库内的票号。这张票没建。`);
-    blockedNumbers.push(number);
+  // 阻塞边分两路：本仓库票号走原生依赖边，跨仓库引用只能写进正文隐藏区段
+  // （远端没有跨仓库原生边）。任何一项写法不合法就整组拒绝：
+  // 只写了一半的阻塞集合，会让人以为「后端改完前端才能动」已经记下了。
+  const dependencies = resolveDependencyRefs(input.blockedBy ?? [], await dependencyScopeOf(context.workspaceDir, backend));
+  if (!dependencies.ok) return fail("invalid", `${dependencies.detail}。这张票没建。`);
+  const blockedNumbers = dependencies.local;
+  const crossRefs = dependencies.cross;
+  const blockedKeys = blockedNumbers.map(String);
+  if (crossRefs.length > 0) {
+    // 建票时正文已经定稿：跨仓库行随正文一起写出去，之后不必再补一次 PUT。
+    const applied = upsertCrossRepoBlockedBy(body, crossRefs);
+    body = applied.body;
+    if (!bodyWithinLimit(body)) return fail("invalid", "正文超过 60KB，拒绝建票；一个字节都没有写。");
   }
   const assignees = (input.assignees ?? []).map((name) => name.trim()).filter(Boolean);
 
@@ -563,13 +587,19 @@ async function runIssueCreate(args: unknown, context: ToolContext): Promise<Tool
             : {}),
         }
       : null,
-    blockedBy: blockedKeys.length
+    blockedBy: blockedKeys.length || crossRefs.length
       ? {
-          requested: blockedKeys,
+          requested: [...blockedKeys, ...crossRefs],
+          /** 走原生依赖边的那部分（本仓库票号）。 */
+          native: blockedKeys,
+          /** 写进正文隐藏区段的那部分（`owner/repo#n`）。 */
+          crossRepo: crossRefs,
+          /** 原生依赖边那部分是否写入；跨仓库那部分看 crossRepoWritten。 */
           applied: created.blockedByApplied,
           failed: created.blockedByError ?? null,
-          ...(created.reused && !created.blockedByApplied
-            ? { note: `复用了已有票 #${created.number}，本次没有重写阻塞边。` }
+          ...(crossRefs.length > 0 ? { crossRepoWritten: !created.reused } : {}),
+          ...(created.reused
+            ? { note: `复用了已有票 #${created.number}，本次没有重写阻塞边（跨仓库引用随正文在上一次写入时已经落好）。` }
             : {}),
         }
       : null,
@@ -602,9 +632,12 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
   const removeLabels = (input.removeLabels ?? []).map((label) => label.trim()).filter(Boolean);
   const hasLabels = addLabels.length > 0 || removeLabels.length > 0;
   const hasBodyEdit = input.body !== undefined || input.originalWords !== undefined || input.progress !== undefined;
-  const hasChanges = input.title !== undefined || hasBodyEdit || hasLabels || input.comment !== undefined || close || reopen || input.assignees !== undefined;
+  const hasBlockers = input.blockedBy !== undefined;
+  const hasChanges =
+    input.title !== undefined || hasBodyEdit || hasLabels || input.comment !== undefined || close || reopen ||
+    input.assignees !== undefined || hasBlockers;
   if (!hasChanges) {
-    return fail("invalid", "至少给一个要改的字段（title / body / comment / addLabels / removeLabels / assignees / progress / originalWords / close）。");
+    return fail("invalid", "至少给一个要改的字段（title / body / comment / addLabels / removeLabels / assignees / blockedBy / progress / originalWords / close）。");
   }
 
   const backend = await resolveWritableBackend(context.workspaceDir, "patch issue", input.repo);
@@ -612,9 +645,16 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
   if (input.assignees !== undefined && backend.kind === "local") {
     return fail("unsupported", "本地 Markdown 后端没有登录账号，无法写认领人；请直接编辑票文件里的 assignees。本次什么都没动。");
   }
+  // blockedBy 是整组替换，先把每一项归一：写不合法的一整组都不写（见 resolveDependencyRefs 的注释）。
+  const dependencies = hasBlockers
+    ? resolveDependencyRefs(input.blockedBy ?? [], await dependencyScopeOf(context.workspaceDir, backend))
+    : null;
+  if (dependencies && !dependencies.ok) return fail("invalid", `${dependencies.detail}。本次什么都没动。`);
+  const nativeBlockers = dependencies && dependencies.ok ? dependencies.local.map(String) : [];
+  const crossRefs = dependencies && dependencies.ok ? dependencies.cross : [];
   // 只有需要「现状」的字段才读票：标签要算全集、正文追加要拿旧正文、关票要确认是不是地图。
   // 只改标题 / 直接给新正文 / 只发评论时不多打一次读请求。
-  const needCurrent = hasLabels || (hasBodyEdit && input.body === undefined) || close;
+  const needCurrent = hasLabels || (hasBodyEdit && input.body === undefined) || close || (hasBlockers && input.body === undefined);
   type CurrentIssue = Extract<Awaited<ReturnType<typeof readOne>>, { ok: true }>;
   let current: CurrentIssue | null = null;
   if (needCurrent) {
@@ -640,6 +680,14 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
     originalWordsAdded = applied.added;
   }
   if (input.progress) body = appendProgress(body, input.progress, new Date().toISOString());
+  // 跨仓库引用只能落在正文隐藏区段。整组替换时「清空」也要写回，
+  // 否则删掉一个跨仓库依赖之后，那一行还留在正文里。
+  let blockBodyChanged = false;
+  if (hasBlockers) {
+    const applied = upsertCrossRepoBlockedBy(body, crossRefs);
+    body = applied.body;
+    blockBodyChanged = applied.changed;
+  }
   if (!bodyWithinLimit(body)) return fail("invalid", "正文超过 60KB，拒绝写入；一个字节都没有动。");
 
   // 关票必须先留评论：评论失败时直接停，票不会被关掉。
@@ -659,7 +707,7 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
 
   const patch: { title?: string; body?: string; state?: "open" | "closed" } = {};
   if (input.title !== undefined) patch.title = input.title;
-  if (hasBodyEdit) patch.body = body;
+  if (hasBodyEdit || blockBodyChanged) patch.body = body;
   // GitHub 的关/开走独立操作（关可以带原生原因）；其余后端仍由 patch 一次写状态。
   if ((close || reopen) && backend.kind !== "github") patch.state = close ? "closed" : "open";
   let patched: { title: string; body: string; state: "OPEN" | "CLOSED" } | null = null;
@@ -713,6 +761,17 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
     }
   }
 
+  // 原生阻塞边放在正文之后写：GitLab 回退到正文行时要读到刚写好的隐藏区段才能保留它。
+  let blockedBy: string[] | null = null;
+  let blockedByFailure: string | null = null;
+  if (hasBlockers) {
+    const evidence = await writeBlockedEdges(backend, String(number), nativeBlockers);
+    const text = evidence.text ?? "阻塞边没写成，后端也没说明原因";
+    if (evidence.ok) blockedBy = [...nativeBlockers, ...crossRefs];
+    else if (!patched && !posted && labels === null && assignees === null) return fail("unsupported", text);
+    else blockedByFailure = text;
+  }
+
   return ok({
     ok: true,
     key: String(number),
@@ -726,9 +785,10 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
     assignees,
     assigneesFailed: assigneesFailure !== null,
     assigneesFailure,
+    ...(hasBlockers ? { blockedBy, blockedByFailed: blockedByFailure !== null, blockedByFailure } : {}),
     commented: posted !== null,
     comment: posted?.comment,
-    partial: labelsFailure !== null || assigneesFailure !== null,
+    partial: labelsFailure !== null || assigneesFailure !== null || blockedByFailure !== null,
     originalWords: input.originalWords ? { appended: originalWordsAdded } : null,
   });
 }
@@ -1356,6 +1416,9 @@ async function runContext(args: unknown, context: ToolContext): Promise<ToolResu
   const issues = read.issues.filter((item) => item.kind === "issue");
   const counts = countBoard(issues);
   const open = issues.filter((item) => item.state === "OPEN");
+  /** 跨仓库阻塞者写成 `owner/repo#12`；本仓库的仍只给票号。 */
+  const blockerRef = (blocker: { number: number; repo?: string }): string =>
+    blocker.repo ? `${blocker.repo}#${blocker.number}` : `#${blocker.number}`;
   const brief = (item: (typeof issues)[number]) => ({
     repo: item.repoKey,
     number: item.number,
@@ -1363,7 +1426,16 @@ async function runContext(args: unknown, context: ToolContext): Promise<ToolResu
     readiness: item.readiness,
     labels: item.labels.map((label) => label.name),
     assignees: item.assignees,
-    blockedBy: item.blockedBy.filter((blocker) => blocker.state === "OPEN").map((blocker) => blocker.number),
+    // 只列还没关的：UNKNOWN（跨仓库引用读不到对方那张票）也算还堵着，不能因为读不到就隐身。
+    // 本仓库的仍只给票号（老调用方按数字读），跨仓库的另起一列带 `owner/repo#n`。
+    blockedBy: item.blockedBy
+      .filter((blocker) => blocker.state !== "CLOSED" && !blocker.repo)
+      .map((blocker) => blocker.number),
+    blockedByCrossRepo: item.blockedBy
+      .filter((blocker) => blocker.state !== "CLOSED" && blocker.repo)
+      .map(blockerRef),
+    /** 引用失效的阻塞者单列一份：它们仍然算阻塞，但原因不是「对方还开着」。 */
+    blockedByStale: item.blockedBy.filter((blocker) => blocker.stale === true).map(blockerRef),
   });
   return ok({
     ok: true,

@@ -11,12 +11,14 @@ export interface ReadinessFields {
   state: "OPEN" | "CLOSED";
   merged?: boolean;
   assignees: readonly string[];
-  blockedBy: readonly { state: "OPEN" | "CLOSED" }[];
+  blockedBy: readonly { state: "OPEN" | "CLOSED" | "UNKNOWN" }[];
 }
 
 export function readinessOf(item: ReadinessFields): Readiness {
   if (item.state === "CLOSED" || item.merged === true) return "closed";
-  if (item.blockedBy.some((blocker) => blocker.state === "OPEN")) return "blocked";
+  // 只有明确「已关闭」的阻塞者才放行。UNKNOWN（跨仓库引用读不到对方那张票）
+  // 按还堵着算：把读不到当成已解除，会让人接一张其实还在等的票。
+  if (item.blockedBy.some((blocker) => blocker.state !== "CLOSED")) return "blocked";
   if (item.assignees.length > 0) return "claimed";
   return "ready";
 }

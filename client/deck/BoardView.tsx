@@ -12,6 +12,7 @@ import { freshnessLevel } from "../../shared/refresh";
 import type { DeckKey } from "./i18n";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import { GithubAuthModal } from "./GithubAuthModal";
+import { staleBlockerLabels } from "./format";
 import { PixelBanner, PixelButton, PixelStatusLine, usePixel } from "./pixel";
 import { refreshReasonKey, usePanelText } from "./panel/panelText";
 import { TicketRow } from "./panel/TicketRow";
@@ -740,18 +741,29 @@ export function BoardView({
             ) : null}
           </View>
         }
-        renderItem={({ item }) => (
-          <TicketRow
-            skin={skin}
-            item={item}
-            showRepo={activeRepo === null && repoCount > 1}
-            repoName={repoNameOf(item.repoKey)}
-            readOnly={readOnlyOf(item.repoKey)}
-            bound={isBound(item.repoKey, item.number)}
-            onOpen={(ref) => onOpenIssue(ref)}
-            onOpenMap={(ref) => onOpenMap(ref)}
-          />
-        )}
+        renderItem={({ item }) => {
+          // 跨仓库引用读不到时，票仍算阻塞；这里把原因挂在行下面，别让人以为它莫名其妙不能接。
+          const stale = staleBlockerLabels(item);
+          const row = (
+            <TicketRow
+              skin={skin}
+              item={item}
+              showRepo={activeRepo === null && repoCount > 1}
+              repoName={repoNameOf(item.repoKey)}
+              readOnly={readOnlyOf(item.repoKey)}
+              bound={isBound(item.repoKey, item.number)}
+              onOpen={(ref) => onOpenIssue(ref)}
+              onOpenMap={(ref) => onOpenMap(ref)}
+            />
+          );
+          if (stale.length === 0) return row;
+          return (
+            <View style={{ gap: 2 }}>
+              {row}
+              <Text style={styles.onChecker}>{t("deps.staleBlocker", { refs: stale.join("、") })}</Text>
+            </View>
+          );
+        }}
       />
 
 

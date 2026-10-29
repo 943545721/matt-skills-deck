@@ -22,12 +22,21 @@ const itemState = z.enum(["OPEN", "CLOSED"]);
  *
  * 只收编号、标题、状态：界面要能说「被 #12 阻塞」并让人点过去，
  * 不需要把阻塞者的整份正文再取一遍（那是详情页的事）。
+ *
+ * `state` 多出一个 `UNKNOWN`：跨仓库引用读不到对方那张票（仓库不可达 / 票号不存在）时，
+ * 不知道它是开还是关——按「还堵着」算，不能当作已经解除。界面靠 `stale` 说清原因。
  */
 const blocker = z.object({
   number: z.number().int(),
   title: z.string(),
-  state: itemState,
+  state: z.enum(["OPEN", "CLOSED", "UNKNOWN"]),
   kind: itemKind,
+  /** 跨仓库引用的对方仓库（`owner/name`）；本仓库的阻塞者没有这一位。 */
+  repo: z.string().optional(),
+  /** 这条边从哪读来的：后端原生依赖边，还是正文隐藏区段里的 `Blocked by:` 行。 */
+  source: z.enum(["native", "body"]).optional(),
+  /** 引用失效：对方仓库或票号读不到。仍然算阻塞，只是不能当成「已解除」。 */
+  stale: z.boolean().optional(),
 });
 
 /**
