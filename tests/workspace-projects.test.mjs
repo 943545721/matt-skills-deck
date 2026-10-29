@@ -45,7 +45,7 @@ test("v1 只有 repoDir：读成一个单项目，版本仍是 1（不假装是 
   assert.equal(config.version, 1);
   assert.equal(isLegacyConfig(config), true);
   assert.deepEqual(config.projects, [
-    { key: "mall-api", dir: "mall-api", repo: null, owner: null, areas: [], skillsMode: null },
+    { key: "mall-api", dir: "mall-api", repo: null, owner: null, areas: [], deprecatedAreas: [], skillsMode: null },
   ]);
   assert.deepEqual(config.warnings, []);
 });
@@ -72,6 +72,7 @@ test("v2 正常清单：字段按声明落位，缺省项是 null / 空数组", 
     repo: "943545721/mall-api",
     owner: "backend",
     areas: ["api", "auth"],
+    deprecatedAreas: [],
     skillsMode: null,
   });
   assert.equal(config.projects[1].dir, "apps/admin-web", "多段相对路径要允许");
@@ -82,6 +83,7 @@ test("v2 正常清单：字段按声明落位，缺省项是 null / 空数组", 
     repo: null,
     owner: null,
     areas: [],
+    deprecatedAreas: [],
     skillsMode: null,
   });
 });
@@ -132,6 +134,17 @@ test("areas 是模块键：非数组只告警，非法项跳过并说明，重�
   // 「Admin Web」和数字 7 各算一处：坏掉的项跳过，但要说出来。
   assert.equal(mixed.warnings.length, 2);
   for (const warning of mixed.warnings) assert.match(warning, /模块键/);
+});
+
+test("deprecatedAreas：与 areas 同一条键规则，坏项逐条说明，重复去掉", () => {
+  const config = ok(v2([project({ areas: ["api"], deprecatedAreas: ["legacy", "legacy", "Old Module"] })]));
+  assert.deepEqual(config.projects[0].deprecatedAreas, ["legacy"]);
+  assert.equal(config.projects[0].areas.includes("legacy"), false, "废弃项不该被当成在用模块");
+  assert.equal(config.warnings.length, 1);
+  assert.match(config.warnings[0], /deprecatedAreas/);
+
+  // 不写就是空表，不是 undefined：下游（同步标签）直接读，不用每处都判 undefined。
+  assert.deepEqual(ok(v2([project()])).projects[0].deprecatedAreas, []);
 });
 
 test("projects 是空数组：能读，但给出告警（界面会按单仓库模式回退）", () => {

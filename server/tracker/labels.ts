@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import type { SyncLabel } from "../../shared/labels.ts";
 import { classifyGhError, type GhFailureReason } from "./gh-error.ts";
+import { classifyGlabError, listGitLabLabels } from "./gitlab.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -135,3 +137,133 @@ export async function setLabelColors(
   }
   return { ok: true, applied, failed, verified, mismatched, readbackFailed: false };
 }
+
+// ---------------------------------------------------------------------------
+// 同步标签：缺的建、已有的跳过
+// ---------------------------------------------------------------------------
+
+/**
+ * 同步一个仓库时需要的两个动作。注入是为了让幂等与部分失败能离线测。
+ *
+ * 失败只保留 `reason`（用于判断「是不是整条链路不可用」）与 `detail`（原样给人看），
+ * 不跟某个后端的错误码表绑定：GitHub 与 GitLab 的码不一样，而这张表只在上层做展示。
+ */
+export interface SyncFailure {
+  ok: false;
+  reason: string;
+  detail: string;
+}
+
+export interface SyncLabelDeps {
+  list(owner: string, name: string): Promise<{ ok: true; labels: readonly { name: string }[] } | SyncFailure>;
+  create(owner: string, name: string, label: SyncLabel): Promise<{ ok: true } | SyncFailure>;
+}
+
+export interface SyncLabelOutcome {
+  ok: true;
+  created: string[];
+  existing: string[];
+  failed: { name: string; detail: string }[];
+}
+
+/** 整条链路不可用（没装 / 没登录）：继续建下去只会把同一条错误抄上几十遍。 */
+const FATAL_SYNC_REASONS = new Set(["gh-missing", "gh-unauth", "glab-missing", "glab-unauth"]);
+
+/** GitHub：`gh api` 建标签。走 api 而不是 `gh label create`，是为了能和读列表共用同一套错误分类。 */
+async function createGitHubLabel(owner: string, name: string, label: SyncLabel): Promise<{ ok: true } | SyncFailure> {
+  const result = await runGh([
+    "api",
+    `repos/${owner}/${name}/labels`,
+    "--method",
+    "POST",
+    "-f",
+    `name=${label.name}`,
+    "-f",
+    `color=${label.color}`,
+    "-f",
+    `description=${label.description}`,
+  ]);
+  return result.ok ? { ok: true } : result;
+}
+
+/** GitLab：`glab api` 建标签。颜色要带井号，与 PUT 改色的口径一致。 */
+async function createGitLabLabel(owner: string, name: string, label: SyncLabel): Promise<{ ok: true } | SyncFailure> {
+  try {
+    await execFileAsync(
+      "glab",
+      [
+        "api",
+        `projects/${encodeURIComponent(`${owner}/${name}`)}/labels`,
+        "--method",
+        "POST",
+        "-f",
+        `name=${label.name}`,
+        "-f",
+        `color=#${label.color}`,
+        "-f",
+        `description=${label.description}`,
+      ],
+      { timeout: 20_000, maxBuffer: 4 << 20 },
+    );
+    return { ok: true };
+  } catch (error) {
+    const classified = classifyGlabError(error);
+    return { ok: false, reason: classified.reason, detail: classified.detail };
+  }
+}
+
+export const githubSyncDeps: SyncLabelDeps = {
+  async list(owner, name) {
+    const result = await listLabels(owner, name);
+    return result.ok ? { ok: true, labels: result.labels } : result;
+  },
+  create: createGitHubLabel,
+};
+
+export const gitlabSyncDeps: SyncLabelDeps = {
+  async list(owner, name) {
+    const result = await listGitLabLabels(owner, name);
+    return result.ok ? { ok: true, labels: result.labels } : result;
+  },
+  create: createGitLabLabel,
+};
+
+/**
+ * 把一个仓库的标签清单补齐。
+ *
+ * 先读一遍现有标签，只对它没有的名字发创建请求：重复执行是安全的，已有标签的颜色一个字都不动
+ * （改色是另一条路径，有它的读回核对）。单个标签失败只记一条，继续建后面的——
+ * 因为一次同步里最可能失败的恰恰是别人手工建过、名字拼写不同的那一个。
+ */
+export async function syncLabels(
+  owner: string,
+  name: string,
+  labels: readonly SyncLabel[],
+  deps: SyncLabelDeps = githubSyncDeps,
+): Promise<SyncLabelOutcome | SyncFailure> {
+  const listed = await deps.list(owner, name);
+  if (!listed.ok) return listed;
+
+  const have = new Set(listed.labels.map((label) => label.name));
+  const created: string[] = [];
+  const existing: string[] = [];
+  const failed: { name: string; detail: string }[] = [];
+
+  for (const label of labels) {
+    if (have.has(label.name)) {
+      existing.push(label.name);
+      continue;
+    }
+    const result = await deps.create(owner, name, label);
+    if (!result.ok) {
+      if (FATAL_SYNC_REASONS.has(result.reason)) return result;
+      failed.push({ name: label.name, detail: result.detail });
+      continue;
+    }
+    created.push(label.name);
+  }
+
+  return { ok: true, created, existing, failed };
+}
+
+

@@ -4,7 +4,7 @@ import { copyText, FlatList, TextInput, useToast } from "@getpaseo/plugin/client
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Text, View } from "react-native";
-import { labelsColorsRpc, labelsListRpc } from "../../shared/labels";
+import { labelsColorsRpc, labelsListRpc, labelsSyncRpc, type LabelSyncRepoResult } from "../../shared/labels";
 import { repoTargetsRpc } from "../../shared/repo";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import { PixelBanner, PixelButton, PixelCard, usePixel } from "./pixel";
@@ -46,6 +46,9 @@ export function LabelsView({
   const listLabels = useRpc(labelsListRpc);
   const setColors = useRpc(labelsColorsRpc);
   const repoListing = useRpc(repoTargetsRpc);
+  const syncAll = useRpc(labelsSyncRpc);
+  /** 同步结果按仓库留一份：失败要能逐条看到，不能只在提示条里闪一下。 */
+  const [syncReport, setSyncReport] = useState<LabelSyncRepoResult[] | null>(null);
 
   const targets = useQuery({
     queryKey: ["deck", "repo-targets", workspaceDir],
@@ -99,6 +102,32 @@ export function LabelsView({
       ].filter(Boolean).join(" · ");
       const troubled = result.failed.length + result.mismatched.length > 0 || result.readbackFailed;
       toast.show(summary || t("labels.nothing"), { variant: troubled ? "warning" : "success" });
+    },
+    onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
+  });
+
+  /**
+   * 同步标签：整块工作区一次，不跟着上面选中的仓库走。
+   *
+   * 它是「按项目清单把标签建齐」的动作，天然是多仓库的；跟着选中仓库反而要人来回点四次。
+   */
+  const sync = useMutation({
+    mutationFn: () => syncAll({ workspaceDir }),
+    onSuccess: (result) => {
+      if (!result.ok) {
+        setSyncReport(null);
+        toast.show(`${staticText(t, FAILURE_KEYS[result.reason] ?? "failure.read")}：${result.detail}`, { variant: "error" });
+        return;
+      }
+      setSyncReport(result.repos);
+      const created = result.repos.reduce((sum, row) => sum + row.created.length, 0);
+      const existing = result.repos.reduce((sum, row) => sum + row.existing.length, 0);
+      const failed = result.repos.reduce((sum, row) => sum + row.failed.length, 0) + result.repos.filter((row) => row.error).length;
+      void queryClient.invalidateQueries({ queryKey: ["deck", "labels", workspaceDir] });
+      toast.show(
+        created === 0 && failed === 0 ? t("workspace.syncNothing") : t("workspace.syncSummary", { created, existing, failed }),
+        { variant: failed ? "warning" : "success" },
+      );
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
   });
@@ -192,6 +221,13 @@ export function LabelsView({
         />
         <PixelButton
           skin={skin}
+          label={sync.isPending ? t("workspace.syncRunning") : t("workspace.sync")}
+          accessibilityLabel={t("workspace.syncHint")}
+          disabled={sync.isPending}
+          onPress={() => sync.mutate()}
+        />
+        <PixelButton
+          skin={skin}
           label={
             save.isPending
               ? t("labels.saving")
@@ -210,6 +246,37 @@ export function LabelsView({
       </View>
 
       <Text style={styles.onChecker}>{t("labels.hint")}</Text>
+      {syncReport && syncReport.length ? (
+        <View style={{ gap: 2 }}>
+          {syncReport.map((row) => (
+            <View key={row.key} style={{ gap: 1 }}>
+              <Text style={row.error ? styles.error : styles.onChecker} numberOfLines={2}>
+                {row.error
+                  ? t("workspace.syncRepoError", { repo: row.key, detail: row.error })
+                  : t("workspace.syncRepoLine", {
+                      repo: row.repo || row.key,
+                      created: row.created.length,
+                      existing: row.existing.length,
+                      failed: row.failed.length,
+                    })}
+              </Text>
+              {row.failed.map((item) => (
+                <Text key={item.name} style={styles.error} numberOfLines={2}>
+                  {t("workspace.syncRepoError", { repo: item.name, detail: item.detail })}
+                </Text>
+              ))}
+              {row.deprecated.length ? (
+                <Text style={styles.hint}>{t("workspace.syncDeprecated", { names: row.deprecated.join("、") })}</Text>
+              ) : null}
+              {row.skipped.map((note) => (
+                <Text key={note} style={styles.hint} numberOfLines={2}>
+                  {note}
+                </Text>
+              ))}
+            </View>
+          ))}
+        </View>
+      ) : null}
       {failure ? (
         <PixelBanner skin={skin}>
           <Text style={styles.error}>

@@ -47,6 +47,7 @@
 | `repo` | 否 | `owner/name`（GitLab 可以是 `group/sub/name`）。目录里有可读远端时以远端为准，这里只是补位 |
 | `owner` | 否 | 角色，只认 `backend` / `frontend` / `miniapp` / `license` / `ops` |
 | `areas` | 否 | 模块键数组。由项目梳理技能产出、人确认后写进来；可以空着 |
+| `deprecatedAreas` | 否 | 已废弃的模块键。同步标签时**不建**这些 area 标签，也从不去仓库里删已有的——删了就没人知道它曾经存在，而旧票还挂着 |
 | `skillsMode` | 否 | 这个项目的技能模式：`unified` / `per-project`。不写就跟随工作区设置 |
 | `coordination.shape` | 否 | 人对「这些项目算不算一套」的声明：`single` / `container` / `mixed`。写了就不再被提示 |
 

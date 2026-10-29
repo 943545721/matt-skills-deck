@@ -44,6 +44,13 @@ export interface WorkspaceProject {
   owner: ProjectOwner | null;
   /** 模块键（`api`、`admin-web`…）。由项目梳理技能产出、人确认后写进来；可以空。 */
   areas: string[];
+  /**
+   * 已废弃的模块键：同步标签时**不建**这些 area 标签，也从不去仓库里删已存在的。
+   *
+   * 项目梳理技能发现「这个模块没了」时把键挪到这里，而不是直接从 `areas` 删掉——
+   * 删掉之后没人知道它曾经存在，而仓库里可能还挂着一堆旧票。
+   */
+  deprecatedAreas: string[];
   /** 这个项目用哪种技能模式；null = 跟随工作区设置。 */
   skillsMode: SkillMode | null;
 }
@@ -67,6 +74,15 @@ const KEY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const AREA_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 /** GitHub 是 `owner/name`，GitLab 允许 `group/sub/name`：两段或三段，不许空段。 */
 const REPO_RE = /^[^/\s]+(\/[^/\s]+){1,2}$/;
+
+/**
+ * 项目键与模块键的判据，单独导出。
+ *
+ * 拼标签名（`area:<key>`、`role:<owner>`）的另一处也要用同一条规则；各抄一份迟早会分叉，
+ * 到时候「配置里能写、标签建不出来」这种毛病极难查。
+ */
+export const isProjectKey = (value: string): boolean => KEY_RE.test(value);
+export const isAreaKey = (value: string): boolean => AREA_RE.test(value);
 
 /**
  * 目录必须是工作区内的相对路径。
@@ -93,17 +109,18 @@ function keyFromDir(dir: string): string {
   return KEY_RE.test(slug) ? slug : "project";
 }
 
-function readAreas(raw: unknown, key: string, warnings: string[]): string[] {
+/** `fields` 只用来说明是哪一段写坏了：areas 与 deprecatedAreas 的判据是同一条。 */
+function readAreas(raw: unknown, key: string, fields: string, warnings: string[]): string[] {
   if (raw === undefined || raw === null) return [];
   if (!Array.isArray(raw)) {
-    warnings.push(`项目 ${key} 的 areas 不是数组，已忽略`);
+    warnings.push(`项目 ${key} 的 ${fields} 不是数组，已忽略`);
     return [];
   }
   const out: string[] = [];
   for (const item of raw) {
     const area = asString(item);
     if (!AREA_RE.test(area)) {
-      warnings.push(`项目 ${key} 的 modules 里「${area.slice(0, 40)}」不是合法模块键（小写字母数字连字符），已忽略`);
+      warnings.push(`项目 ${key} 的 ${fields} 里「${area.slice(0, 40)}」不是合法模块键（小写字母数字连字符），已忽略`);
       continue;
     }
     if (!out.includes(area)) out.push(area);
@@ -150,7 +167,15 @@ function parseProject(raw: unknown, index: number, warnings: string[]): ParseOne
 
   return {
     ok: true,
-    project: { key, dir, repo: repoRaw || null, owner, areas: readAreas(item.areas, key, warnings), skillsMode },
+    project: {
+      key,
+      dir,
+      repo: repoRaw || null,
+      owner,
+      areas: readAreas(item.areas, key, "areas", warnings),
+      deprecatedAreas: readAreas(item.deprecatedAreas, key, "deprecatedAreas", warnings),
+      skillsMode,
+    },
   };
 }
 
@@ -226,7 +251,9 @@ export function parseWorkspaceConfigValue(value: unknown): ConfigParse {
     ok: true,
     config: {
       version: 1,
-      projects: [{ key: keyFromDir(repoDir), dir: repoDir, repo: null, owner: null, areas: [], skillsMode: null }],
+      projects: [
+        { key: keyFromDir(repoDir), dir: repoDir, repo: null, owner: null, areas: [], deprecatedAreas: [], skillsMode: null },
+      ],
       // v1 没有任何「算不算一套」的声明：老文件不该凭空多出提示。
       coordination: null,
       warnings,
