@@ -7,6 +7,8 @@ import { Pressable, Text, View } from "react-native";
 import type { EnvCheckId } from "../../shared/env";
 import { envCheckRpc, envProjectsRpc } from "../../shared/env";
 import { logsClearRpc, logsRpc } from "../../shared/logs";
+import type { WorkspaceTemplatesOutput } from "../../shared/repo";
+import { workspaceTemplatesRpc } from "../../shared/repo";
 import { deckSettings } from "../../shared/settings";
 import { statusRpc } from "../../shared/status";
 import type { DeckKey } from "./i18n";
@@ -62,8 +64,11 @@ export function DiagnosticsView({
   const clearLogs = useRpc(logsClearRpc);
   const checkEnv = useRpc(envCheckRpc);
   const checkProjects = useRpc(envProjectsRpc);
+  const planTemplates = useRpc(workspaceTemplatesRpc);
   const settings = useSettings(deckSettings);
   const [authOpen, setAuthOpen] = useState(false);
+  /** 模板预览结果：非空时才有「写入」按钮——补模板会往别人仓库里加文件，一步到位太冒失。 */
+  const [templatePreview, setTemplatePreview] = useState<Extract<WorkspaceTemplatesOutput, { ok: true }> | null>(null);
 
   const status = useQuery({ queryKey: ["deck", "status"], queryFn: () => readStatus({}), staleTime: 30_000 });
   const logs = useQuery({ queryKey: ["deck", "logs"], queryFn: () => readLogs({ limit: 100 }), staleTime: 5_000 });
@@ -78,6 +83,33 @@ export function DiagnosticsView({
     queryFn: () => checkProjects({ workspaceDir: workspaceDir ?? "" }),
     enabled: Boolean(workspaceDir),
     staleTime: 15_000,
+  });
+
+  const templates = useMutation({
+    mutationFn: (apply: boolean) => planTemplates({ workspaceDir: workspaceDir ?? "", apply }),
+    onSuccess: (result, apply) => {
+      if (!result.ok) {
+        setTemplatePreview(null);
+        toast.error(t("workspace.templatesRefused", { detail: result.detail }));
+        return;
+      }
+      if (!apply) {
+        setTemplatePreview(result);
+        return;
+      }
+      setTemplatePreview(null);
+      const failedText = result.failed.map((row) => `${row.path}（${row.detail}）`).join("；");
+      if (result.written.length) {
+        toast.show(t("workspace.templatesWritten", { n: result.written.length }), { variant: "success" });
+      } else {
+        toast.show(t("workspace.templatesNothing"));
+      }
+      if (result.conflicts.length) toast.show(t("workspace.templatesConflicts", { n: result.conflicts.length }));
+      if (result.failed.length) {
+        toast.error(t("workspace.templatesFailed", { n: result.failed.length, detail: failedText }));
+      }
+    },
+    onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
   });
 
   const clear = useMutation({
@@ -298,6 +330,54 @@ export function DiagnosticsView({
                         {item}
                       </Text>
                     ))}
+                  </>
+                ) : null}
+                {projects.data.kind === "v2" ? (
+                  <>
+                    <View style={styles.checkHead}>
+                      <Text style={styles.checkName}>{t("workspace.templates")}</Text>
+                      <PixelButton
+                        skin={skin}
+                        label={t("workspace.templatesPreview")}
+                        accessibilityLabel={t("workspace.templates")}
+                        mini
+                        disabled={templates.isPending}
+                        onPress={() => templates.mutate(false)}
+                      />
+                      {templatePreview ? (
+                        <PixelButton
+                          skin={skin}
+                          label={t("workspace.templatesApply")}
+                          accessibilityLabel={t("workspace.templatesApply")}
+                          mini
+                          active
+                          disabled={templates.isPending}
+                          onPress={() => templates.mutate(true)}
+                        />
+                      ) : null}
+                    </View>
+                    {templatePreview ? (
+                      <>
+                        {templatePreview.projects.map((row) => (
+                          <Text key={row.key} style={styles.hint} numberOfLines={2}>
+                            {`${row.key}: ${t("workspace.templatesPlan", {
+                              write: row.write,
+                              present: row.present,
+                              conflicts: row.conflicts,
+                            })}${row.kinds.length ? ` · ${t("workspace.templatesKinds", { kinds: row.kinds.join("、") })}` : ""}`}
+                          </Text>
+                        ))}
+                        {templatePreview.notes.map((note) => (
+                          <Text key={note} style={styles.muted} numberOfLines={2}>
+                            {note}
+                          </Text>
+                        ))}
+                      </>
+                    ) : (
+                      <Text style={styles.hint} numberOfLines={2}>
+                        {t("workspace.templatesHint")}
+                      </Text>
+                    )}
                   </>
                 ) : null}
               </>

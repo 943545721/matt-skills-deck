@@ -64,9 +64,13 @@ test("按 areas 决定模板：一个项目可以命中多类，顺序与目录�
     "backend-api",
     "frontend-page",
   ]);
-  // 一个 area 同时像两类（授权 + 接口）时按「更具体的授权计费」归，两类的模板都写。
-  assert.deepEqual(templateKindsForProject({ owner: null, areas: ["auth-api"] }), ["backend-api", "license-billing"]);
+  // 一个 area 同时像两类时两类的模板都写。
+  assert.deepEqual(templateKindsForProject({ owner: null, areas: ["billing-api"] }), ["backend-api", "license-billing"]);
   assert.deepEqual(templateKindsForProject({ owner: "license", areas: ["billing-core"] }), ["license-billing"]);
+  // 普通业务模块归接口：给登录、订单写对账模板等于让人填错表。
+  assert.deepEqual(templateKindsForProject({ owner: null, areas: ["auth"] }), ["backend-api"]);
+  assert.deepEqual(templateKindsForProject({ owner: null, areas: ["orders", "account"] }), ["backend-api"]);
+  assert.deepEqual(templateKindsForProject({ owner: null, areas: ["cardkey"] }), ["license-billing"]);
 });
 
 test("areas 一个都没命中时按 owner 兜底；ops 没有对应模板", () => {

@@ -12,8 +12,10 @@ import { labelsColorsRpc, labelsListRpc, labelsSyncRpc } from "../../shared/labe
 import { mapRpc } from "../../shared/map.ts";
 import { logsClearRpc, logsRpc } from "../../shared/logs.ts";
 import { envCheckRpc, envProjectsRpc } from "../../shared/env.ts";
+import { workspaceTemplatesRpc } from "../../shared/repo.ts";
 import { envCheckHandler } from "./env.ts";
 import { envProjectsHandler } from "../env.ts";
+import { workspaceTemplatesHandler } from "./templates.ts";
 import { authCancelRpc, authStartRpc, authStatusRpc, authTokenRpc } from "../../shared/auth.ts";
 import { authCancelHandler, authStartHandler, authStatusHandler, authTokenHandler } from "./auth.ts";
 import {
@@ -174,6 +176,7 @@ export function registerAll(server: PluginServerContext): void {
   });
   server.handle(envCheckRpc, envCheckHandler);
   server.handle(envProjectsRpc, envProjectsHandler);
+  server.handle(workspaceTemplatesRpc, workspaceTemplatesHandler);
   server.handle(authStatusRpc, authStatusHandler);
   server.handle(authStartRpc, authStartHandler);
   server.handle(authCancelRpc, authCancelHandler);

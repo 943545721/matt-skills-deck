@@ -261,3 +261,50 @@ export const repoInfoRpc = defineRpc({
     }),
   ]),
 });
+
+// ---------------------------------------------------------------------------
+// issue 模板：按项目补齐 .github/ISSUE_TEMPLATE
+// ---------------------------------------------------------------------------
+
+/**
+ * 「补齐 issue 模板」：四个表单模板落到各项目仓库的 `.github/ISSUE_TEMPLATE/`。
+ *
+ * 只补缺失：已存在的文件一律不覆盖，内容不同就列成冲突交给人决定——模板是仓库里的
+ * 文件，被人手改过是常态，插件不该假装自己更懂。`apply: false` 只预览，
+ * 预览与执行走同一份计划，不会出现「预览说 3 个、实际写 5 个」。
+ */
+export const workspaceTemplatesRpc = defineRpc({
+  name: "deck.workspace.templates",
+  input: z.object({ workspaceDir: z.string().min(1), apply: z.boolean() }),
+  output: z.discriminatedUnion("ok", [
+    z.object({
+      ok: z.literal(true),
+      /** 每个项目规划出的模板种类与三态计数。 */
+      projects: z.array(
+        z.object({
+          key: z.string(),
+          kinds: z.array(z.string()),
+          write: z.number().int(),
+          present: z.number().int(),
+          conflicts: z.number().int(),
+          notes: z.array(z.string()),
+        }),
+      ),
+      /** 真正新建的文件（相对工作区的路径）；预览时为空。 */
+      written: z.array(z.string()),
+      /** 已存在且内容一致的。 */
+      present: z.array(z.string()),
+      /** 已存在但内容不同、没有覆盖的。 */
+      conflicts: z.array(z.string()),
+      failed: z.array(z.object({ path: z.string(), detail: z.string() })),
+      notes: z.array(z.string()),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["no-config", "v1", "invalid", "no-projects"]),
+      detail: z.string(),
+    }),
+  ]),
+});
+
+export type WorkspaceTemplatesOutput = z.infer<typeof workspaceTemplatesRpc.output>;

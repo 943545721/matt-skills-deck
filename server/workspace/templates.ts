@@ -116,17 +116,58 @@ export function issueTemplateText(kind: IssueTemplateKind): string {
  * area 键里的词 → 模板类型。
  *
  * 这不是 area 清单：清单来自项目配置（项目梳理技能产出、人确认后写入），
- * 这里只回答「这个名字更像哪一类工作」。顺序即优先级：同时像两类的（auth-api）
- * 按更具体的授权计费算。
+ * 这里只回答「这个名字更像哪一类工作」。命中多类就都写（`auth-api` 两类都像）。
+ *
+ * 词只收「这个词本身就说明工作性质」的：`auth` / `account` / `order` 都是普通业务模块，
+ * 归接口；授权计费只留 license / billing / payment / 卡密 / 额度这些真的在谈钱的词——
+ * 把 `auth` 算成计费，会给一个登录模块写出一份对账模板。
  */
 const AREA_KIND_HINTS: readonly { kind: IssueTemplateKind; words: readonly string[] }[] = [
   {
     kind: "license-billing",
-    words: ["license", "licence", "billing", "pay", "payment", "order", "subscription", "quota", "card", "auth", "account"],
+    words: [
+      "license",
+      "licenses",
+      "licence",
+      "licences",
+      "billing",
+      "bill",
+      "bills",
+      "pay",
+      "payment",
+      "payments",
+      "subscription",
+      "subscriptions",
+      "quota",
+      "quotas",
+      "cardkey",
+      "card-key",
+      "recharge",
+    ],
   },
   {
     kind: "backend-api",
-    words: ["api", "server", "backend", "service", "controller", "db", "database", "worker", "job", "task", "queue"],
+    words: [
+      "api",
+      "server",
+      "backend",
+      "service",
+      "controller",
+      "db",
+      "database",
+      "worker",
+      "job",
+      "task",
+      "queue",
+      "auth",
+      "account",
+      "accounts",
+      "session",
+      "user",
+      "users",
+      "order",
+      "orders",
+    ],
   },
   {
     kind: "frontend-page",
@@ -234,16 +275,16 @@ export interface TemplateWriteOutcome {
 }
 
 /**
- * 把模板写进各项目仓库。
+ * 各项目的模板计划（只读盘，不写盘）。
  *
- * 用 `wx` 打开：即便两个进程同时跑，第二个也写不进去——冲突进 `conflicts`，绝不覆盖。
- * 一个文件失败只记一条，继续写后面的，最后一起交出去。
+ * 单独抽出来是为了让界面能先「预览」再决定写：补模板会往别人的仓库里加文件，
+ * 预览与执行必须是同一份判断，否则预览说 3 个、实际写 5 个。
  */
-export async function writeIssueTemplates(
+export function planWorkspaceTemplates(
   workspaceDir: string,
-  projects: readonly WorkspaceProject[],
-): Promise<TemplateWriteOutcome> {
-  const plans = projects.map((project) =>
+  projects: readonly Pick<WorkspaceProject, "key" | "dir" | "owner" | "areas">[],
+): TemplatePlan[] {
+  return projects.map((project) =>
     planIssueTemplates({
       project,
       readFile: (relPath) => {
@@ -255,6 +296,19 @@ export async function writeIssueTemplates(
       },
     }),
   );
+}
+
+/**
+ * 把模板写进各项目仓库。
+ *
+ * 用 `wx` 打开：即便两个进程同时跑，第二个也写不进去——冲突进 `conflicts`，绝不覆盖。
+ * 一个文件失败只记一条，继续写后面的，最后一起交出去。
+ */
+export async function writeIssueTemplates(
+  workspaceDir: string,
+  projects: readonly WorkspaceProject[],
+): Promise<TemplateWriteOutcome> {
+  const plans = planWorkspaceTemplates(workspaceDir, projects);
 
   const written: string[] = [];
   const conflicts = plans.flatMap((plan) => plan.conflicts.map((row) => row.path));
