@@ -375,6 +375,14 @@ const EN = {
   "map.suggest.count": "{count} open item(s).",
   "map.suggest.number": "Ticket #{number}.",
 
+  "mapRef.title": "Cross-project references",
+  "mapRef.stateOpen": "open",
+  "mapRef.stateClosed": "closed",
+  "mapRef.stateUnknown": "unreadable",
+  "mapRef.open": "Open {ref}",
+  "mapRef.stale": "Reference broken: {ref}",
+  "mapRef.invalid": "Reference broken: {ref} — {detail}",
+
   "checks.title": "Environment checks",
   "checks.run": "Run checks",
   "checks.running": "Checking…",
@@ -514,6 +522,17 @@ const EN = {
   "shape.option.all-with-source": "Include all, but label each ticket with its source",
   "shape.acknowledged": "You already decided how these projects belong together; this hint will not show again.",
   "shape.dismiss": "Stop suggesting this",
+
+  "newIssue.project": "Project",
+  "newIssue.projectHint": "Multi-project workspace: pick the project first; the ticket lands in that project's repository.",
+  "newIssue.projectProblem": "This project has no writable repository ({problem}).",
+  "newIssue.pickProject": "Pick a project before submitting.",
+  "newIssue.area": "Module",
+  "newIssue.areaHint": "Modules come from this project's areas in .paseo-deck.json.",
+  "newIssue.pickArea": "Pick a module before submitting; without one the ticket carries no area label.",
+  "newIssue.noAreas": "This project lists no modules yet, so no area label is added.",
+  "newIssue.autoLabels": "Added automatically: {labels}",
+  "newIssue.noAutoLabels": "Nothing is added automatically for this project (no owner, no module picked).",
 } as const;
 
 export type PanelKey = keyof typeof EN;
@@ -909,6 +928,14 @@ const ZH: Record<PanelKey, string> = {
   "map.suggest.count": "还有 {count} 项未完成。",
   "map.suggest.number": "票 #{number}。",
 
+  "mapRef.title": "跨项目引用",
+  "mapRef.stateOpen": "开着",
+  "mapRef.stateClosed": "已关",
+  "mapRef.stateUnknown": "读不到",
+  "mapRef.open": "打开 {ref}",
+  "mapRef.stale": "引用失效：{ref}",
+  "mapRef.invalid": "引用失效：{ref} — {detail}",
+
   "checks.title": "环境检查",
   "checks.run": "运行检查",
   "checks.running": "检查中…",
@@ -1048,6 +1075,17 @@ const ZH: Record<PanelKey, string> = {
   "shape.option.all-with-source": "全部纳入，但每张票标出来源项目",
   "shape.acknowledged": "你已经定过这些项目怎么放一起，这条提示不会再出现。",
   "shape.dismiss": "不再提示",
+
+  "newIssue.project": "项目",
+  "newIssue.projectHint": "多项目工作区：先选项目，票会落在该项目自己的仓库里。",
+  "newIssue.projectProblem": "这个项目没有可写的仓库（{problem}）。",
+  "newIssue.pickProject": "先选一个项目再提交。",
+  "newIssue.area": "模块",
+  "newIssue.areaHint": "模块来自这个项目在 .paseo-deck.json 里登记的 areas。",
+  "newIssue.pickArea": "先选一个模块再提交；不选这张票就不会带 area 标签。",
+  "newIssue.noAreas": "这个项目还没登记模块，所以不会带 area 标签。",
+  "newIssue.autoLabels": "提交时会自动带上：{labels}",
+  "newIssue.noAutoLabels": "这个项目没有 owner、也没选模块：这次不会自动加标签。",
 };
 
 const TABLES = { en: EN, zh: ZH };

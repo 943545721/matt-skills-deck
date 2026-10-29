@@ -1,13 +1,15 @@
 import type { PluginTheme } from "@getpaseo/plugin";
-import { useRpc } from "@getpaseo/plugin/client";
+import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
 import { copyText, Modal, useToast } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { InvalidMapReference, MapReference } from "../../shared/map";
 import { mapRpc } from "../../shared/map";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import type { DeckKey } from "./i18n";
 import { PixelBanner, PixelButton, PixelCard, PixelHead, PixelModalBody, usePixel } from "./pixel";
+import { usePanelText } from "./panel/panelText";
 
 type Suggestion = { code: string; number?: number; count?: number };
 type RouteKind = "research" | "prototype" | "grilling" | "task";
@@ -325,6 +327,8 @@ export function MapModal({
                 )}
               </PixelCard>
 
+              <MapReferencesCard skin={skin} references={data.references} invalidRefs={data.invalidRefs} />
+
               <PixelCard skin={skin} style={styles.cardBody}>
                 <PixelHead skin={skin} style={styles.head}>
                   {t("map.decisions")}
@@ -385,5 +389,103 @@ export function MapModal({
         </PixelModalBody>
       </Modal.Content>
     </Modal>
+  );
+}
+
+/**
+ * 跨项目引用。
+ *
+ * 与全屏地图页同一份服务端结果，只是排版跟着这个弹窗走。
+ * 能点开的走外链（对方票不在本板）；读不到或写错的条目单独一行说清楚原因。
+ */
+/** 对方状态的小徽标：开着绿、已关灰、读不到红（读不到不能显示成「已解除」）。 */
+const mapRefTone = (skin: ReturnType<typeof usePixel>, state: MapReference["state"], stale: boolean) =>
+  state === "OPEN" && !stale
+    ? { backgroundColor: skin.colors.okBg, color: skin.colors.ok }
+    : state === "CLOSED" && !stale
+      ? { backgroundColor: skin.colors.stripe, color: skin.colors.ink2 }
+      : { backgroundColor: skin.colors.badBg, color: skin.colors.bad };
+
+type MapRefT = ReturnType<typeof usePanelText>["t"];
+
+function mapRefStateText(t: MapRefT, state: MapReference["state"]): string {
+  if (state === "OPEN") return t("mapRef.stateOpen");
+  if (state === "CLOSED") return t("mapRef.stateClosed");
+  return t("mapRef.stateUnknown");
+}
+
+function MapReferencesCard({
+  skin,
+  references,
+  invalidRefs,
+}: {
+  skin: ReturnType<typeof usePixel>;
+  references: readonly MapReference[];
+  invalidRefs: readonly InvalidMapReference[];
+}) {
+  const { t } = usePanelText();
+  if (references.length === 0 && invalidRefs.length === 0) return null;
+  return (
+    <PixelCard skin={skin} style={{ padding: 10, gap: 6 }}>
+      <PixelHead skin={skin}>{t("mapRef.title")}</PixelHead>
+      {references.map((reference) => (
+        <MapReferenceLine key={`${reference.repo}#${reference.number}`} skin={skin} reference={reference} />
+      ))}
+      {invalidRefs.map((item) => (
+        <Text key={item.text} style={skin.error}>
+          {t("mapRef.invalid", { ref: item.text, detail: item.detail })}
+        </Text>
+      ))}
+    </PixelCard>
+  );
+}
+
+/** 一条跨项目引用：能点开的走外链，读不到的单列一行「引用失效」。 */
+function MapReferenceLine({
+  skin,
+  reference,
+}: {
+  skin: ReturnType<typeof usePixel>;
+  reference: MapReference;
+}) {
+  const { t } = usePanelText();
+  const toast = useToast();
+  const label = `${reference.repo}#${reference.number}`;
+  return (
+    <View style={{ gap: 2 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {reference.url !== null && !reference.stale ? (
+          <Pressable
+            accessibilityRole="link"
+            accessibilityLabel={t("mapRef.open", { ref: label })}
+            onPress={() => {
+              const url = reference.url;
+              if (!url) return;
+              void openExternalUrl(url).catch((error: unknown) =>
+                toast.error(error instanceof Error ? error.message : String(error)),
+              );
+            }}
+          >
+            <Text style={{ color: skin.colors.link, fontSize: 12, fontFamily: skin.mono.fontFamily, fontWeight: "700" as const }}>
+              {label}
+            </Text>
+          </Pressable>
+        ) : (
+          <Text style={skin.statuslineText}>{label}</Text>
+        )}
+        <Text style={{ color: skin.colors.ink, fontSize: 12, lineHeight: 18 }}>{reference.title}</Text>
+        <Text
+          style={[
+            skin.chip,
+            skin.chipText,
+            { fontSize: 10, lineHeight: 16, paddingHorizontal: 6, borderWidth: 1, borderColor: skin.colors.line },
+            mapRefTone(skin, reference.state, reference.stale),
+          ]}
+        >
+          {mapRefStateText(t, reference.state)}
+        </Text>
+      </View>
+      {reference.stale ? <Text style={skin.error}>{t("mapRef.stale", { ref: label })}</Text> : null}
+    </View>
   );
 }

@@ -4,6 +4,7 @@ import { ScrollView, copyText, useToast } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
+import type { InvalidMapReference, MapReference } from "../../../shared/map";
 import { mapRpc } from "../../../shared/map";
 import { FAILURE_KEYS, staticText, useDeckText } from "../i18n";
 import { PixelBanner, PixelButton, PixelCard, PixelHead, usePixel } from "../pixel";
@@ -275,6 +276,8 @@ export function MapDetailView({
         </PixelCard>
       ) : null}
 
+      <MapReferences skin={skin} references={data.references} invalidRefs={data.invalidRefs} />
+
       {data.containerKind !== "spec" && data.map.destination ? (
         <PixelCard skin={skin}>
           <View style={styles.card}>
@@ -383,6 +386,115 @@ export function MapDetailView({
         </PixelCard>
       ) : null}
     </ScrollView>
+  );
+}
+
+/**
+ * 跨项目引用列表。
+ *
+ * 只负责显示与跳转：状态是服务端读完对方那张票给的（读不到就如实显示「读不到」）。
+ * 跨仓库的票用外链打开——本板没有对方仓库的票，假装能在这里打开只会点出一页空白。
+ * 引用失效的条目单独占一行说清楚，不混进正常列表里，也不静默消失。
+ */
+/** 引用链接的字样：与路线票号同一套（强调色、等宽、粗体）。 */
+const mapRefLinkStyle = (skin: ReturnType<typeof usePixel>) => ({
+  color: skin.colors.link,
+  fontSize: 12,
+  fontFamily: skin.mono.fontFamily,
+  fontWeight: "700" as const,
+  lineHeight: 18,
+});
+
+/** 对方状态的小徽标：开着绿、已关灰、读不到红（读不到不能显示成「已解除」）。 */
+const mapRefTone = (skin: ReturnType<typeof usePixel>, state: MapReference["state"], stale: boolean) =>
+  state === "OPEN" && !stale
+    ? { backgroundColor: skin.colors.okBg, color: skin.colors.ok }
+    : state === "CLOSED" && !stale
+      ? { backgroundColor: skin.colors.stripe, color: skin.colors.ink2 }
+      : { backgroundColor: skin.colors.badBg, color: skin.colors.bad };
+
+type MapRefT = ReturnType<typeof usePanelText>["t"];
+
+function mapRefStateText(t: MapRefT, state: MapReference["state"]): string {
+  if (state === "OPEN") return t("mapRef.stateOpen");
+  if (state === "CLOSED") return t("mapRef.stateClosed");
+  return t("mapRef.stateUnknown");
+}
+
+function MapReferences({
+  skin,
+  references,
+  invalidRefs,
+}: {
+  skin: ReturnType<typeof usePixel>;
+  references: readonly MapReference[];
+  invalidRefs: readonly InvalidMapReference[];
+}) {
+  const { t } = usePanelText();
+  if (references.length === 0 && invalidRefs.length === 0) return null;
+  return (
+    <PixelCard skin={skin}>
+      <View style={{ padding: 10, gap: 6 }}>
+        <PixelHead skin={skin}>{t("mapRef.title")}</PixelHead>
+        {references.map((reference) => (
+          <MapReferenceRow key={`${reference.repo}#${reference.number}`} skin={skin} reference={reference} />
+        ))}
+        {invalidRefs.map((item) => (
+          <Text key={item.text} style={skin.error}>
+            {t("mapRef.invalid", { ref: item.text, detail: item.detail })}
+          </Text>
+        ))}
+      </View>
+    </PixelCard>
+  );
+}
+
+/** 一条跨项目引用：能点开的点开（外链），读不到的单列一行「引用失效」。 */
+function MapReferenceRow({
+  skin,
+  reference,
+}: {
+  skin: ReturnType<typeof usePixel>;
+  reference: MapReference;
+}) {
+  const { t } = usePanelText();
+  const toast = useToast();
+  const label = `${reference.repo}#${reference.number}`;
+  const openable = reference.url !== null && !reference.stale;
+  return (
+    <View style={{ gap: 1 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+        {openable ? (
+          <Pressable
+            accessibilityRole="link"
+            accessibilityLabel={t("mapRef.open", { ref: label })}
+            onPress={() => {
+              const url = reference.url;
+              if (!url) return;
+              void openExternalUrl(url).catch((error: unknown) =>
+                toast.error(error instanceof Error ? error.message : String(error)),
+              );
+            }}
+          >
+            <Text style={mapRefLinkStyle(skin)}>{label}</Text>
+          </Pressable>
+        ) : (
+          <Text style={skin.statuslineText}>{label}</Text>
+        )}
+        <Text style={{ color: skin.colors.ink, fontSize: 12, lineHeight: 18 }}>{reference.title}</Text>
+        <Text
+          style={[
+            skin.chip,
+            skin.chipText,
+            { fontSize: 10, lineHeight: 16, paddingHorizontal: 6, borderWidth: 1, borderColor: skin.colors.line },
+            mapRefTone(skin, reference.state, reference.stale),
+          ]}
+        >
+          {mapRefStateText(t, reference.state)}
+        </Text>
+      </View>
+      {reference.stale ? <Text style={skin.error}>{t("mapRef.stale", { ref: label })}</Text> : null}
+    </View>
   );
 }
 

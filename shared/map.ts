@@ -67,6 +67,37 @@ const suggestion = z.object({
   count: z.number().int().optional(),
 });
 
+/**
+ * 地图页里的一条跨仓库引用。
+ *
+ * 数据来自读路径已经合并好的 `blockedBy`（正文隐藏区段 → 对方那张票），
+ * 地图页不在自己的契约里重新解析一遍正文。
+ *
+ * `state` 多一个 `UNKNOWN`：对方仓库或票号读不到时不知道开还是关，按「还堵着」算；
+ * `stale` 表示原因。`url` 在能拼出对方网页地址时给（配置里没有这个仓库时为 null）。
+ */
+const mapReference = z.object({
+  repo: z.string(),
+  number: z.number().int(),
+  title: z.string(),
+  state: z.enum(["OPEN", "CLOSED", "UNKNOWN"]),
+  stale: z.boolean(),
+  url: z.string().nullable(),
+});
+
+/**
+ * 认不出来的引用：写成配置里没有的项目键、缺票号之类。
+ *
+ * 单独一列而不是塞进 `references`：这些条目连「对方是哪张票」都定不下来，
+ * 没有可点的目标；但也不能静默丢掉——人要看到「哪一行写错了、错在哪」。
+ */
+const invalidReference = z.object({
+  /** 正文里原样写的引用，不加工。 */
+  text: z.string(),
+  /** 为什么认不出来（哪一项、为什么、能怎么写）。 */
+  detail: z.string(),
+});
+
 const failure = z.object({
   ok: z.literal(false),
   reason: z.enum([
@@ -112,7 +143,14 @@ export const mapRpc = defineRpc({
       groups: z.array(routeGroup),
       levels: z.array(routeLevel),
       suggestions: z.array(suggestion),
+      /** 这张图上（地图票自己 + 路线票）写到的跨仓库引用，按票号排序、去重。 */
+      references: z.array(mapReference),
+      /** 写法认不出来的引用，原样列出并说明原因。 */
+      invalidRefs: z.array(invalidReference),
     }),
     failure,
   ]),
 });
+
+export type MapReference = z.infer<typeof mapReference>;
+export type InvalidMapReference = z.infer<typeof invalidReference>;
