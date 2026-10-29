@@ -1,14 +1,17 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { openExternalUrl, useRpc } from "@getpaseo/plugin/client";
-import { FlatList, TextInput, useToast } from "@getpaseo/plugin/client/ui";
+import { FlatList, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { ItemKind, ListView, RepoSummary, SortKey } from "../../shared/issues";
 import { issuesListRpc } from "../../shared/issues";
 import type { RepoTargetSummary } from "../../shared/repo";
-import { repoInfoRpc, repoSelectRpc, repoTargetsRpc } from "../../shared/repo";
+import { repoInfoRpc, repoSelectRpc, repoTargetsRpc, workspaceProjectsRpc } from "../../shared/repo";
 import { freshnessLevel } from "../../shared/refresh";
+import { BoardFilters } from "./board/BoardFilters";
+import { ProjectStrip } from "./board/ProjectStrip";
+import { availableFacets, filterByFacets, projectRows } from "./board/projectRows";
 import type { DeckKey } from "./i18n";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import { GithubAuthModal } from "./GithubAuthModal";
@@ -96,11 +99,15 @@ export function BoardView({
   const [page, setPage] = useState(1);
   const [authOpen, setAuthOpen] = useState(false);
   const [repoFilter, setRepoFilter] = useState<string | null | undefined>(undefined);
+  // 模块与角色：只在有配置的项目清单时才有选项，单项目老用户看不到这两行。
+  const [area, setArea] = useState("");
+  const [role, setRole] = useState("");
 
   const listIssues = useRpc(issuesListRpc);
   const repoInfo = useRpc(repoInfoRpc);
   const repoListing = useRpc(repoTargetsRpc);
   const selectRepo = useRpc(repoSelectRpc);
+  const readProjects = useRpc(workspaceProjectsRpc);
   const queryClient = useQueryClient();
 
   const targets = useQuery({
@@ -111,6 +118,13 @@ export function BoardView({
   const defaultKey = targets.data?.ok ? targets.data.defaultKey : null;
   const truncated = targets.data?.ok ? targets.data.truncated : false;
   const activeRepo = repoFilter === undefined ? defaultKey : repoFilter;
+
+  // 项目清单只决定「怎么分组与怎么筛」；读不出来就是零个项目，界面退回仓库选择器。
+  const projects = useQuery({
+    queryKey: ["deck", "workspace-projects", workspaceDir],
+    queryFn: () => readProjects({ workspaceDir }),
+    staleTime: 60_000,
+  });
 
   // 仓库被删掉 / 改名后自动退回「全部」。
   useEffect(() => {
@@ -186,7 +200,7 @@ export function BoardView({
   // 筛选条件变化时关闭分页回到第一页；否则从「已关闭」切回「打开」还停在第 5 页。
   useEffect(() => {
     setPage(1);
-  }, [view, sort, label, activeRepo, search]);
+  }, [view, sort, label, activeRepo, search, area, role]);
 
   const styles = useMemo(
     () => ({
@@ -254,8 +268,6 @@ export function BoardView({
       hint: skin.hint,
       error: skin.error,
       actions: { flexDirection: "row" as const, gap: 8, flexWrap: "wrap" as const, alignItems: "center" as const },
-      labelInput: { ...skin.input, width: 130, paddingVertical: 3, paddingHorizontal: 6, fontSize: 11 },
-      searchInput: { ...skin.input, flexGrow: 1, minWidth: 160, paddingVertical: 3, paddingHorizontal: 6, fontSize: 11 },
       freshness: skin.statuslineText,
       kpiRow: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 16, alignItems: "flex-end" as const },
       kpi: { gap: 0 },
@@ -365,16 +377,18 @@ export function BoardView({
         : view === "closed"
           ? issues.filter((item) => item.state === "CLOSED")
           : issues.filter((item) => item.readiness === view);
+  // 模块 / 角色这两维同样只是选行，且在搜索之前做：搜索命中数要说的是「这一维筛完还剩几张」。
+  const facetRows = filterByFacets(viewRows, { area, role });
   const needle = search.trim().toLowerCase();
   const filtered = needle
-    ? viewRows.filter(
+    ? facetRows.filter(
         (item) =>
           item.title.toLowerCase().includes(needle) ||
           `#${item.number}`.includes(needle) ||
           String(item.number) === needle ||
           item.labels.some((itemLabel) => itemLabel.name.toLowerCase().includes(needle)),
       )
-    : viewRows;
+    : facetRows;
   const shownIssues = view === "closed" ? filtered.slice(0, page * PAGE_SIZE) : filtered;
   /** KPI 与列表来自同一窗口、同一 kind；不读服务端那份含 PR 的 counts。 */
   const windowCounts = {
@@ -384,6 +398,22 @@ export function BoardView({
     blocked: issues.filter((item) => item.readiness === "blocked").length,
     closed: issues.filter((item) => item.state === "CLOSED").length,
   };
+  /**
+   * 项目条与筛选项都从配置来。
+   *
+   * 项目数 ≤ 1 时整块不出：单项目工作区不该多出一行「只有一个项目的项目条」，
+   * 那是把多项目界面强加给老用户。筛选项只从配置的 areas / owner 取——选项是配置、
+   * 标签是事实，用标签反推选项会让筛出来的东西取决于这一窗口恰好拉到哪些票。
+   */
+  const configProjects = projects.data?.ok ? projects.data.projects : [];
+  const rows = projectRows(configProjects, issues, listedRepos);
+  const facets = availableFacets(configProjects);
+  const stripVisible = configProjects.length > 1;
+  const uncovered = stripVisible
+    ? listedRepos
+        .filter((entry) => !rows.some((row) => row.repoKey === entry.key))
+        .map((entry) => ({ key: entry.key, name: entry.name }))
+    : [];
   const hasLocalMore = view === "closed" && shownIssues.length < filtered.length;
   const freshness = fetchedAt ? freshnessLevel(Date.now() - Date.parse(fetchedAt)) : "fresh";
   const isBound = (repoKey: string, number: number): boolean =>
@@ -463,7 +493,17 @@ export function BoardView({
           />
         </View>
 
-        {repoCount > 1 ? (
+        {stripVisible ? (
+          // 有项目清单时用项目条代替纯仓库选择器：同一件事（筛到一个仓库），项目条多给了
+          // 角色与负载，两套控件并排只会让人多点一次。
+          <ProjectStrip
+            skin={skin}
+            rows={rows}
+            activeRepo={activeRepo}
+            onPick={(repoKey) => setRepoFilter(repoKey)}
+            uncovered={uncovered}
+          />
+        ) : repoCount > 1 ? (
           <View style={styles.repoPicker}>
             <View style={styles.pickerRow}>
               <PixelButton
@@ -610,42 +650,25 @@ export function BoardView({
         ))}
       </View>
 
-      <View style={styles.toolbar}>
-        <TextInput
-          accessibilityLabel={pt("board.searchPlaceholder")}
-          style={styles.searchInput}
-          value={search}
-          onChangeText={setSearch}
-          placeholder={pt("board.searchPlaceholder")}
-          placeholderTextColor={skin.colors.ink2}
-          autoCapitalize="none"
-        />
-        {search ? (
-          <PixelButton skin={skin} mini variant="ghost" label={pt("board.searchClear")} onPress={() => setSearch("")} />
-        ) : null}
-        <TextInput
-          accessibilityLabel={t("board.labelFilter")}
-          style={styles.labelInput}
-          value={labelDraft}
-          onChangeText={setLabelDraft}
-          onSubmitEditing={() => setLabel(labelDraft.trim())}
-          placeholder={t("board.labelFilterPlaceholder")}
-          placeholderTextColor={skin.colors.ink2}
-          autoCapitalize="none"
-        />
-        <PixelButton skin={skin} label={t("board.apply")} onPress={() => setLabel(labelDraft.trim())} />
-        {label ? (
-          <PixelButton
-            skin={skin}
-            variant="ghost"
-            label={t("board.clear", { label })}
-            onPress={() => {
-              setLabel("");
-              setLabelDraft("");
-            }}
-          />
-        ) : null}
-      </View>
+      <BoardFilters
+        skin={skin}
+        search={search}
+        onSearch={setSearch}
+        label={label}
+        labelDraft={labelDraft}
+        onLabelDraftChange={setLabelDraft}
+        onApplyLabel={() => setLabel(labelDraft.trim())}
+        onClearLabel={() => {
+          setLabel("");
+          setLabelDraft("");
+        }}
+        areas={facets.areas}
+        area={area}
+        onArea={setArea}
+        roles={facets.roles}
+        role={role}
+        onRole={setRole}
+      />
       {search ? (
         <Text style={styles.meta}>
           {pt("board.searchCount", { n: filtered.length })} · {pt("board.localQuery")}

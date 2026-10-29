@@ -2,7 +2,8 @@ import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { ItemKind } from "../../../shared/issues";
 import type { BoardIssue } from "../../../shared/issues";
-import { readableText } from "../format";
+import { issueAreas, issueRoles } from "../board/projectRows";
+import { blockerLabel, readableText } from "../format";
 import { useDeckText } from "../i18n";
 import type { PixelSkin } from "../pixel";
 import { PixelButton, PixelCard, PixelNum } from "../pixel";
@@ -59,6 +60,10 @@ export function TicketRow({
   );
 
   const neutral = { backgroundColor: skin.colors.stripe, color: skin.colors.ink2 };
+  // area / role 单独成徽标：它们是配置里的定位信息，混在几十个标签里等于没显示。
+  const areas = issueAreas(item);
+  const roles = issueRoles(item);
+  const otherLabels = item.labels.filter((label) => !/^(area|role):/.test(label.name));
   return (
     <View style={styles.item}>
       <PixelCard skin={skin}>
@@ -72,6 +77,16 @@ export function TicketRow({
             <PixelNum skin={skin}>#{item.number}</PixelNum>
             {item.containerKind ? <Text style={[styles.label, { backgroundColor: item.containerKind === "spec" ? "#dbeafe" : skin.colors.acc, color: item.containerKind === "spec" ? "#1e3a8a" : skin.colors.accInk }]}>{item.containerKind === "spec" ? "SPEC" : "MAP"}</Text> : null}
             {showRepo ? <Text style={[styles.label, neutral]}>{repoName ?? item.repoKey}</Text> : null}
+            {areas.map((area) => (
+              <Text key={`area-${area}`} style={[styles.label, { borderColor: skin.colors.acc, color: skin.colors.acc }]}>
+                {area}
+              </Text>
+            ))}
+            {roles.map((role) => (
+              <Text key={`role-${role}`} style={[styles.label, neutral]}>
+                {role}
+              </Text>
+            ))}
             {showRepo && readOnly ? <Text style={[styles.label, neutral]}>{t("board.repoReadOnly")}</Text> : null}
             {bound ? (
               <Text style={[styles.label, { backgroundColor: skin.colors.acc, color: skin.colors.accInk }]}>
@@ -97,9 +112,9 @@ export function TicketRow({
               {item.title}
             </Text>
           </View>
-          {item.labels.length ? (
+          {otherLabels.length ? (
             <View style={styles.labels}>
-              {item.labels.map((label) => (
+              {otherLabels.map((label) => (
                 <Text
                   key={label.name}
                   style={[styles.label, { backgroundColor: `#${label.color}`, color: readableText(label.color) }]}
@@ -114,7 +129,7 @@ export function TicketRow({
           ) : null}
           {item.blockedBy.length ? (
             <Text style={styles.meta}>
-              {t("board.blockedBy", { list: item.blockedBy.map((blocker) => `#${blocker.number}`).join("、") })}
+              {t("board.blockedBy", { list: item.blockedBy.map(blockerLabel).join("、") })}
             </Text>
           ) : null}
         </Pressable>

@@ -94,6 +94,19 @@ export function IssueDetailView({
   });
 
   const target = targets.data?.ok ? targets.data.repos.find((item) => item.key === repoKey) : undefined;
+
+  /**
+   * 跨仓库阻塞项的外部链接。
+   *
+   * 障碍项自己只有 `owner/repo#n`，没有宿主信息；宿主从工作区的仓库列表里查。
+   * 查不到（对方仓库不在本工作区）就返回 null——宁可只显示引用，也不猜一个
+   * 可能不存在的地址：点开 404 比点不开更让人怀疑数据。
+   */
+  const crossRepoUrl = (repo: string, issueNumber: number): string | null => {
+    const repos = targets.data?.ok ? targets.data.repos : [];
+    const found = repos.find((item) => item.key === repo || `${item.owner}/${item.name}` === repo);
+    return found?.webUrl ? `${found.webUrl}/issues/${issueNumber}` : null;
+  };
   const issue = detail.data?.ok ? detail.data.issue : null;
   const isPullRequest = kind === "pull-request";
   const readOnly = isPullRequest || Boolean(target?.readOnly);
@@ -303,6 +316,10 @@ export function IssueDetailView({
   const childrenTotal = detail.data.childrenTotal ?? children.length;
   const blocking = detail.data.blocking ?? [];
   const blockingTruncated = detail.data.blockingTruncated === true;
+  // 原生边（本仓库、远端认得的）与正文固定行里的跨仓库引用分列：
+  // 前者点开是同一个板上的票，后者只能开外链，混在一列会让人以为都能在本板里看。
+  const nativeBlockers = issue.blockedBy.filter((blocker) => blocker.source !== "body");
+  const crossBlockers = issue.blockedBy.filter((blocker) => blocker.source === "body");
   const busy =
     commentMutation.isPending || labelsMutation.isPending || assignMutation.isPending || closeMutation.isPending || reopenMutation.isPending;
 
@@ -370,7 +387,7 @@ export function IssueDetailView({
         <PixelCard skin={skin}>
           <View style={styles.card}>
             <PixelHead skin={skin}>{t("issue.blockedBy")}</PixelHead>
-            {issue.blockedBy.map((blocker) => (
+            {nativeBlockers.map((blocker) => (
               <Pressable
                 key={`${blocker.kind}-${blocker.number}`}
                 accessibilityRole="button"
@@ -382,6 +399,39 @@ export function IssueDetailView({
                 </Text>
               </Pressable>
             ))}
+            {crossBlockers.length ? (
+              <View style={styles.blocker}>
+                <Text style={styles.hint}>{text.t("issue.crossRepoTitle")}</Text>
+                {crossBlockers.map((blocker) => {
+                  const url = blocker.repo ? crossRepoUrl(blocker.repo, blocker.number) : null;
+                  const ref = `${blocker.repo ?? ""}#${blocker.number}`;
+                  const stateText =
+                    blocker.state === "OPEN"
+                      ? t("issue.stateOpen")
+                      : blocker.state === "CLOSED"
+                        ? t("issue.stateClosed")
+                        : text.t("issue.blockerUnreadable");
+                  return (
+                    <Pressable
+                      key={`cross-${ref}`}
+                      accessibilityRole={url ? "link" : "text"}
+                      accessibilityLabel={text.t("issue.openCrossRepo", { ref })}
+                      disabled={!url}
+                      onPress={() => {
+                        if (!url) return;
+                        void openExternalUrl(url).catch(() => toast.error(text.t("issue.openCrossRepoFailed")));
+                      }}
+                    >
+                      <Text style={styles.meta}>
+                        {ref} {blocker.title} · {stateText}
+                        {blocker.stale ? ` · ${text.t("issue.blockerStale")}` : ""}
+                        {url ? " ↗" : ""}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            ) : null}
           </View>
         </PixelCard>
       ) : null}

@@ -12,7 +12,7 @@ import {
   issuesSetLabelsRpc,
   issuesStateRpc,
 } from "../../shared/issues";
-import { readableText } from "./format";
+import { blockerLabel, readableText } from "./format";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import { PixelBanner, PixelButton, PixelModalBody, usePixel } from "./pixel";
 
@@ -287,26 +287,38 @@ export function IssueModal({
               {issue.blockedBy.length ? (
                 <View style={styles.blocker}>
                   <Text style={styles.meta}>{t("issue.blockedByTitle")}</Text>
-                  {issue.blockedBy.map((blocker) => (
-                    <Pressable
-                      key={`${blocker.kind}-${blocker.number}`}
-                      accessibilityRole="button"
-                      accessibilityLabel={t("issue.openBlocker", { number: blocker.number })}
-                      onPress={() => onOpenRelated?.(blocker.number)}
-                    >
-                      <Text
-                        style={[
-                          styles.label,
-                          {
-                            backgroundColor: blocker.state === "OPEN" ? skin.colors.badBg : skin.colors.stripe,
-                            color: blocker.state === "OPEN" ? skin.colors.bad : skin.colors.ink2,
-                          },
-                        ]}
+                  {issue.blockedBy.map((blocker) => {
+                    // 跨仓库的阻塞项只写了一个引用，本板打不开：标出仓库与「读不到」，
+                    // 不给一个点了没反应的按钮。
+                    const cross = blocker.source === "body";
+                    const label = cross ? blockerLabel(blocker) : `#${blocker.number}`;
+                    const unreadable = blocker.state !== "OPEN" && blocker.state !== "CLOSED";
+                    return (
+                      <Pressable
+                        key={`${blocker.kind}-${blocker.number}`}
+                        accessibilityRole={cross ? "text" : "button"}
+                        accessibilityLabel={t("issue.openBlocker", { number: blocker.number })}
+                        disabled={cross}
+                        onPress={() => {
+                          if (!cross) onOpenRelated?.(blocker.number);
+                        }}
                       >
-                        #{blocker.number} {blocker.title}
-                      </Text>
-                    </Pressable>
-                  ))}
+                        <Text
+                          style={[
+                            styles.label,
+                            {
+                              backgroundColor: blocker.state === "OPEN" ? skin.colors.badBg : skin.colors.stripe,
+                              color: blocker.state === "OPEN" ? skin.colors.bad : skin.colors.ink2,
+                            },
+                          ]}
+                        >
+                          {label} {blocker.title}
+                          {unreadable ? ` · ${t("issue.blockerUnreadable")}` : ""}
+                          {blocker.stale ? ` · ${t("issue.blockerStale")}` : ""}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
                 </View>
               ) : null}
 
