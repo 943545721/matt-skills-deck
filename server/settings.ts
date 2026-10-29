@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS: DeckSettings = {
   refreshSeconds: 60,
   debugLogging: true,
   appearance: "auto",
+  skillsMode: "per-project",
 };
 
 let current: DeckSettings = DEFAULT_SETTINGS;

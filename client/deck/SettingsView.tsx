@@ -5,6 +5,8 @@ import { useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import { APPEARANCES, deckSettings } from "../../shared/settings";
 import type { Appearance } from "../../shared/settings";
+import { SKILL_MODES } from "../../shared/workspace-projects";
+import type { SkillMode } from "../../shared/workspace-projects";
 import { updateCheckRpc } from "../../shared/update";
 import { workspaceBindingRpc } from "../../shared/workspace-binding";
 import type { WorkspaceBindingInput, WorkspaceBindingOutput } from "../../shared/workspace-binding";
@@ -89,6 +91,7 @@ export function DeckSettingsScreen({ theme, layout }: PluginSurfaceProps) {
   const saveBackend = (value: (typeof BACKENDS)[number]) => persist({ backend: value });
   const saveRefresh = (value: string) => persist({ refreshSeconds: Number(value) });
   const saveAppearance = (value: Appearance) => persist({ appearance: value });
+  const saveSkillsMode = (value: SkillMode) => persist({ skillsMode: value });
 
   const runUpdateCheck = () => {
     setUpdating(true);
@@ -137,6 +140,18 @@ export function DeckSettingsScreen({ theme, layout }: PluginSurfaceProps) {
           value={state.values.backend}
           options={BACKENDS.map((value) => ({ value, label: t(BACKEND_LABEL[value]) }))}
           onValueChange={saveBackend}
+          disabled={state.saving}
+        />
+      </SettingsSection>
+
+      {/* 技能模式放在数据源后面：它决定技能页那两个按钮怎么写盘，跟后端是同级的设置。 */}
+      <SettingsSection title={t("skillsMode.section")} info={<Text style={styles.status}>{t("skillsMode.hint")}</Text>}>
+        <SettingsSelect<SkillMode>
+          label={t("skillsMode.label")}
+          hint={t("skillsMode.selectHint")}
+          value={state.values.skillsMode}
+          options={SKILL_MODES.map((value) => ({ value, label: t(SKILL_MODE_LABEL[value]) }))}
+          onValueChange={saveSkillsMode}
           disabled={state.saving}
         />
       </SettingsSection>
@@ -257,6 +272,11 @@ const BACKEND_LABEL = {
   github: "settings.backendGithub",
   gitlab: "settings.backendGitlab",
   local: "settings.backendLocal",
+} as const;
+
+const SKILL_MODE_LABEL = {
+  unified: "skillsMode.unified",
+  "per-project": "skillsMode.perProject",
 } as const;
 
 const APPEARANCE_LABEL = {

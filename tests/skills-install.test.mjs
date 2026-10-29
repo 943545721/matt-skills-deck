@@ -6,6 +6,11 @@ import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { listBundledSkills } from "../server/skills/catalog.ts";
 import { installSkills, removeSkills, skillDirs, skillStateAt } from "../server/skills/install.ts";
+import { installWorkspaceSkills } from "../server/skills/workspace.ts";
+import { installSkillsHandler, listSkills } from "../server/rpc/skills.ts";
+import { DEFAULT_SETTINGS, setSettingsForTest } from "../server/settings.ts";
+import { skillsInstallRpc, skillsListRpc } from "../shared/skills.ts";
+import { makeSkill, snapshotTree, tempRoot, workspaceWith, writeLocalSkill } from "./helpers/skill-fixtures.mjs";
 
 /**
  * 技能装进**当前项目**，不装到别处。
@@ -15,6 +20,8 @@ import { installSkills, removeSkills, skillDirs, skillStateAt } from "../server/
  * 2. 工作区目录不合法就报错，不猜落到哪儿；
  * 3. 卸载只删我们自己写的那一份，人改过的文件原样留着；
  * 4. 状态按目录单独算，界面才不会拿一个「已安装」糊过去。
+ *
+ * 后面一半是多项目工作区的两种模式：统一模式（备份→清理→装）与各自模式（只补缺失）。
  */
 
 const pluginDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -147,4 +154,221 @@ test("显式覆盖：内容不同的那份被插件版本替换，另一侧不�
   assert.deepEqual(result.conflicts, []);
   assert.deepEqual(result.written, [skill.id]);
   assert.equal(readFileSync(file, "utf8"), readFileSync(skill.file, "utf8"));
+});
+
+/* ───────────────────────── 多项目工作区 ───────────────────────── */
+
+/** 夹具自己建的临时目录也一并登记，`after` 统一清掉。 */
+const track = (dir) => {
+  tempDirs.push(dir);
+  return dir;
+};
+
+const fixtureSkills = () => {
+  const source = track(tempRoot("src"));
+  return [
+    makeSkill(source, "ste", { "references/terminology.md": "术语表\n", "examples/result-report.md": "报告\n" }),
+    makeSkill(source, "tdd"),
+  ];
+};
+
+const clientDir = (projectDir, client) => path.join(projectDir, client, "skills");
+
+test("统一模式：2 个项目 × 2 个目录装齐，ste 的 references 一起到", async () => {
+  const workspace = track(workspaceWith([{ key: "web", dir: "apps/web" }, { key: "api", dir: "apps/api" }]));
+  const skills = fixtureSkills();
+
+  const report = await installWorkspaceSkills({ skills, workspaceDir: workspace, workspaceMode: "unified" });
+  assert.equal(report.workspaceMode, "unified");
+  assert.deepEqual(report.projects.map((project) => project.key), ["web", "api"]);
+  assert.deepEqual(report.written, ["ste", "tdd"]);
+  assert.deepEqual(report.conflicts, []);
+  assert.equal(report.targets.length, 4, "2 个项目 × 2 个目录");
+
+  for (const project of report.projects) {
+    assert.equal(project.status, "ok");
+    assert.equal(project.mode, "unified");
+    assert.equal(project.modeSource, "workspace");
+    assert.equal(project.cells.length, 2);
+    for (const cell of project.cells) {
+      assert.deepEqual(cell.written, ["ste", "tdd"]);
+      assert.deepEqual(cell.conflicts, []);
+      assert.deepEqual(cell.cleared, []);
+    }
+  }
+
+  for (const dir of ["apps/web", "apps/api"]) {
+    for (const client of [".claude", ".agents"]) {
+      const root = clientDir(path.join(workspace, dir), client);
+      assert.equal(readFileSync(path.join(root, "ste", "references", "terminology.md"), "utf8"), "术语表\n");
+      assert.equal(readFileSync(path.join(root, "ste", "examples", "result-report.md"), "utf8"), "报告\n");
+      assert.equal(readFileSync(path.join(root, "tdd", "SKILL.md"), "utf8"), readFileSync(skills[1].file, "utf8"));
+    }
+  }
+});
+
+test("统一模式：先整份备份再清理，备份能还原清理前的全部内容，.claude 其它内容不碰", async () => {
+  const projectDir = path.join("apps", "web");
+  const workspace = track(workspaceWith([{ key: "web", dir: projectDir }]));
+  const project = path.join(workspace, projectDir);
+  const claude = clientDir(project, ".claude");
+  const codex = clientDir(project, ".agents");
+
+  writeLocalSkill(project, ".claude", "mine", "自写技能", { "references/own.md": "自己的参考\n" });
+  writeLocalSkill(project, ".agents", "other", "另一份自写技能");
+  mkdirSync(path.join(project, ".claude", "agents"), { recursive: true });
+  writeFileSync(path.join(project, ".claude", "agents", "reviewer.md"), "agent 定义", "utf8");
+
+  const beforeClaude = snapshotTree(claude);
+  const beforeCodex = snapshotTree(codex);
+
+  const report = await installWorkspaceSkills({
+    skills: fixtureSkills(),
+    workspaceDir: workspace,
+    workspaceMode: "unified",
+    stamp: "2026-10-30T00-00-00-000Z",
+  });
+
+  const row = report.projects[0];
+  assert.equal(row.status, "ok");
+  assert.equal(row.backupDir, path.join(workspace, ".deck", "backups", "skills", "web", "2026-10-30T00-00-00-000Z"));
+
+  // 备份是整份复制：清理前的每一个文件都在，内容逐字节一致。
+  assert.deepEqual(snapshotTree(path.join(row.backupDir, "claude", "skills")), beforeClaude);
+  assert.deepEqual(snapshotTree(path.join(row.backupDir, "codex", "skills")), beforeCodex);
+
+  const manifest = JSON.parse(readFileSync(path.join(row.backupDir, "manifest.json"), "utf8"));
+  assert.equal(manifest.projectKey, "web");
+  assert.equal(manifest.projectDir, project);
+
+  // 清理只清这两份目录本身，`.claude/agents` 不动。
+  assert.equal(existsSync(path.join(claude, "mine")), false);
+  assert.equal(existsSync(path.join(codex, "other")), false);
+  assert.equal(readFileSync(path.join(project, ".claude", "agents", "reviewer.md"), "utf8"), "agent 定义");
+
+  const claudeCell = row.cells.find((cell) => cell.client === "claude");
+  assert.deepEqual(claudeCell.cleared, ["mine"]);
+});
+
+test("统一模式：备份失败就停手，不清空、不写入，别的项目继续", async () => {
+  const workspace = track(workspaceWith([{ key: "web", dir: "apps/web" }, { key: "api", dir: "apps/api" }]));
+  const web = path.join(workspace, "apps", "web");
+  writeLocalSkill(web, ".claude", "mine", "自写技能");
+
+  // 让 web 这个项目的备份目录位置被一个文件占住：复制一定失败，但别的项目不受影响。
+  const skillsBackups = path.join(workspace, ".deck", "backups", "skills");
+  mkdirSync(skillsBackups, { recursive: true });
+  writeFileSync(path.join(skillsBackups, "web"), "占位", "utf8");
+
+  const report = await installWorkspaceSkills({ skills: fixtureSkills(), workspaceDir: workspace, workspaceMode: "unified" });
+
+  const failed = report.projects.find((row) => row.key === "web");
+  assert.equal(failed.status, "failed");
+  assert.match(failed.reason, /备份/);
+  assert.equal(failed.backupDir, null);
+  assert.deepEqual(failed.cells, []);
+  assert.equal(readFileSync(path.join(clientDir(web, ".claude"), "mine", "SKILL.md"), "utf8"), "自写技能", "备份失败不许清空");
+  assert.equal(existsSync(path.join(clientDir(web, ".claude"), "ste")), false, "备份失败不许写入");
+
+  const ok = report.projects.find((row) => row.key === "api");
+  assert.equal(ok.status, "ok");
+  assert.ok(existsSync(path.join(clientDir(path.join(workspace, "apps", "api"), ".claude"), "ste", "SKILL.md")));
+});
+
+test("各自模式：只补缺失，已有文件一个都不删，冲突逐条列出", async () => {
+  const workspace = track(workspaceWith([{ key: "web", dir: "apps/web" }, { key: "api", dir: "apps/api" }]));
+  const web = path.join(workspace, "apps", "web");
+  const api = path.join(workspace, "apps", "api");
+  const mine = writeLocalSkill(web, ".claude", "mine", "自写技能");
+  const stale = writeLocalSkill(web, ".claude", "ste", "别人装的同名技能");
+
+  const report = await installWorkspaceSkills({ skills: fixtureSkills(), workspaceDir: workspace, workspaceMode: "per-project" });
+
+  const webRow = report.projects.find((row) => row.key === "web");
+  assert.equal(webRow.status, "ok");
+  assert.equal(webRow.mode, "per-project");
+  assert.equal(webRow.backupDir, null, "各自模式不建备份");
+  const webClaude = webRow.cells.find((cell) => cell.client === "claude");
+  assert.deepEqual(webClaude.conflicts, ["ste"]);
+  assert.deepEqual(webClaude.written, ["tdd"]);
+  assert.deepEqual(webClaude.cleared, []);
+  assert.equal(readFileSync(path.join(mine, "SKILL.md"), "utf8"), "自写技能", "自写技能不许删");
+  assert.equal(readFileSync(path.join(stale, "SKILL.md"), "utf8"), "别人装的同名技能", "冲突不许覆盖");
+  assert.equal(existsSync(path.join(workspace, ".deck")), false, "各自模式不碰 .deck");
+
+  const apiRow = report.projects.find((row) => row.key === "api");
+  assert.deepEqual(
+    apiRow.cells.map((cell) => cell.written),
+    [["ste", "tdd"], ["ste", "tdd"]],
+    "没冲突的项目照装",
+  );
+  assert.ok(existsSync(path.join(clientDir(api, ".agents"), "tdd", "SKILL.md")));
+});
+
+test("项目目录不存在：跳过并报出原因，其它项目照装", async () => {
+  const workspace = track(workspaceWith([{ key: "web", dir: "apps/web" }, { key: "ghost", dir: "apps/ghost" }]));
+  rmSync(path.join(workspace, "apps", "ghost"), { recursive: true, force: true });
+
+  const report = await installWorkspaceSkills({ skills: fixtureSkills(), workspaceDir: workspace, workspaceMode: "unified" });
+
+  const ghost = report.projects.find((row) => row.key === "ghost");
+  assert.equal(ghost.status, "skipped");
+  assert.match(ghost.reason, /不存在/);
+  assert.deepEqual(ghost.cells, []);
+  assert.equal(report.projects.find((row) => row.key === "web").status, "ok");
+  assert.equal(report.targets.length, 2, "只有 web 的两处");
+});
+
+test("模式优先级：项目自己的 skillsMode 压过工作区设置", async () => {
+  const workspace = track(
+    workspaceWith([
+      { key: "web", dir: "apps/web", skillsMode: "unified" },
+      { key: "api", dir: "apps/api" },
+    ]),
+  );
+
+  const report = await installWorkspaceSkills({ skills: fixtureSkills(), workspaceDir: workspace, workspaceMode: "per-project" });
+
+  const web = report.projects.find((row) => row.key === "web");
+  const api = report.projects.find((row) => row.key === "api");
+  assert.equal(web.mode, "unified");
+  assert.equal(web.modeSource, "project");
+  assert.equal(api.mode, "per-project");
+  assert.equal(api.modeSource, "workspace");
+});
+
+test("没有项目清单：等同只有根项目，默认各自模式，不删任何东西", async () => {
+  const workspace = track(tempRoot("bare"));
+  writeLocalSkill(workspace, ".claude", "mine", "自写技能");
+  setSettingsForTest(DEFAULT_SETTINGS);
+  try {
+    const report = await installWorkspaceSkills({ skills: fixtureSkills(), workspaceDir: workspace });
+    assert.equal(report.workspaceMode, "per-project", "默认值就是 per-project");
+    assert.equal(report.projects.length, 1);
+    assert.equal(report.projects[0].dir, workspace);
+    assert.equal(report.targets.length, 2);
+    assert.equal(readFileSync(path.join(clientDir(workspace, ".claude"), "mine", "SKILL.md"), "utf8"), "自写技能");
+    assert.equal(existsSync(path.join(workspace, ".deck")), false);
+  } finally {
+    setSettingsForTest(DEFAULT_SETTINGS);
+  }
+});
+
+test("RPC 契约：安装与列表的输出都能被共享 schema 原样解析", async () => {
+  const workspace = track(workspaceWith([{ key: "web", dir: "apps/web" }]));
+
+  const installed = await installSkillsHandler({ workspaceDir: workspace, lang: "zh" });
+  assert.deepEqual(skillsInstallRpc.output.parse(installed), installed);
+  assert.equal(installed.workspaceMode, "per-project");
+  assert.equal(installed.projects.length, 1);
+  assert.ok(installed.written.length > 0, "没点名就是全装");
+  assert.equal(installed.targets.length, 2);
+
+  const listed = await listSkills({ workspaceDir: workspace, lang: "zh" });
+  assert.deepEqual(skillsListRpc.output.parse(listed), listed);
+  const row = listed.projects[0];
+  assert.ok(row);
+  for (const cell of row.cells) {
+    assert.equal(cell.status, "current", `${cell.client} 装完就该是一致`);
+  }
 });

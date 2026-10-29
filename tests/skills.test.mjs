@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { listBundledSkills, readBundledSkill } from "../server/skills/catalog.ts";
 import { parseSkillFrontmatter } from "../server/skills/frontmatter.ts";
 import { installSkills, skillDirs, skillState } from "../server/skills/install.ts";
+import { installWorkspaceSkills, skillsMatrix } from "../server/skills/workspace.ts";
+import { makeSkill, tempRoot, workspaceWith, writeLocalSkill } from "./helpers/skill-fixtures.mjs";
 
 const pluginDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDirs = [];
@@ -34,10 +36,10 @@ test("frontmatter 能读出 name 与 description，缺字段时返回 null", () 
   assert.equal(parseSkillFrontmatter("---\nname: x\n---\n"), null);
 });
 
-test("随包的 30 个技能在中英两侧都齐，且目录名与 frontmatter 一致", () => {
+test("随包的 31 个技能在中英两侧都齐，且目录名与 frontmatter 一致", () => {
   for (const lang of ["en", "zh"]) {
     const skills = listBundledSkills(pluginDir, lang);
-    assert.equal(skills.length, 30, `${lang} 侧技能数量应为 30，实际 ${skills.length}`);
+    assert.equal(skills.length, 31, `${lang} 侧技能数量应为 31，实际 ${skills.length}`);
     for (const skill of skills) {
       assert.equal(skill.id, skill.name, `${lang}/${skill.id} 的 frontmatter name 与目录名不一致`);
       assert.match(skill.id, /^[a-z0-9][a-z0-9-]*$/);
@@ -101,4 +103,128 @@ test("工作区目录必须是已存在的绝对路径", () => {
   assert.throws(() => installSkills({ skills, workspaceDir: "rel/path" }), /绝对路径/);
   assert.throws(() => installSkills({ skills, workspaceDir: "/不存在的目录-xyz" }), /不存在/);
   assert.throws(() => skillDirs(""), /绝对路径/);
+});
+
+/* ───────────────────────── 技能矩阵（项目 × 客户端）───────────────────────── */
+
+const trackDir = (dir) => {
+  tempDirs.push(dir);
+  return dir;
+};
+
+const matrixFixtures = () => {
+  const source = trackDir(tempRoot("src"));
+  return [makeSkill(source, "ste", { "references/terminology.md": "术语表\n" }), makeSkill(source, "tdd")];
+};
+
+const cellOf = (row, client) => {
+  const cell = row.cells.find((entry) => entry.client === client);
+  assert.ok(cell, `${row.key} 缺 ${client} 这一格`);
+  return cell;
+};
+
+test("矩阵：一行一个项目、一列一个客户端，装齐的一致，没装的写未安装", async () => {
+  const workspace = trackDir(workspaceWith([{ key: "web", dir: "apps/web" }, { key: "api", dir: "apps/api" }]));
+  const skills = matrixFixtures();
+  // web 装齐，api 一份都没装。
+  await installWorkspaceSkills({ skills, workspaceDir: path.join(workspace, "apps", "web"), workspaceMode: "per-project" });
+
+  const matrix = await skillsMatrix({ skills, workspaceDir: workspace, workspaceMode: "per-project" });
+  assert.equal(matrix.workspaceMode, "per-project");
+  assert.deepEqual(matrix.rows.map((row) => row.key), ["web", "api"]);
+
+  const web = matrix.rows[0];
+  assert.equal(web.mode, "per-project");
+  assert.equal(web.modeSource, "workspace");
+  assert.equal(web.exists, true);
+  assert.deepEqual(web.cells.map((cell) => cell.client), ["claude", "codex"]);
+  for (const client of ["claude", "codex"]) {
+    const cell = cellOf(web, client);
+    assert.equal(cell.status, "current");
+    assert.equal(cell.current, 2);
+    assert.equal(cell.total, 2);
+    assert.deepEqual(cell.differs, []);
+    assert.deepEqual(cell.missing, []);
+  }
+
+  const api = matrix.rows[1];
+  for (const client of ["claude", "codex"]) {
+    const cell = cellOf(api, client);
+    assert.equal(cell.status, "none", "一份都没有就是「未安装」，不留空白");
+    assert.equal(cell.current, 0);
+    assert.deepEqual(cell.missing, ["ste", "tdd"]);
+  }
+});
+
+test("矩阵：改过模板后一眼看出哪个项目过期、哪个项目缺技能", async () => {
+  const workspace = trackDir(workspaceWith([{ key: "web", dir: "apps/web" }, { key: "api", dir: "apps/api" }]));
+  const skills = matrixFixtures();
+  const webDir = path.join(workspace, "apps", "web");
+  const apiDir = path.join(workspace, "apps", "api");
+
+  await installWorkspaceSkills({ skills, workspaceDir: webDir, workspaceMode: "per-project" });
+  // api 只装了 ste：另一份 tdd 缺着。
+  await installWorkspaceSkills({ skills: [skills[0]], workspaceDir: apiDir, workspaceMode: "per-project" });
+  // web 的 Claude 那份被人改回旧版本：过期。
+  writeFileSync(path.join(webDir, ".claude", "skills", "ste", "SKILL.md"), "旧版本", "utf8");
+
+  const matrix = await skillsMatrix({ skills, workspaceDir: workspace, workspaceMode: "per-project" });
+  const web = matrix.rows[0];
+  const stale = cellOf(web, "claude");
+  assert.equal(stale.status, "differs");
+  assert.deepEqual(stale.differs, ["ste"]);
+  assert.equal(cellOf(web, "codex").status, "current", "另一侧没被改，仍是一致");
+
+  const api = matrix.rows[1];
+  const partial = cellOf(api, "claude");
+  assert.equal(partial.status, "missing");
+  assert.deepEqual(partial.missing, ["tdd"]);
+  assert.equal(partial.current, 1);
+});
+
+test("矩阵：统一模式全部更新后所有格回到 current，并留下可还原的备份", async () => {
+  const workspace = trackDir(workspaceWith([{ key: "web", dir: "apps/web" }, { key: "api", dir: "apps/api" }]));
+  const skills = matrixFixtures();
+  const webDir = path.join(workspace, "apps", "web");
+  await installWorkspaceSkills({ skills, workspaceDir: webDir, workspaceMode: "per-project" });
+  writeFileSync(path.join(webDir, ".claude", "skills", "ste", "SKILL.md"), "旧版本", "utf8");
+  writeLocalSkill(webDir, ".claude", "mine", "自写技能");
+
+  const report = await installWorkspaceSkills({ skills, workspaceDir: workspace, workspaceMode: "unified" });
+  for (const row of report.projects) {
+    assert.equal(row.status, "ok");
+  }
+  const webBackup = report.projects[0].backupDir;
+  assert.ok(webBackup, "web 原来有技能目录，必须留下备份");
+  assert.ok(existsSync(path.join(webBackup, "manifest.json")));
+  assert.ok(existsSync(path.join(webBackup, "claude", "skills", "mine", "SKILL.md")), "备份里有自写技能");
+  // api 原来一份技能都没有：没有东西可备份，就不编一个空备份目录出来。
+  assert.equal(report.projects[1].backupDir, null);
+
+  const matrix = await skillsMatrix({ skills, workspaceDir: workspace, workspaceMode: "unified" });
+  for (const row of matrix.rows) {
+    for (const cell of row.cells) {
+      assert.equal(cell.status, "current", `${row.key}/${cell.client} 应为 current`);
+      assert.equal(cell.current, 2);
+    }
+  }
+});
+
+test("矩阵：各自模式全部更新时冲突不被覆盖，冲突逐条列出", async () => {
+  const workspace = trackDir(workspaceWith([{ key: "web", dir: "apps/web" }]));
+  const skills = matrixFixtures();
+  const webDir = path.join(workspace, "apps", "web");
+  const stale = writeLocalSkill(webDir, ".claude", "ste", "别人装的同名技能");
+
+  const report = await installWorkspaceSkills({ skills, workspaceDir: workspace, workspaceMode: "per-project" });
+  const row = report.projects[0];
+  assert.equal(row.backupDir, null);
+  const claude = row.cells.find((cell) => cell.client === "claude");
+  assert.deepEqual(claude.conflicts, ["ste"], "冲突逐条列出");
+  assert.equal(readFileSync(path.join(stale, "SKILL.md"), "utf8"), "别人装的同名技能", "绝不覆盖");
+
+  const matrix = await skillsMatrix({ skills, workspaceDir: workspace, workspaceMode: "per-project" });
+  const staleCell = cellOf(matrix.rows[0], "claude");
+  assert.equal(staleCell.status, "differs");
+  assert.deepEqual(staleCell.differs, ["ste"]);
 });

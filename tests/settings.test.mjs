@@ -17,7 +17,20 @@ test("旧设置缺 appearance 时补成 auto，已有字段保持不变", async 
     refreshSeconds: 30,
     debugLogging: false,
     appearance: "auto",
+    skillsMode: "per-project",
   });
+});
+
+/**
+ * 老用户升级后不能因为新增的模式字段被改成「统一模式」——
+ * 统一模式会清空技能目录，默认值必须是「只补缺失」。
+ */
+test("缺 skillsMode 时补成 per-project，只认 unified / per-project", async () => {
+  assert.equal((await deckSettings.schema.parseAsync({})).skillsMode, "per-project");
+  for (const skillsMode of ["unified", "per-project"]) {
+    assert.equal((await deckSettings.schema.parseAsync({ skillsMode })).skillsMode, skillsMode);
+  }
+  await assert.rejects(() => deckSettings.schema.parseAsync({ skillsMode: "mirror" }));
 });
 
 test("appearance 只接受 auto / dark / light / classic", async () => {

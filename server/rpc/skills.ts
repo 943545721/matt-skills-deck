@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { pluginRoot } from "../paths.ts";
 import { adoptProjectSkill, listProjectSkills } from "../skills/adopt.ts";
 import { listBundledSkills, readBundledSkill, type BundledSkill } from "../skills/catalog.ts";
-import { installSkills, removeSkills, skillDirs, skillStateAt } from "../skills/install.ts";
+import { removeSkills, skillDirs, skillStateAt } from "../skills/install.ts";
+import { installWorkspaceSkills, skillsMatrix } from "../skills/workspace.ts";
 import type {
   skillsAdoptRpc,
   skillsInstallRpc,
@@ -19,14 +20,15 @@ type ReadInput = RpcInput<typeof skillsReadRpc>;
 type AdoptInput = RpcInput<typeof skillsAdoptRpc>;
 
 /**
- * 这些处理器都不缓存结果：技能目录很小（28 份 Markdown，合计 1MB 量级），
+ * 这些处理器都不缓存结果：技能目录很小（插件包里三十来份 Markdown，合计 1MB 量级），
  * 而「刚点完安装界面还是旧状态」是最容易让人怀疑插件坏了的一种体验。
  */
-export function listSkills(input: ListInput): RpcOutput<typeof skillsListRpc> {
+export async function listSkills(input: ListInput): Promise<RpcOutput<typeof skillsListRpc>> {
   const roots = skillDirs(input.workspaceDir);
   const skills = listBundledSkills(pluginRoot(), input.lang);
   // 两个语言都算「插件自带」：一份英文技能的 id 出现在项目里，也不该被当成「项目独有」拿去回收。
   const bundledIds = [...new Set(["en", "zh"].flatMap((lang) => listBundledSkills(pluginRoot(), lang as "en" | "zh").map((skill) => skill.id)))];
+  const matrix = await skillsMatrix({ skills, workspaceDir: input.workspaceDir });
   return {
     skills: skills.map((skill) => ({
       id: skill.id,
@@ -35,6 +37,9 @@ export function listSkills(input: ListInput): RpcOutput<typeof skillsListRpc> {
     })),
     roots,
     projectOnly: listProjectSkills(input.workspaceDir, bundledIds),
+    workspaceMode: matrix.workspaceMode,
+    projects: matrix.rows,
+    notes: matrix.notes,
   };
 }
 
@@ -58,8 +63,12 @@ function wantedSkills(lang: InstallInput["lang"], ids: string[] | undefined): Bu
   return available.filter((skill) => ids.includes(skill.id));
 }
 
-export function installSkillsHandler(input: InstallInput): RpcOutput<typeof skillsInstallRpc> {
-  return installSkills({
+/**
+ * 安装与「全部更新」是同一条路：都按项目清单逐个落，模式决定是备份→清理→装，
+ * 还是只补缺失。界面上的「全部更新」不带 ids，就是全部技能、全部项目。
+ */
+export async function installSkillsHandler(input: InstallInput): Promise<RpcOutput<typeof skillsInstallRpc>> {
+  return installWorkspaceSkills({
     skills: wantedSkills(input.lang, input.ids),
     workspaceDir: input.workspaceDir,
     overwrite: input.overwrite,

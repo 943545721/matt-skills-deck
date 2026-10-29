@@ -1,10 +1,67 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { SKILL_MODES } from "./workspace-projects.ts";
 
 const langSchema = z.enum(["en", "zh"]);
 const workspaceDirSchema = z.string().min(1);
 const clientSchema = z.enum(["claude", "codex"]);
 const stateSchema = z.enum(["none", "current", "differs"]);
+const modeSchema = z.enum(SKILL_MODES);
+/** 模式从哪儿来：项目自己的 `skillsMode`，还是跟随工作区设置。 */
+const modeSourceSchema = z.enum(["project", "workspace"]);
+
+/**
+ * 一格（项目 × 客户端）的汇总状态。
+ *
+ * `none` 是「这个目录里一份插件技能都没有」——界面写「未安装」，不留空白；
+ * `missing` 是「装了一部分，还有缺的」；`differs` 优先于 `missing`，因为它要人做决定。
+ */
+const cellStatusSchema = z.enum(["none", "current", "differs", "missing"]);
+
+const matrixRowSchema = z.object({
+  key: z.string(),
+  /** 项目目录绝对路径（目录不在时是配置里算出来的那个路径）。 */
+  dir: z.string(),
+  exists: z.boolean(),
+  problem: z.string().nullable(),
+  mode: modeSchema,
+  modeSource: modeSourceSchema,
+  cells: z.array(
+    z.object({
+      client: clientSchema,
+      /** 客户端目录绝对路径，界面直接显示，不自己拼。 */
+      dir: z.string(),
+      status: cellStatusSchema,
+      total: z.number().int(),
+      current: z.number().int(),
+      differs: z.array(z.string()),
+      missing: z.array(z.string()),
+    }),
+  ),
+});
+
+const installCellSchema = z.object({
+  client: clientSchema,
+  dir: z.string(),
+  written: z.array(z.string()),
+  skipped: z.array(z.string()),
+  conflicts: z.array(z.string()),
+  /** 统一模式下清空的条目（技能目录名）；各自模式恒为空。 */
+  cleared: z.array(z.string()),
+});
+
+const installProjectSchema = z.object({
+  key: z.string(),
+  dir: z.string(),
+  mode: modeSchema,
+  modeSource: modeSourceSchema,
+  /** `skipped`：目录不在；`failed`：备份失败，整项停手、没清没写。 */
+  status: z.enum(["ok", "skipped", "failed"]),
+  reason: z.string().nullable(),
+  /** 统一模式的备份目录；各自模式与没东西可备份时为 null。 */
+  backupDir: z.string().nullable(),
+  cells: z.array(installCellSchema),
+});
 
 /**
  * 技能相关契约。
@@ -44,6 +101,14 @@ export const skillsListRpc = defineRpc({
         split: z.boolean(),
       }),
     ),
+    /**
+     * 项目 × 客户端矩阵：一行一个项目，一格一个客户端目录。
+     * 没有 v2 项目清单时只有一行（工作区根目录），与单项目时代一样。
+     */
+    workspaceMode: modeSchema,
+    projects: z.array(matrixRowSchema),
+    /** 清单读不出来、v1 回落这类「值得看一眼」的说明；不阻断。 */
+    notes: z.array(z.string()),
   }),
 });
 
@@ -77,13 +142,20 @@ export const skillsAdoptRpc = defineRpc({
   ]),
 });
 
+/**
+ * 安装 / 全部更新：一次落到工作区里的全部项目。
+ *
+ * 统一模式（项目自己写的 > 工作区设置 > 默认 per-project）先备份、再清空、再装；
+ * 非统一模式只补缺失、不覆盖冲突、一个文件都不删。顶层 `written/skipped/conflicts/
+ * targets` 是所有项目的并集（老界面与面板检查页只需这几个数），逐项目的明细在 `projects`。
+ */
 export const skillsInstallRpc = defineRpc({
   name: "deck.skills.install",
   input: z.object({
     workspaceDir: workspaceDirSchema,
     lang: langSchema,
     ids: z.array(z.string()).optional(),
-    /** 覆盖内容不同的文件；缺省 false（冲突只报告）。 */
+    /** 覆盖内容不同的文件；缺省 false（冲突只报告）。统一模式下清空已发生，等价于覆盖。 */
     overwrite: z.boolean().optional(),
   }),
   output: z.object({
@@ -91,6 +163,9 @@ export const skillsInstallRpc = defineRpc({
     skipped: z.array(z.string()),
     conflicts: z.array(z.string()),
     targets: z.array(z.string()),
+    workspaceMode: modeSchema,
+    projects: z.array(installProjectSchema),
+    notes: z.array(z.string()),
   }),
 });
 

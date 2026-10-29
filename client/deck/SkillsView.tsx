@@ -1,4 +1,4 @@
-import type { PluginTheme } from "@getpaseo/plugin";
+import type { PluginTheme, RpcOutput } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { copyText, FlatList, Markdown, Modal, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -14,6 +14,7 @@ import {
 import { useDeckText } from "./i18n";
 import { usePanelText } from "./panel/panelText.tsx";
 import { SkillDraftModal } from "./skills-draft/SkillDraftModal.tsx";
+import { SkillMatrix } from "./skills/SkillMatrix.tsx";
 import { PixelBanner, PixelButton, PixelCard, PixelModalBody, usePixel } from "./pixel";
 import { SessionSheet } from "./session/SessionSheet.tsx";
 import type { SessionNavigation } from "./session/SessionSheet.tsx";
@@ -21,6 +22,7 @@ import { useDeckWorkspaceProvider } from "./surfaces/host.tsx";
 
 type SkillState = "none" | "current" | "differs";
 type SkillClient = "claude" | "codex";
+type InstallReport = RpcOutput<typeof skillsInstallRpc>;
 
 /**
  * 技能页。
@@ -63,6 +65,13 @@ export function SkillsView({
   const provider = useDeckWorkspaceProvider(workspaceId);
   const { t: tp } = usePanelText();
   const [draftOpen, setDraftOpen] = useState(false);
+  /**
+   * 视图：逐个技能 / 项目矩阵。
+   * 没选过时按项目数自动定——多项目工作区先看矩阵，单项目还是原来的列表。
+   */
+  const [view, setView] = useState<"skills" | "matrix" | null>(null);
+  /** 上一次「全部更新」的逐项目结果：装完之后要能按项目看到备份路径与冲突。 */
+  const [report, setReport] = useState<InstallReport | null>(null);
 
   const listSkills = useRpc(skillsListRpc);
   const installSkills = useRpc(skillsInstallRpc);
@@ -99,15 +108,17 @@ export function SkillsView({
       installSkills({ workspaceDir, lang: skillLang, ids: input?.ids, overwrite: input?.overwrite }),
     onSuccess: (result) => {
       void list.refetch();
+      setReport(result);
       const touched = result.written.length + result.skipped.length + result.conflicts.length;
       toast.show(
         touched
-          ? t("skills.installSummary", {
+          ? t("skillsMode.updateSummary", {
               written: result.written.length,
               skipped: result.skipped.length,
               conflicts: result.conflicts.length,
+              backups: result.projects.filter((project) => project.backupDir !== null).length,
             })
-          : t("skills.installNothing"),
+          : t("skillsMode.updateNothing"),
         { variant: result.conflicts.length ? "warning" : "success" },
       );
     },
@@ -211,6 +222,10 @@ export function SkillsView({
   const rows = list.data?.skills ?? [];
   const roots = list.data?.roots ?? [];
   const projectOnly = list.data?.projectOnly ?? [];
+  const projects = list.data?.projects ?? [];
+  const workspaceMode = list.data?.workspaceMode ?? "per-project";
+  const notes = list.data?.notes ?? [];
+  const activeView = view ?? (projects.length > 1 ? "matrix" : "skills");
   /** 这个范围下「已经装上了」的技能数：卸载按钮只按它决定是否可点，别让空按钮可点。 */
   const installedCount = rows.filter((row) => row.states.some((entry) => entry.state === "current")).length;
   /** 详情页里这一份在项目里是否与插件版本不同：不同才给「用插件版本覆盖」。 */
@@ -221,6 +236,23 @@ export function SkillsView({
   return (
     <View style={styles.screen}>
       <View style={styles.toolbar}>
+        <PixelButton
+          skin={skin}
+          variant="tab"
+          label={t("skillsMode.tabSkills")}
+          accessibilityLabel={t("skillsMode.tabSkills")}
+          active={activeView === "skills"}
+          onPress={() => setView("skills")}
+        />
+        <PixelButton
+          skin={skin}
+          variant="tab"
+          label={t("skillsMode.tabMatrix")}
+          accessibilityLabel={t("skillsMode.tabMatrix")}
+          active={activeView === "matrix"}
+          onPress={() => setView("matrix")}
+        />
+        <View style={{ width: 10 }} />
         <PixelButton
           skin={skin}
           variant="tab"
@@ -245,37 +277,47 @@ export function SkillsView({
           accessibilityLabel={tp("draft.open")}
           onPress={() => setDraftOpen(true)}
         />
-        <PixelButton
-          skin={skin}
-          label={install.isPending ? t("skills.installing") : t("skills.installAll")}
-          accessibilityLabel={t("skills.installAll")}
-          onPress={() => install.mutate(undefined)}
-        />
-        <PixelButton
-          skin={skin}
-          variant="ghost"
-          label={
-            remove.isPending
-              ? t("skills.removing")
-              : confirmRemove
-                ? t("skills.removeConfirm", { count: installedCount })
-                : t("skills.remove")
-          }
-          accessibilityLabel={t("skills.remove")}
-          disabled={remove.isPending || installedCount === 0}
-          onPress={() => {
-            if (!confirmRemove) {
-              setConfirmRemove(true);
-              return;
-            }
-            remove.mutate(undefined);
-          }}
-        />
+        {/* 矩阵页自己有「全部更新」；两个按钮做同一件事只会让人猜哪个是对的。 */}
+        {activeView === "skills" ? (
+          <>
+            <PixelButton
+              skin={skin}
+              label={install.isPending ? t("skills.installing") : t("skills.installAll")}
+              accessibilityLabel={t("skills.installAll")}
+              onPress={() => install.mutate(undefined)}
+            />
+            <PixelButton
+              skin={skin}
+              variant="ghost"
+              label={
+                remove.isPending
+                  ? t("skills.removing")
+                  : confirmRemove
+                    ? t("skills.removeConfirm", { count: installedCount })
+                    : t("skills.remove")
+              }
+              accessibilityLabel={t("skills.remove")}
+              disabled={remove.isPending || installedCount === 0}
+              onPress={() => {
+                if (!confirmRemove) {
+                  setConfirmRemove(true);
+                  return;
+                }
+                remove.mutate(undefined);
+              }}
+            />
+          </>
+        ) : null}
       </View>
 
-      <Text style={styles.onChecker}>
-        {t("skills.hint", { dirs: roots.map((root) => root.dir).join("、") || "—" })}
-      </Text>
+      {activeView === "skills" ? (
+        <>
+          <Text style={styles.onChecker}>
+            {t("skills.hint", { dirs: roots.map((root) => root.dir).join("、") || "—" })}
+          </Text>
+          {projects.length > 1 ? <Text style={styles.hint}>{t("skillsMode.rootOnlyHint")}</Text> : null}
+        </>
+      ) : null}
 
       {list.error ? (
         <PixelBanner skin={skin}>
@@ -283,66 +325,78 @@ export function SkillsView({
         </PixelBanner>
       ) : null}
 
-      <FlatList
-        data={rows}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
-        ListEmptyComponent={
-          <Text style={styles.onChecker}>{list.isPending ? t("common.loading") : t("skills.empty")}</Text>
-        }
-        ListFooterComponent={
-          projectOnly.length ? (
-            <View style={{ gap: 6, marginTop: 8 }}>
-              <Text style={styles.onChecker}>{t("skills.projectOnlyTitle")}</Text>
-              <Text style={styles.hint}>{t("skills.projectOnlyHint")}</Text>
-              {projectOnly.map((item) => (
-                <PixelCard key={item.id} skin={skin} style={styles.row}>
+      {activeView === "matrix" ? (
+        <SkillMatrix
+          skin={skin}
+          rows={projects}
+          workspaceMode={workspaceMode}
+          notes={notes}
+          report={report}
+          pending={install.isPending}
+          onUpdateAll={() => install.mutate(undefined)}
+        />
+      ) : (
+        <FlatList
+          data={rows}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
+          ListEmptyComponent={
+            <Text style={styles.onChecker}>{list.isPending ? t("common.loading") : t("skills.empty")}</Text>
+          }
+          ListFooterComponent={
+            projectOnly.length ? (
+              <View style={{ gap: 6, marginTop: 8 }}>
+                <Text style={styles.onChecker}>{t("skills.projectOnlyTitle")}</Text>
+                <Text style={styles.hint}>{t("skills.projectOnlyHint")}</Text>
+                {projectOnly.map((item) => (
+                  <PixelCard key={item.id} skin={skin} style={styles.row}>
+                    <View style={styles.rowHead}>
+                      <Text style={styles.name}>{item.id}</Text>
+                      {item.split ? (
+                        <Text style={[styles.badge, { color: skin.colors.warnInk }]}>{t("skills.adoptSplit")}</Text>
+                      ) : null}
+                    </View>
+                    <Text style={styles.description} numberOfLines={2}>
+                      {item.description}
+                    </Text>
+                    <View style={styles.actions}>
+                      <PixelButton
+                        skin={skin}
+                        variant="ghost"
+                        label={adopt.isPending ? t("skills.adopting") : t("skills.adopt")}
+                        accessibilityLabel={t("skills.adopt")}
+                        disabled={adopt.isPending || item.split}
+                        onPress={() => adopt.mutate(item.id)}
+                      />
+                      </View>
+                    </PixelCard>
+                  ))}
+                </View>
+              ) : null
+            }
+            renderItem={({ item }) => (
+              <PixelCard skin={skin} style={styles.row}>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={item.id}
+                  onPress={() => setDetailId(item.id)}
+                >
                   <View style={styles.rowHead}>
                     <Text style={styles.name}>{item.id}</Text>
-                    {item.split ? (
-                      <Text style={[styles.badge, { color: skin.colors.warnInk }]}>{t("skills.adoptSplit")}</Text>
-                    ) : null}
+                    {item.states.map((entry) => (
+                      <Text key={entry.client} style={badgeStyle(entry.state)}>
+                        {clientLabel[entry.client]} {stateLabel[entry.state]}
+                      </Text>
+                    ))}
                   </View>
                   <Text style={styles.description} numberOfLines={2}>
                     {item.description}
                   </Text>
-                  <View style={styles.actions}>
-                    <PixelButton
-                      skin={skin}
-                      variant="ghost"
-                      label={adopt.isPending ? t("skills.adopting") : t("skills.adopt")}
-                      accessibilityLabel={t("skills.adopt")}
-                      disabled={adopt.isPending || item.split}
-                      onPress={() => adopt.mutate(item.id)}
-                    />
-                  </View>
-                </PixelCard>
-              ))}
-            </View>
-          ) : null
-        }
-        renderItem={({ item }) => (
-          <PixelCard skin={skin} style={styles.row}>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={item.id}
-              onPress={() => setDetailId(item.id)}
-            >
-              <View style={styles.rowHead}>
-                <Text style={styles.name}>{item.id}</Text>
-                {item.states.map((entry) => (
-                  <Text key={entry.client} style={badgeStyle(entry.state)}>
-                    {clientLabel[entry.client]} {stateLabel[entry.state]}
-                  </Text>
-                ))}
-              </View>
-              <Text style={styles.description} numberOfLines={2}>
-                {item.description}
-              </Text>
-            </Pressable>
-          </PixelCard>
-        )}
-      />
+                </Pressable>
+              </PixelCard>
+            )}
+          />
+      )}
 
       <Modal
         title={detailId ?? t("tabs.skills")}

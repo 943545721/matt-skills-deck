@@ -89,6 +89,69 @@ export interface InstallOutcome {
 }
 
 /**
+ * 把选中的技能写进**一个**客户端目录。
+ *
+ * 拆出来是给多项目安装用的：那里要按「项目 → 客户端」逐格报结果，
+ * 只有一个合并后的结果说不清是哪一格冲突了。
+ */
+export interface DirInstallOutcome {
+  written: string[];
+  skipped: string[];
+  conflicts: string[];
+}
+
+export function installSkillsInto(
+  skills: readonly BundledSkill[],
+  dir: string,
+  overwrite: boolean = false,
+): DirInstallOutcome {
+  const written = new Set<string>();
+  const skipped = new Set<string>();
+  const conflicts = new Set<string>();
+
+  for (const skill of skills) {
+    const source = sourceTreeOf(skill);
+    const base = skillDirIn(dir, skill.id);
+    const blocked = [...source].some(([rel, data]) => {
+      const file = path.join(base, rel);
+      if (!existsSync(file)) return false;
+      try {
+        return !readFileSync(file).equals(data);
+      } catch {
+        return true;
+      }
+    });
+    if (blocked && !overwrite) {
+      conflicts.add(skill.id);
+      continue;
+    }
+
+    let wrote = 0;
+    for (const [rel, data] of source) {
+      const file = path.join(base, rel);
+      if (existsSync(file)) {
+        try {
+          if (readFileSync(file).equals(data)) continue;
+        } catch {
+          // 读不出来就当不同，下面照写（已确认 overwrite）。
+        }
+      }
+      mkdirSync(path.dirname(file), { recursive: true, mode: 0o755 });
+      writeFileSync(file, data, { mode: 0o644 });
+      wrote += 1;
+    }
+    if (wrote > 0) written.add(skill.id);
+    else skipped.add(skill.id);
+  }
+
+  return {
+    written: [...written].sort(),
+    skipped: [...skipped].sort(),
+    conflicts: [...conflicts].sort(),
+  };
+}
+
+/**
  * 把选中的技能写进项目里的两个目录。
  *
  * 已存在且内容不同的文件默认算冲突、不覆盖：那里可能是用户自己改过的版本，
@@ -108,41 +171,11 @@ export function installSkills(options: {
   const skipped = new Set<string>();
   const conflicts = new Set<string>();
 
-  for (const skill of options.skills) {
-    const source = sourceTreeOf(skill);
-    for (const root of roots) {
-      const base = skillDirIn(root.dir, skill.id);
-      const blocked = [...source].some(([rel, data]) => {
-        const file = path.join(base, rel);
-        if (!existsSync(file)) return false;
-        try {
-          return !readFileSync(file).equals(data);
-        } catch {
-          return true;
-        }
-      });
-      if (blocked && !options.overwrite) {
-        conflicts.add(skill.id);
-        continue;
-      }
-
-      let wrote = 0;
-      for (const [rel, data] of source) {
-        const file = path.join(base, rel);
-        if (existsSync(file)) {
-          try {
-            if (readFileSync(file).equals(data)) continue;
-          } catch {
-            // 读不出来就当不同，下面照写（已确认 overwrite）。
-          }
-        }
-        mkdirSync(path.dirname(file), { recursive: true, mode: 0o755 });
-        writeFileSync(file, data, { mode: 0o644 });
-        wrote += 1;
-      }
-      if (wrote > 0) written.add(skill.id);
-      else skipped.add(skill.id);
-    }
+  for (const root of roots) {
+    const outcome = installSkillsInto(options.skills, root.dir, options.overwrite ?? false);
+    for (const id of outcome.written) written.add(id);
+    for (const id of outcome.skipped) skipped.add(id);
+    for (const id of outcome.conflicts) conflicts.add(id);
   }
 
   return {
