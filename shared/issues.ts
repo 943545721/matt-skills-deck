@@ -316,6 +316,14 @@ export const issuesCreateRpc = defineRpc({
     idempotencyKey: z.string().min(1).max(200).optional(),
     /** 目标仓库。工作区里只有一个仓库时可以省略；多个时必填（不猜）。 */
     repoKey: z.string().min(1).max(200).optional(),
+    /**
+     * 票属于哪个项目、哪个模块（`.paseo-deck.json` v2 的键）。
+     *
+     * 与服务端同一条校验口径（`resolveIssueProjectScope`）：项目必须存在、模块必须登记在册，
+     * 自动加的 `area:*` / `role:*` 由服务端并进 labels——界面自己拼标签就会和服务端判得不一样。
+     */
+    project: z.string().min(1).max(64).optional(),
+    area: z.string().min(1).max(32).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({

@@ -9,6 +9,7 @@ import type {
   issuesStateRpc,
 } from "../../shared/issues.ts";
 import { countBoard, filterBoard, sortBoard } from "../tracker/readiness.ts";
+import { mergeScopedLabels, resolveIssueProjectScope } from "../mcp/project-scope.ts";
 import { assertLabelsReadable } from "../tracker/label-guard.ts";
 import { createIssue, postComment, replaceLabels, setIssueState, takeIssue } from "../tracker/write.ts";
 import {
@@ -134,12 +135,27 @@ export async function createIssueHandler(input: CreateInput): Promise<RpcOutput<
     };
   }
 
+  // 项目 / 模块先核对再写：项目不存在、模块没登记或已废弃都要当场拒绝，
+  // 不能写成一张挂着错标签的票——按 area 筛人和筛板子的人不会发现自己被筛错了。
+  const scope = await resolveIssueProjectScope({
+    workspaceDir: input.workspaceDir,
+    repoKey: backend.key,
+    ...(input.project ? { projectKey: input.project } : {}),
+    ...(input.area ? { area: input.area } : {}),
+  });
+  if (!scope.ok) {
+    record("warn", "issues.create", `定位项目/模块失败：${scope.detail.slice(0, 200)}`);
+    return { ok: false, reason: "invalid", detail: scope.detail, repo: backend.repo };
+  }
+  for (const warning of scope.scope.warnings) record("warn", "issues.create", warning);
+
   // 勾了「地图」就自动带 wayfinder:map：源仓库里地图票就是靠这个标签认出来的，
   // 让用户自己记得手打字符串迟早会漏。DSH 的 kind=map 与旧的 isMap 同义。
   const labels = [...(input.labels ?? [])];
   if ((input.isMap === true || input.kind === "map") && !labels.includes(MAP_LABEL)) labels.push(MAP_LABEL);
+  const scopedLabels = mergeScopedLabels(labels, scope.scope.labels);
 
-  const remoteInput = { title: input.title, body: input.body ?? "", labels };
+  const remoteInput = { title: input.title, body: input.body ?? "", labels: scopedLabels };
   // 本地后端的 bug 就是普通 issue；map/spec 及其子票才决定容器与子目录。
   const localKind = input.kind === "bug" ? "issue" : input.kind;
   const localInput = {

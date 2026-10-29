@@ -21,7 +21,7 @@ import { ensureLabels, resolveCreateKind, type PositionKind } from "../../shared
 import { markerKindAtStart, markerKindInHeader, markerLineFor } from "../../shared/issue-marker.ts";
 import { anchorKeyFor } from "../../shared/anchor.ts";
 import { readMdScope } from "../../shared/md-scope.ts";
-import { buildMapBody, parseMapBody } from "../tracker/map-body.ts";
+import { parseMapBody } from "../tracker/map-body.ts";
 import { routeFromIssues, suggestNextSteps } from "../tracker/map-route.ts";
 import { createIssue, patchIssue, postComment, replaceLabels } from "../tracker/write.ts";
 import { sortIssues } from "../tracker/order.ts";
@@ -46,6 +46,7 @@ import {
   type DependencyScope, type EdgeEvidence,
 } from "../../shared/edge-rules.ts";
 import { readWorkspaceConfig } from "../tracker/workspace-repo.ts";
+import { mapPlanBody, mergeScopedLabels, resolveIssueProjectScope, resolveMapProject } from "./project-scope.ts";
 
 /**
  * 给 Agent 用的 deck_* 工具。
@@ -336,6 +337,16 @@ async function runIssueCreate(args: unknown, context: ToolContext): Promise<Tool
   const backend = await resolveWritableBackend(context.workspaceDir, "create issue", input.repo);
   if (!backend.ok) return fail(backend.reason, backend.detail);
 
+  /* ---------------- 项目 / 模块：依据 .paseo-deck.json，定位不上就拒绝 ---------------- */
+  // 放在建票之前：area 写错时宁可一个字都不写，也别先建出一张挂错模块的票。
+  const projectScope = await resolveIssueProjectScope({
+    workspaceDir: context.workspaceDir,
+    repoKey: backend.key,
+    ...(input.project ? { projectKey: input.project } : {}),
+    ...(input.area ? { area: input.area } : {}),
+  });
+  if (!projectScope.ok) return fail("invalid", `${projectScope.detail}这张票没建。`);
+
   /* ---------------- 父票：先核类型，再建票 ---------------- */
   const parentRaw = String(input.parentKey ?? "").trim();
   const containerParent = parentRaw === "00" || parentRaw === "0";
@@ -397,7 +408,8 @@ async function runIssueCreate(args: unknown, context: ToolContext): Promise<Tool
 
   /* ---------------- 标签 / 阻塞边 / 指派 / 幂等锚 ---------------- */
   const ensured = ensureLabels(argued.labels, position, fullLabel);
-  const labels = ensured.labels;
+  // 自动标签只增不删：手写与被类型要求的标签先来，area / role 补在后面，同名只留一份。
+  const labels = mergeScopedLabels(ensured.labels, projectScope.scope.labels);
   // 阻塞边分两路：本仓库票号走原生依赖边，跨仓库引用只能写进正文隐藏区段
   // （远端没有跨仓库原生边）。任何一项写法不合法就整组拒绝：
   // 只写了一半的阻塞集合，会让人以为「后端改完前端才能动」已经记下了。
@@ -563,6 +575,15 @@ async function runIssueCreate(args: unknown, context: ToolContext): Promise<Tool
     labels: created.labels,
     labelsFailed: created.labelsFailed === true,
     reused: created.reused,
+    /** 项目 / 模块定位结果：没对上项目时为 null（单项目工作区就是这样）。 */
+    projectScope: projectScope.scope.project
+      ? {
+          project: projectScope.scope.project.key,
+          area: projectScope.scope.area,
+          autoLabels: projectScope.scope.labels,
+          warnings: projectScope.scope.warnings,
+        }
+      : null,
     ...(created.path ? { path: created.path } : {}),
     parent:
       parentRaw === ""
@@ -1219,12 +1240,21 @@ async function runMapPlanCreate(args: unknown, context: ToolContext): Promise<To
   const backend = await resolveWritableBackend(context.workspaceDir, "create map plan", input.repo);
   if (!backend.ok) return fail(backend.reason, backend.detail);
 
-  const body = ensureIssueBody(buildMapBody({
+  // 有 v2 清单且对得上项目时，正文按该项目的 areas 生成骨架；没有清单时与以前完全一致。
+  const mapProject = await resolveMapProject({
+    workspaceDir: context.workspaceDir,
+    repoKey: backend.key,
+    ...(input.project ? { projectKey: input.project } : {}),
+  });
+  if (!mapProject.ok) return fail("invalid", `${mapProject.detail}这张图没建。`);
+
+  const body = ensureIssueBody(mapPlanBody({
     destination: input.destination,
     notes: input.notes,
     decisions: input.decisions,
     fog: input.fog,
     outOfScope: input.outOfScope,
+    project: mapProject.project,
   }), "map").body;
   const now = Date.now();
   const localScratch = backend.kind === "local" && (await resolveLocalStore(context.workspaceDir)).primary.kind === "scratch";
@@ -1331,6 +1361,8 @@ async function runMapPlanCreate(args: unknown, context: ToolContext): Promise<To
   return ok({
     ok: true,
     map: { number: map.number, url: map.url, labelsFailed: map.labelsFailed },
+    /** 正文按哪个项目的 areas 分组；没有 v2 清单、也没指定项目时为 null（正文是原来的写法）。 */
+    project: mapProject.project ? { key: mapProject.project.key, areas: mapProject.project.areas } : null,
     tickets,
     failed: tickets.filter((ticket) => ticket.error).length,
   });

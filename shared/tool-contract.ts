@@ -242,6 +242,18 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
           type: "string",
           description: "Local Markdown backend only: the `.scratch/` directory name that holds specs, implementation tickets and ordinary tickets (the original text calls it `<feature-slug>`). Omit to let the parent or title decide; remote backends ignore it.",
         },
+        project: {
+          type: "string",
+          description:
+            "Project key from `.paseo-deck.json` (`projects[].key`). Multi-project workspaces: which project this ticket belongs to. Omit to match it by `repo`. " +
+            "When the workspace has a v2 project list, the matching project's `role:<owner>` label is added automatically.",
+        },
+        area: {
+          type: "string",
+          description:
+            "Module key; must be one of that project's `areas`. Adds `area:<key>` (and the project's `role:<owner>`) to the labels. " +
+            "An unknown project key or an area the project does not list is rejected with the available values; nothing is silently dropped.",
+        },
         repo: repoProperty,
       },
       ["title", "kind"],
@@ -277,6 +289,12 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
             },
             required: ["title", "kind"],
           },
+        },
+        project: {
+          type: "string",
+          description:
+            "Project key from `.paseo-deck.json` (`projects[].key`) this map belongs to. When given (or matched by `repo`), the body is generated " +
+            "as a skeleton grouped by that project's `areas`; without a v2 project list the body keeps the plain destination/notes form.",
         },
         repo: repoProperty,
       },
@@ -720,6 +738,13 @@ export const createSchema = z.strictObject({
   /** 本地 Markdown 后端的 `.scratch/<目录>`：两套技能各叫一个词，互斥；远端后端忽略。 */
   effort: z.string().min(1).max(80).optional(),
   feature: z.string().min(1).max(80).optional(),
+  /**
+   * 项目键（`.paseo-deck.json` 的 `projects[].key`）：多项目工作区里指明这张票属于哪个项目。
+   * 不给时按 `repo` 反查；有项目才会自动带 `role:<owner>`。
+   */
+  project: z.string().min(1).max(64).optional(),
+  /** 模块键：必须是该项目 `areas` 里登记过的一个，会自动带 `area:<k>`。 */
+  area: z.string().min(1).max(32).optional(),
   repo: repoKey,
 });
 
@@ -781,6 +806,8 @@ export const mapPlanSchema = z.strictObject({
     .array(z.strictObject({ title: z.string().min(1).max(256), kind: routeKindSchema, body: z.string().max(20_000).optional() }))
     .min(1)
     .max(20),
+  /** 这张图属于哪个项目：给了就按该项目 `areas` 分组建骨架；不给时按 `repo` 反查。 */
+  project: z.string().min(1).max(64).optional(),
   repo: repoKey,
 });
 
