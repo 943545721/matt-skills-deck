@@ -165,6 +165,43 @@ test("area 不在项目的清单里：明确拒绝并列出可选值，一个字
   }
 });
 
+test("area 已标为废弃：拒绝并说清「不要再挂票」，一个文件都不写", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace();
+  // 同一个项目的 areas 里既有在用的 orders，也有收了摊的 legacy。
+  writeProjectConfig(ws, [
+    { key: "backend", dir: "api", repo: "acme/api", owner: "backend", areas: ["orders", "legacy"], deprecatedAreas: ["legacy"] },
+  ]);
+  const gh = quietGh();
+  try {
+    const scope = await resolveIssueProjectScope({
+      workspaceDir: ws,
+      repoKey: "acme/api",
+      projectKey: "backend",
+      area: "legacy",
+    });
+    assert.equal(scope.ok, false);
+    assert.match(scope.detail, /已标为废弃/);
+    assert.match(scope.detail, /deprecatedAreas/, "要点名是哪一段配置把它标成废弃的");
+    assert.match(scope.detail, /orders/, "可选值要列出来，只说「不行」等于让人去翻配置");
+
+    const rejected = failure(
+      await run("deck_issue_create", { title: "不该建出来", kind: "issue", project: "backend", area: "legacy" }, ws),
+    );
+    assert.equal(rejected.reason, "invalid");
+    assert.match(rejected.detail, /已标为废弃/);
+    assert.equal(existsSync(path.join(ws, ".deck", "issues")), false, "校验发生在写之前");
+
+    // 同项目里在用的模块照建：废弃的是那一个模块，不是整个项目。
+    const created = json(
+      await run("deck_issue_create", { title: "正常模块", kind: "issue", project: "backend", area: "orders" }, ws),
+    );
+    assert.deepEqual(created.labels, ["area:orders", "role:backend"]);
+    assert.deepEqual(gh.calls(), []);
+  } finally {
+    gh.restore();
+  }
+});
+
 /* ---------------------------------------------------------------- 没有清单 */
 
 test("没有 v2 清单：建票行为一点没变，也不自动加 area / role", { skip: !gitAvailable && "本机没有 git" }, async () => {
