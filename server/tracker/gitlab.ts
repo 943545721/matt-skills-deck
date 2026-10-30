@@ -189,6 +189,8 @@ export function mapGitLabIssues(raw: unknown): Issue[] {
       number, title: str(record?.title, `#${number}`) || `#${number}`,
       state: str(record?.state) === "closed" ? ("CLOSED" as const) : ("OPEN" as const),
       url: str(record?.web_url), updatedAt: str(record?.updated_at), createdAt: str(record?.created_at) || str(record?.updated_at),
+      // GitLab 给的是 closed_at（没关就是空）：缺它时间线就少一行「关票」，不拿 updatedAt 顶替。
+      closedAt: str(record?.closed_at) || null,
       labels, assignees: (Array.isArray(record?.assignees) ? record.assignees : []).map((entry) => str(rec(entry)?.username)).filter(Boolean),
       isMap: labels.some((label) => label.name === "wayfinder:map"), containerKind: containerKindOf({ labels, body: visible, isMap: labels.some((label) => label.name === "wayfinder:map") }), kind: "issue" as const, merged: false, blockedBy: blockersFromLine(body),
       parentKey: parsePartOfLine(visible),

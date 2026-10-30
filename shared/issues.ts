@@ -69,6 +69,12 @@ const issueSummary = z.object({
   url: z.string(),
   updatedAt: z.string(),
   createdAt: z.string(),
+  /**
+   * 关闭时刻（GitHub / GitLab 都给）。缺省 = 这次没取这一列，或后端不提供：
+   * 本地 Markdown 后端只有 state，没有关票时间，所以那里永远是缺省。
+   * 时间线靠它写「哪一刻关的」；没有就少一行，绝不拿 updatedAt 顶替。
+   */
+  closedAt: z.string().nullable().optional(),
   labels: z.array(label),
   assignees: z.array(z.string()),
   isMap: z.boolean(),

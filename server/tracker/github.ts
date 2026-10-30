@@ -74,7 +74,7 @@ function listQuery(kind: ListConnectionKind, view: ListView, includeClosed: bool
       totalCount
       pageInfo { hasNextPage endCursor }
       nodes{
-        number title state url updatedAt createdAt parent{number}${withBody ? " body" : ""}
+        number title state url updatedAt createdAt closedAt parent{number}${withBody ? " body" : ""}
         labels(first:20){nodes{name color}}
         assignees(first:20){nodes{login}}
         blockedBy(first:50){nodes{number title state}}
@@ -84,7 +84,7 @@ function listQuery(kind: ListConnectionKind, view: ListView, includeClosed: bool
       totalCount
       pageInfo { hasNextPage endCursor }
       nodes{
-        number title state url updatedAt createdAt mergedAt isDraft
+        number title state url updatedAt createdAt closedAt mergedAt isDraft
         labels(first:20){nodes{name color}}
         assignees(first:20){nodes{login}}
       }
@@ -112,6 +112,8 @@ interface RawIssueNode {
   url?: unknown;
   updatedAt?: unknown;
   createdAt?: unknown;
+  /** 关闭时刻：时间线要靠它写出「哪一刻关的」，缺了这一列就没有这一行。 */
+  closedAt?: unknown;
   mergedAt?: unknown;
   labels?: { totalCount?: unknown; nodes?: Array<{ name?: unknown; color?: unknown }> };
   assignees?: { nodes?: Array<{ login?: unknown }> };
@@ -197,6 +199,7 @@ export function mapIssueNodes(nodes: readonly RawIssueNode[] | undefined, kind: 
       url: asString(node.url),
       updatedAt: asString(node.updatedAt),
       createdAt: asString(node.createdAt) || asString(node.updatedAt),
+      closedAt: asString(node.closedAt) || null,
       labels,
       assignees,
       isMap: labels.some((label) => label.name === MAP_LABEL),
@@ -240,6 +243,7 @@ export function mapRestIssues(raw: unknown): Issue[] {
           html_url?: unknown;
           updated_at?: unknown;
           created_at?: unknown;
+          closed_at?: unknown;
           labels?: unknown;
           assignees?: Array<{ login?: unknown }> | null;
           pull_request?: { merged_at?: unknown } | null;
@@ -258,6 +262,7 @@ export function mapRestIssues(raw: unknown): Issue[] {
       url: asString(record?.html_url),
       updatedAt: asString(record?.updated_at),
       createdAt: asString(record?.created_at) || asString(record?.updated_at),
+      closedAt: asString(record?.closed_at) || null,
       labels,
       assignees: asArray(record?.assignees)
         .map((entry) => asString(entry.login))
@@ -273,7 +278,7 @@ export function mapRestIssues(raw: unknown): Issue[] {
   });
 }
 
-const ISSUE_DETAIL_FIELDS = `number title state url updatedAt createdAt body
+const ISSUE_DETAIL_FIELDS = `number title state url updatedAt createdAt closedAt body
       parent{number title body labels(first:20){nodes{name color}}}
       subIssues(first:100){totalCount nodes{number title state labels(first:20){nodes{name}}}}
       labels(first:20){totalCount nodes{name color}}
@@ -282,7 +287,7 @@ const ISSUE_DETAIL_FIELDS = `number title state url updatedAt createdAt body
       blockedBy(first:50){pageInfo{hasNextPage} nodes{number title state}}
       blocking(first:50){pageInfo{hasNextPage} nodes{number title state}}`;
 
-const PR_DETAIL_FIELDS = `number title state url updatedAt createdAt body mergedAt isDraft
+const PR_DETAIL_FIELDS = `number title state url updatedAt createdAt closedAt body mergedAt isDraft
       labels(first:20){totalCount nodes{name color}}
       assignees(first:20){nodes{login}}
       comments(first:100){totalCount nodes{author{login} createdAt body}}`;

@@ -14,7 +14,29 @@ import {
   issuesStateRpc,
 } from "../../../shared/issues";
 import { repoTargetsRpc } from "../../../shared/repo";
-import { readableText } from "../format";
+import { sessionLedgerRpc } from "../../../shared/session-rpc";
+import { clockText, readableText } from "../format";
+import type { IssueEventKind } from "./issueTimeline";
+import { buildIssueTimeline, firstLine, isTicketOf } from "./issueTimeline";
+import type { WorkRouteStatus } from "../../../shared/work-route.ts";
+import type { PanelKey } from "./panelText";
+
+/** 时间线里的事件类别 → 文案键。 */
+const TIMELINE_KIND_KEY: Record<IssueEventKind, PanelKey> = {
+  created: "issue.timelineCreated",
+  comment: "issue.timelineComment",
+  session: "issue.timelineSession",
+  closed: "issue.timelineClosed",
+  updated: "issue.timelineUpdated",
+};
+
+/** 台账那四步 → 文案键。状态由写台账的一侧给出，界面不改写也不猜。 */
+const TIMELINE_STATUS_KEY: Record<WorkRouteStatus, PanelKey> = {
+  attached: "issue.timelineStatus.attached",
+  "in-progress": "issue.timelineStatus.inProgress",
+  done: "issue.timelineStatus.done",
+  released: "issue.timelineStatus.released",
+};
 import { FAILURE_KEYS, staticText, useDeckText } from "../i18n";
 import { PixelBanner, PixelButton, PixelCard, PixelHead, PixelStatusLine, usePixel } from "../pixel";
 import { buildIssuePrompt } from "./issuePrompt";
@@ -82,6 +104,7 @@ export function IssueDetailView({
   const assign = useRpc(issuesAssignRpc);
   const setState = useRpc(issuesStateRpc);
   const readTargets = useRpc(repoTargetsRpc);
+  const readLedger = useRpc(sessionLedgerRpc);
 
   const detail = useQuery({
     queryKey: ["deck", "issue", workspaceDir, repoKey, kind, number],
@@ -94,6 +117,21 @@ export function IssueDetailView({
   });
 
   const target = targets.data?.ok ? targets.data.repos.find((item) => item.key === repoKey) : undefined;
+
+  /**
+   * 本机台账：谁在什么时候接过这张票。
+   *
+   * 按工作区读（`agentId: null`），再按 `仓库#票号` 筛——同一张票可能被几个会话
+   * 先后接过，全部都要出现在时间线上。读不到时时间线照常出远端那几条，
+   * 界面上明说「会话那一段没算进来」，不假装这张票没人碰过。
+   */
+  const ledger = useQuery({
+    queryKey: ["deck", "ledger", workspaceDir, null],
+    queryFn: () => readLedger({ cwd: workspaceDir, agentId: null }),
+    // 工作区目录未知时这份台账根本没有作用域，发出去只会换回一条参数错误。
+    enabled: Boolean(workspaceDir),
+    staleTime: 15_000,
+  });
 
   /**
    * 跨仓库阻塞项的外部链接。
@@ -113,6 +151,20 @@ export function IssueDetailView({
   const canWrite = allowWrite && !readOnly;
   const labelsTruncated = issue ? issue.labelCount > issue.labels.length : false;
   const commentsTruncated = detail.data?.ok ? detail.data.commentCount > detail.data.comments.length : false;
+
+  const sessions = issue && ledger.data?.ok
+    ? ledger.data.ledger.entries.filter((entry) => isTicketOf(entry, { repoKey, number }))
+    : [];
+  const ledgerUnreadable = ledger.data ? !ledger.data.ok : false;
+  const timeline = issue
+    ? buildIssueTimeline({
+        createdAt: issue.createdAt,
+        updatedAt: issue.updatedAt,
+        closedAt: issue.closedAt ?? null,
+        comments: detail.data?.ok ? detail.data.comments : [],
+        sessions,
+      })
+    : [];
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["deck", "issue", workspaceDir, repoKey, kind, number] });
@@ -284,6 +336,12 @@ export function IssueDetailView({
       row: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, flexWrap: "wrap" as const },
       comment: { borderTopWidth: 1, borderTopColor: skin.colors.line, paddingTop: 8, gap: 4 },
       grow: { flexShrink: 1 },
+      // 时间线：时间靠右成一列、事件名固定宽度、中间正文自己伸缩——三列对齐才扫得动。
+      timelineRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, paddingVertical: 3 },
+      timelineDivider: { borderTopWidth: 1, borderTopColor: skin.colors.line },
+      timelineKind: { width: 62, color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
+      timelineText: { flex: 1, color: skin.colors.ink, fontSize: 11, fontFamily: skin.mono.fontFamily },
+      timelineClock: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
     }),
     [skin],
   );
@@ -340,7 +398,7 @@ export function IssueDetailView({
         {target?.dir ? ` · ${target.dir}` : ""}
       </Text>
       <Text style={styles.meta}>
-        {t("issue.updated", { date: issue.updatedAt.slice(0, 10) })}
+        {t("issue.updated", { date: clockText(issue.updatedAt) })}
         {issue.assignees.length ? ` · ${t("issue.assigned", { names: issue.assignees.join(", ") })}` : ""}
       </Text>
 
@@ -361,6 +419,41 @@ export function IssueDetailView({
           ))}
         </View>
       ) : null}
+
+      {/* 时间线：建票、评论、会话接手、最近变动并成一列，按时间倒序。
+          只列有时间的步骤——状态历史远端不给，宁可少一行，也不编一个时刻。 */}
+      <PixelCard skin={skin}>
+        <View style={styles.card}>
+          <PixelHead skin={skin}>{t("issue.timeline")}</PixelHead>
+          {timeline.map((event, index) => {
+            const who = event.kind === "comment" && event.who ? `@${event.who}` : null;
+            const sessionWho = event.kind === "session" && event.who ? event.who.slice(0, 8) : null;
+            const detailParts =
+              event.kind === "comment"
+                ? [who, firstLine(event.body ?? "")]
+                : event.kind === "session"
+                  ? [sessionWho, event.status ? t(TIMELINE_STATUS_KEY[event.status]) : null, event.note]
+                  : [];
+            return (
+              <View
+                key={`${event.kind}-${event.at}-${index}`}
+                style={[styles.timelineRow, index === 0 ? null : styles.timelineDivider]}
+              >
+                <Text style={styles.timelineKind} numberOfLines={1}>
+                  {t(TIMELINE_KIND_KEY[event.kind])}
+                </Text>
+                <Text style={styles.timelineText} numberOfLines={1}>
+                  {detailParts.filter(Boolean).join(" ")}
+                </Text>
+                <Text style={styles.timelineClock} numberOfLines={1}>
+                  {clockText(event.at)}
+                </Text>
+              </View>
+            );
+          })}
+          {ledgerUnreadable ? <Text style={styles.hint}>{t("issue.timelineLedgerFailed")}</Text> : null}
+        </View>
+      </PixelCard>
 
       {parent ? (
         <PixelCard skin={skin}>
@@ -617,7 +710,7 @@ export function IssueDetailView({
           {detail.data.comments.map((item, index) => (
             <View key={`${item.createdAt}-${index}`} style={styles.comment}>
               <Text style={styles.meta}>
-                {item.author || t("common.unknown")} · {item.createdAt.slice(0, 10)}
+                {item.author || t("common.unknown")} · {clockText(item.createdAt)}
               </Text>
               <View style={styles.doc}>
                 <Markdown>{item.body}</Markdown>
