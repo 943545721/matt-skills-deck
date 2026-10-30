@@ -32,3 +32,16 @@ export function staleBlockerLabels(item: { blockedBy: readonly BlockerRef[]; rea
   if (item.readiness === "closed") return [];
   return item.blockedBy.filter((blocker) => blocker.stale === true).map(blockerLabel);
 }
+
+/**
+ * 还在挡路的阻塞者：板子那行「被 #3 阻塞」只报这些。
+ *
+ * `blockedBy` 是一份历史，对方关掉了不会从列表里消失。照抄一遍的话，一张其实已经
+ * 能接的票看起来仍然堵着——这比不显示更坏。两种情况不报：
+ * 票自己已经关闭（等谁都没意义），以及那位阻塞者已经关掉（阻塞已解除）。
+ * 完整的依赖历史留在详情页，那里逐条带状态。
+ */
+export function activeBlockers(item: { blockedBy: readonly BlockerRef[]; readiness: string }): BlockerRef[] {
+  if (item.readiness === "closed") return [];
+  return item.blockedBy.filter((blocker) => blocker.state !== "CLOSED");
+}

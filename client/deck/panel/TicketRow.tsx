@@ -3,7 +3,7 @@ import { Pressable, Text, View } from "react-native";
 import type { ItemKind } from "../../../shared/issues";
 import type { BoardIssue } from "../../../shared/issues";
 import { issueAreas, issueRoles } from "../board/projectRows";
-import { blockerLabel, readableText } from "../format";
+import { activeBlockers, blockerLabel, readableText } from "../format";
 import { useDeckText } from "../i18n";
 import type { PixelSkin } from "../pixel";
 import { PixelButton, PixelCard, PixelNum } from "../pixel";
@@ -64,6 +64,8 @@ export function TicketRow({
   const areas = issueAreas(item);
   const roles = issueRoles(item);
   const otherLabels = item.labels.filter((label) => !/^(area|role):/.test(label.name));
+  // 只报还在挡路的：对方已经关掉的边留在历史里，照抄出来会让「能接了」的票看起来还堵着。
+  const blocking = activeBlockers(item);
   return (
     <View style={styles.item}>
       <PixelCard skin={skin}>
@@ -127,9 +129,9 @@ export function TicketRow({
           {item.assignees.length ? (
             <Text style={styles.meta}>{t("board.assignees", { names: item.assignees.join(", ") })}</Text>
           ) : null}
-          {item.blockedBy.length ? (
+          {blocking.length ? (
             <Text style={styles.meta}>
-              {t("board.blockedBy", { list: item.blockedBy.map(blockerLabel).join("、") })}
+              {t("board.blockedBy", { list: blocking.map(blockerLabel).join("、") })}
             </Text>
           ) : null}
         </Pressable>
