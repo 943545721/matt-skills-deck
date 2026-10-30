@@ -370,6 +370,11 @@ export function IssueDetailView({
 
   const isClosed = issue.state === "CLOSED";
   const parent = detail.data.parent;
+  /** 地图票正文里的 `Derived from: #N`：它来自哪条需求。 */
+  const derivedFrom = issue?.derivedFrom ?? null;
+  /** 需求票的反查结果：哪些地图是从这张需求长出来的。 */
+  const derivedMaps = detail.data.derivedMaps ?? [];
+  const derivedMapsFailed = detail.data.derivedMapsFailed === true;
   const children = detail.data.children ?? [];
   const childrenTotal = detail.data.childrenTotal ?? children.length;
   const blocking = detail.data.blocking ?? [];
@@ -472,6 +477,42 @@ export function IssueDetailView({
                 {parent.containerKind ? ` · ${parent.containerKind.toUpperCase()}` : ""}
               </Text>
             </Pressable>
+          </View>
+        </PixelCard>
+      ) : null}
+
+      {derivedFrom !== null ? (
+        <PixelCard skin={skin}>
+          <View style={styles.card}>
+            <PixelHead skin={skin}>{t("issue.derivedFrom")}</PixelHead>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={t("map.openIssue", { number: derivedFrom })}
+              onPress={() => onOpenIssue(derivedFrom, "issue")}
+            >
+              <Text style={styles.meta}>#{derivedFrom}</Text>
+            </Pressable>
+          </View>
+        </PixelCard>
+      ) : null}
+
+      {derivedMaps.length || derivedMapsFailed ? (
+        <PixelCard skin={skin}>
+          <View style={styles.card}>
+            <PixelHead skin={skin}>{t("issue.derivedMaps")}</PixelHead>
+            {derivedMaps.map((map) => (
+              <Pressable
+                key={map.number}
+                accessibilityRole="button"
+                accessibilityLabel={t("map.openIssue", { number: map.number })}
+                onPress={() => onOpenMap(map.number, "map")}
+              >
+                <Text style={styles.meta}>
+                  #{map.number} {map.title}
+                </Text>
+              </Pressable>
+            ))}
+            {derivedMapsFailed ? <Text style={styles.hint}>{t("issue.derivedMapsFailed")}</Text> : null}
           </View>
         </PixelCard>
       ) : null}

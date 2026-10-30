@@ -1,6 +1,7 @@
 import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { ListView } from "../../shared/issues.ts";
+import { parseDerivedFrom } from "../../shared/derived.ts";
 import type { ContainerDirState, DeckRecord, LocalIssueKind, LocalLayout, LocalLayoutKind, ScratchComment } from "../../shared/local-layout.ts";
 import {
   DECK_DIR, ISSUES_DIR, MAP_FILE, SCRATCH_DIR, SPEC_FILE, appendScratchComment, dedupeLabelNames, findIdempotentHit,
@@ -264,6 +265,7 @@ function toIssue(record: LocalRecord, all: readonly LocalRecord[]): Issue {
     merged: false,
     blockedBy,
     ...(record.parentKey !== undefined ? { parentKey: record.parentKey } : {}),
+    derivedFrom: parseDerivedFrom(record.body),
     body: record.body,
   };
   return { ...base, readiness: readinessOf(base) };

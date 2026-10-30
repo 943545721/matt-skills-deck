@@ -46,6 +46,7 @@ import {
   type DependencyScope, type EdgeEvidence,
 } from "../../shared/edge-rules.ts";
 import { readWorkspaceConfig } from "../tracker/workspace-repo.ts";
+import { withDerivedFrom } from "../../shared/derived.ts";
 import { mapPlanBody, mergeScopedLabels, resolveIssueProjectScope, resolveMapProject } from "./project-scope.ts";
 
 /**
@@ -1248,7 +1249,7 @@ async function runMapPlanCreate(args: unknown, context: ToolContext): Promise<To
   });
   if (!mapProject.ok) return fail("invalid", `${mapProject.detail}这张图没建。`);
 
-  const body = ensureIssueBody(mapPlanBody({
+  const plainBody = ensureIssueBody(mapPlanBody({
     destination: input.destination,
     notes: input.notes,
     decisions: input.decisions,
@@ -1256,6 +1257,14 @@ async function runMapPlanCreate(args: unknown, context: ToolContext): Promise<To
     outOfScope: input.outOfScope,
     project: mapProject.project,
   }), "map").body;
+  // 来源边写进正文而不是新建字段：GitHub 没有「衍生自」这种原生关系，正文固定行是这套
+  // 仓库已有的做法（跨仓库依赖就是 `Blocked by:`）。建票时一起带上，省一次改正文。
+  const sourceNumber = input.sourceIssue === undefined
+    ? null
+    : typeof input.sourceIssue === "number"
+      ? input.sourceIssue
+      : Number(input.sourceIssue.replace(/^#/, ""));
+  const body = sourceNumber === null ? plainBody : withDerivedFrom(plainBody, sourceNumber);
   const now = Date.now();
   const localScratch = backend.kind === "local" && (await resolveLocalStore(context.workspaceDir)).primary.kind === "scratch";
 
@@ -1358,9 +1367,20 @@ async function runMapPlanCreate(args: unknown, context: ToolContext): Promise<To
       labelsFailed: created.labelsFailed,
     });
   }
+  // 需求票那边没有可写的反向边，评论是唯一跨票可见的痕迹；写不成不算建图失败，
+  // 但要在结果里说出来——静默吞掉会让人以为「链接上了」。
+  const sourceComment = sourceNumber === null
+    ? null
+    : await writeComment(
+        backend,
+        sourceNumber,
+        `从这张需求建了地图 #${map.number}（来源写在地图正文的 \`Derived from: #${sourceNumber}\` 一行里）。`,
+      ).then((written) => (written.ok ? { ok: true } : { ok: false, detail: written.detail }));
+
   return ok({
     ok: true,
     map: { number: map.number, url: map.url, labelsFailed: map.labelsFailed },
+    ...(sourceNumber === null ? {} : { sourceIssue: sourceNumber, sourceComment }),
     /** 正文按哪个项目的 areas 分组；没有 v2 清单、也没指定项目时为 null（正文是原来的写法）。 */
     project: mapProject.project ? { key: mapProject.project.key, areas: mapProject.project.areas } : null,
     tickets,

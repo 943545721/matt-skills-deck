@@ -87,6 +87,13 @@ const issueSummary = z.object({
   readiness,
   /** 父子边：读得到时给父票号；null 表示明确没有父票；缺省表示这次没取这一列。 */
   parentKey: z.string().nullable().optional(),
+  /**
+   * 这张地图是从哪条需求长出来的（正文 `Derived from: #19` 那一行）。
+   *
+   * 只有正文被读过时才有值——列表默认不带正文，所以板子上这一位通常是缺省。
+   * 缺省 ≠ 没有来源：要区分「没读正文」和「读了但没有这一行」，后者给 null。
+   */
+  derivedFrom: z.number().int().nullable().optional(),
 });
 
 /**
@@ -267,6 +274,16 @@ export const issuesDetailRpc = defineRpc({
       children: z.array(relatedIssue).optional(),
       /** 子票总数：大于 children.length 时界面要如实说「只显示了前 N 张」。 */
       childrenTotal: z.number().int().optional(),
+      /**
+       * 反查：哪些地图票的正文写着 `Derived from: #这张票`。
+       *
+       * 需求票那边没有存指向（GitHub 没有反向关系写法），所以只能读一遍地图票的正文反查。
+       * 读不到地图列表时给空数组并在 `derivedMapsFailed` 里说明——空表不能当成「没有地图」。
+       */
+      derivedMaps: z
+        .array(z.object({ number: z.number().int(), title: z.string(), repoKey: z.string().optional() }))
+        .optional(),
+      derivedMapsFailed: z.boolean().optional(),
       /** 反向依赖：这张票正在阻塞谁。 */
       blocking: z.array(blocker).optional(),
       /** true 表示反向上游还有更多边没读回来。 */

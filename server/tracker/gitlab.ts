@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { BlockerRef, ItemKind, ListView } from "../../shared/issues.ts";
+import { parseDerivedFrom } from "../../shared/derived.ts";
 import type { Issue, IssueComment, IssueDetailResult, ListIssuesResult, ListOptions } from "./github.ts";
 import { readinessOf } from "./readiness.ts";
 import { containerKindOf } from "../../shared/container-kind.ts";
@@ -194,6 +195,7 @@ export function mapGitLabIssues(raw: unknown): Issue[] {
       labels, assignees: (Array.isArray(record?.assignees) ? record.assignees : []).map((entry) => str(rec(entry)?.username)).filter(Boolean),
       isMap: labels.some((label) => label.name === "wayfinder:map"), containerKind: containerKindOf({ labels, body: visible, isMap: labels.some((label) => label.name === "wayfinder:map") }), kind: "issue" as const, merged: false, blockedBy: blockersFromLine(body),
       parentKey: parsePartOfLine(visible),
+      derivedFrom: parseDerivedFrom(body),
       body,
     };
     return [{ ...base, readiness: readinessOf(base) }];

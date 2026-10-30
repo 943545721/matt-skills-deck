@@ -296,6 +296,13 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
             "Project key from `.paseo-deck.json` (`projects[].key`) this map belongs to. When given (or matched by `repo`), the body is generated " +
             "as a skeleton grouped by that project's `areas`; without a v2 project list the body keeps the plain destination/notes form.",
         },
+        sourceIssue: {
+          type: ["integer", "string"],
+          description:
+            "Requirement issue number this map comes from (19 or \"#19\"). Written into the map body as " +
+            "`Derived from: #19` and echoed as a comment on that issue — the tracker has no native " +
+            "\"derived from\" relation. Same-repository numbers only.",
+        },
         repo: repoProperty,
       },
       ["title", "destination", "tickets"],
@@ -808,6 +815,11 @@ export const mapPlanSchema = z.strictObject({
     .max(20),
   /** 这张图属于哪个项目：给了就按该项目 `areas` 分组建骨架；不给时按 `repo` 反查。 */
   project: z.string().min(1).max(64).optional(),
+  /**
+   * 这张图来自哪条需求：写进地图正文的 `Derived from: #N`，并在需求票上留一条评论。
+   * 只认本仓库票号——跨仓库反查要读别人的仓库，现在不做。
+   */
+  sourceIssue: z.union([z.number().int().min(1), z.string().regex(/^#?\d+$/)]).optional(),
   repo: repoKey,
 });
 

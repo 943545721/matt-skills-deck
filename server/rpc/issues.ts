@@ -9,6 +9,7 @@ import type {
   issuesStateRpc,
 } from "../../shared/issues.ts";
 import { countBoard, filterBoard, sortBoard } from "../tracker/readiness.ts";
+import { mapsDerivedFrom } from "../tracker/derived.ts";
 import { mergeScopedLabels, resolveIssueProjectScope } from "../mcp/project-scope.ts";
 import { assertLabelsReadable } from "../tracker/label-guard.ts";
 import { createIssue, postComment, replaceLabels, setIssueState, takeIssue } from "../tracker/write.ts";
@@ -84,6 +85,17 @@ export async function getIssueHandler(input: DetailInput): Promise<RpcOutput<typ
   if (!read.ok) return read;
   const result = read.result;
   if (!result.ok) return { ok: false, reason: result.reason, detail: result.detail, repo: read.repo };
+
+  // 反查只在带 requirement 标签的票上做：每一次票面详情都去读一遍整块板子的正文太贵，
+  // 而「需求票 → 它的地图」正是这一位存在的唯一用途。读不到就说读不到，不当作「没有地图」。
+  const isRequirement = result.issue.labels.some((label) => label.name === "requirement");
+  const reversed = isRequirement && !result.issue.isMap
+    ? await mapsDerivedFrom(input.workspaceDir, {
+        number: input.number,
+        ...(input.repoKey ? { repoKey: input.repoKey } : {}),
+      })
+    : null;
+
   return {
     ok: true,
     repo: read.repo,
@@ -96,6 +108,11 @@ export async function getIssueHandler(input: DetailInput): Promise<RpcOutput<typ
       ? {}
       : { children: result.children, childrenTotal: result.childrenTotal ?? result.children.length }),
     ...(result.blocking === undefined ? {} : { blocking: result.blocking, blockingTruncated: result.blockingTruncated }),
+    ...(reversed === null
+      ? {}
+      : reversed.ok
+        ? { derivedMaps: reversed.maps }
+        : { derivedMaps: [], derivedMapsFailed: true }),
   };
 }
 

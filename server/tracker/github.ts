@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { BlockerRef, ItemKind, ListView, Readiness } from "../../shared/issues.ts";
+import { parseDerivedFrom } from "../../shared/derived.ts";
 import { classifyGhError, type GhFailureReason } from "./gh-error.ts";
 import { readinessOf } from "./readiness.ts";
 import { containerKindOf } from "../../shared/container-kind.ts";
@@ -208,7 +209,7 @@ export function mapIssueNodes(nodes: readonly RawIssueNode[] | undefined, kind: 
       merged,
       blockedBy,
       ...(node.parent !== undefined ? { parentKey: parentNumber === null ? null : String(parentNumber) } : {}),
-      ...(typeof node.body === "string" ? { body: node.body } : {}),
+      ...(typeof node.body === "string" ? { body: node.body, derivedFrom: parseDerivedFrom(node.body) } : {}),
     };
     return [{ ...base, readiness: readinessOf(base) }];
   });
@@ -272,7 +273,7 @@ export function mapRestIssues(raw: unknown): Issue[] {
       kind,
       merged,
       blockedBy: [] as BlockerRef[],
-      ...(typeof record?.body === "string" ? { body: record.body } : {}),
+      ...(typeof record?.body === "string" ? { body: record.body, derivedFrom: parseDerivedFrom(record.body) } : {}),
     };
     return [{ ...base, readiness: readinessOf(base) }];
   });
