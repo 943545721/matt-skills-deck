@@ -243,6 +243,11 @@ const EN = {
   "board.staleRed": "Data is more than 30 minutes old.",
   "board.localQuery": "Filtering only the rows already loaded.",
   "board.repoAll": "All repositories",
+  "board.groups": "{n} map(s) with child tickets",
+  "board.expandAll": "Expand all",
+  "board.collapseAll": "Collapse all",
+  "board.expandChildren": "Show {n} child tickets",
+  "board.collapseChildren": "Hide {n} child tickets",
 
   "refresh.probe": "Auto refresh: every 5 s",
   "refresh.unfocused": "Auto refresh: every 15 s (panel not focused)",
@@ -804,6 +809,11 @@ const ZH: Record<PanelKey, string> = {
   "board.staleRed": "数据已超过 30 分钟。",
   "board.localQuery": "只筛选已经取回的行。",
   "board.repoAll": "全部仓库",
+  "board.groups": "{n} 张地图带子票",
+  "board.expandAll": "全部展开",
+  "board.collapseAll": "全部收起",
+  "board.expandChildren": "展开 {n} 张子票",
+  "board.collapseChildren": "收起 {n} 张子票",
 
   "refresh.probe": "自动刷新：每 5 秒",
   "refresh.unfocused": "自动刷新：每 15 秒（面板未聚焦）",

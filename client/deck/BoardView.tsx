@@ -10,6 +10,7 @@ import type { RepoTargetSummary } from "../../shared/repo";
 import { repoInfoRpc, repoSelectRpc, repoTargetsRpc, workspaceProjectsRpc } from "../../shared/repo";
 import { freshnessLevel } from "../../shared/refresh";
 import { BoardFilters } from "./board/BoardFilters";
+import { groupRows, parentKeys, rowKeyOf } from "./board/groupRows";
 import { ProjectStrip } from "./board/ProjectStrip";
 import { availableFacets, filterByFacets, projectRows } from "./board/projectRows";
 import type { DeckKey } from "./i18n";
@@ -102,6 +103,12 @@ export function BoardView({
   // 模块与角色：只在有配置的项目清单时才有选项，单项目老用户看不到这两行。
   const [area, setArea] = useState("");
   const [role, setRole] = useState("");
+  /**
+   * 收起来的地图，键是 `仓库#票号`（不是行下标）：刷新、翻页、切视图之后
+   * 同一条子票换了位置，收起状态还得跟着同一张图走。
+   * 默认空集 = 全都展开：折叠是用户点出来的状态，不该替他预设。
+   */
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
 
   const listIssues = useRpc(issuesListRpc);
   const repoInfo = useRpc(repoInfoRpc);
@@ -275,6 +282,17 @@ export function BoardView({
       kpiNum: { color: skin.colors.ink, fontSize: 18, fontFamily: skin.mono.fontFamily, fontWeight: "700" as const },
       kpiNumAccent: { color: skin.colors.acc },
       kpiNote: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily, marginLeft: "auto" as const },
+      // 地图分组：父行左边固定 14px 放 ▾ 和张数，子票靠一道 1px 竖线挂在同一列下面。
+      // 固定宽度是为了让「有子票的图」和「普通票」的卡片左边缘对齐——不对齐时一列票看起来是歪的。
+      groupBar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8, paddingBottom: 2 },
+      groupToggle: { width: 14, alignItems: "center" as const, paddingTop: 9, gap: 0 },
+      groupChevron: { fontSize: 11, lineHeight: 14, color: skin.colors.ink2, fontFamily: skin.mono.fontFamily },
+      groupChevronOpen: { color: skin.colors.acc },
+      groupCount: { fontSize: 9, lineHeight: 11, color: skin.colors.ink2, fontFamily: skin.mono.fontFamily },
+      rowWrap: { flexDirection: "row" as const, gap: 4 },
+      rowGutter: { width: 14 },
+      rowMain: { flex: 1 },
+      childWrap: { marginLeft: 14, paddingLeft: 12, borderLeftWidth: 1, borderLeftColor: skin.colors.line },
     }),
     [skin],
   );
@@ -390,6 +408,22 @@ export function BoardView({
       )
     : facetRows;
   const shownIssues = view === "closed" ? filtered.slice(0, page * PAGE_SIZE) : filtered;
+  /**
+   * 地图与子票排成可折叠的树。
+   *
+   * 只在**这一屏**上认父子（见 groupRows 的口径）：分组不改变取数与筛选，
+   * 所以筛选把父票筛掉时子票照样占一行，不会有票因为「父票没在这一屏」而消失。
+   */
+  const boardRows = groupRows(shownIssues, collapsed);
+  const groupKeys = parentKeys(shownIssues);
+  const allCollapsed = groupKeys.length > 0 && groupKeys.every((key) => collapsed.has(key));
+  const toggleGroup = (key: string): void =>
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   /** KPI 与列表来自同一窗口、同一 kind；不读服务端那份含 PR 的 counts。 */
   const windowCounts = {
     total: issues.length,
@@ -714,9 +748,23 @@ export function BoardView({
         </Text>
       ) : null}
 
+      {groupKeys.length ? (
+        <View style={styles.groupBar}>
+          <Text style={styles.hint}>{pt("board.groups", { n: groupKeys.length })}</Text>
+          <View style={styles.spacer} />
+          <PixelButton
+            skin={skin}
+            mini
+            variant="ghost"
+            label={allCollapsed ? pt("board.expandAll") : pt("board.collapseAll")}
+            onPress={() => setCollapsed(allCollapsed ? new Set() : new Set(groupKeys))}
+          />
+        </View>
+      ) : null}
+
       <FlatList
-        data={shownIssues}
-        keyExtractor={(item) => `${item.repoKey}-${item.number}`}
+        data={boardRows}
+        keyExtractor={(row) => rowKeyOf(row.item)}
         contentContainerStyle={{ paddingBottom: layout.compact ? 12 : 20 }}
         onEndReachedThreshold={0.2}
         onEndReached={() => {
@@ -764,26 +812,60 @@ export function BoardView({
             ) : null}
           </View>
         }
-        renderItem={({ item }) => {
+        renderItem={({ item: boardRow }) => {
+          const item = boardRow.item;
           // 跨仓库引用读不到时，票仍算阻塞；这里把原因挂在行下面，别让人以为它莫名其妙不能接。
           const stale = staleBlockerLabels(item);
-          const row = (
-            <TicketRow
-              skin={skin}
-              item={item}
-              showRepo={activeRepo === null && repoCount > 1}
-              repoName={repoNameOf(item.repoKey)}
-              readOnly={readOnlyOf(item.repoKey)}
-              bound={isBound(item.repoKey, item.number)}
-              onOpen={(ref) => onOpenIssue(ref)}
-              onOpenMap={(ref) => onOpenMap(ref)}
-            />
+          const body = (
+            <>
+              <TicketRow
+                skin={skin}
+                item={item}
+                showRepo={activeRepo === null && repoCount > 1}
+                repoName={repoNameOf(item.repoKey)}
+                readOnly={readOnlyOf(item.repoKey)}
+                bound={isBound(item.repoKey, item.number)}
+                onOpen={(ref) => onOpenIssue(ref)}
+                onOpenMap={(ref) => onOpenMap(ref)}
+              />
+              {stale.length ? (
+                <Text style={styles.onChecker}>{t("deps.staleBlocker", { refs: stale.join("、") })}</Text>
+              ) : null}
+            </>
           );
-          if (stale.length === 0) return row;
+
+          // 子票：靠一道竖线挂在父票下面，比自己再缩进一层的卡片窄一点，读起来才像从属关系。
+          if (boardRow.depth === 1) return <View style={styles.childWrap}>{body}</View>;
+
+          // 折叠是父行的动作，不是整行的动作：整行点击仍然是打开这张票，
+          // 所以开关不放进卡片里，单独占左边这 14px。
+          const toggle =
+            boardRow.childCount && boardRow.expanded !== undefined ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ expanded: boardRow.expanded }}
+                accessibilityLabel={
+                  boardRow.expanded
+                    ? pt("board.collapseChildren", { n: boardRow.childCount })
+                    : pt("board.expandChildren", { n: boardRow.childCount })
+                }
+                onPress={() => toggleGroup(rowKeyOf(item))}
+                style={styles.groupToggle}
+              >
+                <Text style={[styles.groupChevron, boardRow.expanded ? styles.groupChevronOpen : null]}>
+                  {boardRow.expanded ? "▾" : "▸"}
+                </Text>
+                <Text style={styles.groupCount}>{boardRow.childCount}</Text>
+              </Pressable>
+            ) : (
+              // 没有子票的票也留这 14px：不留的话，一列卡片会被地图行顶歪。
+              <View style={styles.rowGutter} />
+            );
+
           return (
-            <View style={{ gap: 2 }}>
-              {row}
-              <Text style={styles.onChecker}>{t("deps.staleBlocker", { refs: stale.join("、") })}</Text>
+            <View style={styles.rowWrap}>
+              {toggle}
+              <View style={styles.rowMain}>{body}</View>
             </View>
           );
         }}
