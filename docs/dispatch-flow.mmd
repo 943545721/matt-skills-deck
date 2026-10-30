@@ -3,7 +3,7 @@
 
 %% === 1 三种票 ===
 flowchart LR
-    REQ["需求票<br/>requirement<br/>六节骨架"] -->|"确认后建图"| MAP["地图票<br/>wayfinder:map<br/>Destination / Notes / Decisions / Fog / Out of scope"]
+    REQ["需求票<br/>requirement<br/>六节骨架"] -.->|"确认后建图（人的约定，代码不存这条边）"| MAP["地图票<br/>wayfinder:map<br/>Destination / Notes / Decisions / Fog / Out of scope"]
     MAP -->|"拆成票"| T1["子票 research"]
     MAP --> T2["子票 prototype"]
     MAP --> T3["子票 grilling"]
