@@ -202,6 +202,8 @@ export function RolesPanel({
       <View style={styles.divider} />
 
       <OrchSection skin={skin} title={t("orch.limits")}>
+        {/* 层数是这页唯一一个「数字看不出后果」的项，所以先把链条摆出来，再给按钮。 */}
+        <Text style={styles.hint}>{t("orch.depthChain")}</Text>
         <OrchStepper
           skin={skin}
           label={t("orch.depth")}
