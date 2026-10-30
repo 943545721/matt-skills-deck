@@ -1,0 +1,81 @@
+%% matt-skills-deck · 需求 → 地图 → 派单 → 回传
+%% 与 docs/dispatch-flow.html 的六个视图一一对应，改一处就改另一处。
+
+%% === 1 三种票 ===
+flowchart LR
+    REQ["需求票<br/>requirement<br/>六节骨架"] -->|"确认后建图"| MAP["地图票<br/>wayfinder:map<br/>Destination / Notes / Decisions / Fog / Out of scope"]
+    MAP -->|"拆成票"| T1["子票 research"]
+    MAP --> T2["子票 prototype"]
+    MAP --> T3["子票 grilling"]
+    MAP --> T4["子票 task"]
+    T1 --- R1["归属：挂在地图下"]
+    T1 --- R2["顺序：Blocked by #N"]
+    T1 --- R3["类型：wayfinder:*"]
+    note["三种关系彼此独立：需求票带 requirement 不抢路线标签"]
+
+%% === 2 谁触发什么 ===
+flowchart TB
+    subgraph 人
+        A1["选派单窗口"] --> A1R["只写 .deck/orchestration.json<br/>不建会话、不发消息"]
+        A2["建需求票"] --> A2R["一张 requirement 票"]
+        A3["确认需求 / 建地图"] --> A3R["复制 /wayfinder 提示词，agent 调 deck_map_plan_create"]
+    end
+    subgraph 会话里的 agent
+        B1["deck_dispatch_plan"] --> B1R["providerSpec + prompt + 拒绝清单"]
+        B2["宿主 create_agent"] --> B2R["子会话挂宿主下"]
+        B3["deck_issue_report"] --> B3R["写本机台账（时间线的会话行）"]
+    end
+    subgraph 插件钩子
+        C1["agent.turn_ended"] --> C1R["handoff 落盘 + 发给父窗口"]
+    end
+    A1R --> B1
+    B1R --> B2
+
+%% === 3 端到端 ===
+sequenceDiagram
+    participant H as 人
+    participant P as 面板
+    participant A as 派单会话 agent
+    participant K as 插件 MCP
+    participant S as 宿主 / 子会话
+    H->>P: 1 聊清楚需求与边界
+    H->>P: 2 建需求票（六节 + requirement）
+    H->>A: 3 粘贴 /wayfinder 提示词
+    A->>K: 3b deck_map_plan_create → 地图票 + 首批路线票
+    A->>K: 4 deck_dispatch_plan（tasks / map / depth）
+    K-->>A: providerSpec + tasks[].prompt + rejected[]
+    A->>S: 5 create_agent（每条 task 一个子会话）
+    S->>S: 6 按票干活，写 handoff
+    S-->>A: turn_ended 回传（同一轮只报一次）
+    A->>K: 7 向上汇报 / 收尾
+    A->>K: 8 评论 / 关票 / 台账 → 票面时间线留痕
+
+%% === 4 派单闸门 ===
+flowchart TB
+    IN["tasks[{key, prompt, difficulty, map?}]<br/>+ map + depth + dispatchId"] --> CFG
+    CFG["读 .deck/orchestration.json<br/>roles / routing / profiles<br/>maxDepth · maxChildren · mapBudgets · reportOnFinish"] --> GATE
+    CFG -->|"读不出"| F1["settings-unreadable"]
+    CFG -->|"文件坏了"| F2["settings-corrupt（不回落默认值）"]
+    GATE{"逐条过闸"} -->|拒| REJ["empty-prompt · duplicate-key · too-many-children<br/>depth-exceeded · map-budget-exhausted · route-unavailable"]
+    GATE -->|放行| OUT["providerSpec + modeId + labels + idempotencyKey<br/>+ prompt（抬头 + 正文），warnings 写借档与预算边界"]
+    DEPTH["层数链：主 0 → 子 1 → 孙 2 → 曾孙 3<br/>到上限那层拒绝，不夹到上限硬派"] --- GATE
+    SEM["MCP 传调用者自己的层（主 = 0）<br/>RPC 传子会话的层（≥ 1）"] --- DEPTH
+
+%% === 5 回传链 ===
+flowchart LR
+    END["子会话 turn_ended"] --> REP["TurnReporter"]
+    REP -->|"reportOnFinish=false"| SKIP["跳过（记 disabled）"]
+    REP -->|"按 turnId 去重"| PARENT["发给父窗口"]
+    PARENT -->|"父窗口已归档 / 发送失败"| MAIN["改送主沟通窗口<br/>回执标 rerouted: true"]
+    MAIN -->|"也失败"| WARN["记 warn，不静默丢"]
+    REP -.->|"始终"| FILE[".deck/handoffs/ 落盘"]
+
+%% === 6 现状缺口 ===
+flowchart TB
+    G1["deck.orchestration.dispatch"] --> G1R["已实现、已注册，客户端无调用方"]
+    G2["地图并发预算硬拦（runningByMapOf）"] --> G2R["只活在没人调用的 RPC 里"]
+    G3["MCP deck_dispatch_plan"] --> G3R["只按本批算，数不到宿主已开的，写进 warnings"]
+    G4["面板·编排页"] --> G4R["角色 / 限制 / 预算，没有派单按钮"]
+    G5["地图页 开始/推进（SessionSheet）"] --> G5R["建一个会话 + 填提示词，不是派单"]
+    G6["client/deck/IssueModal.tsx"] --> G6R["全仓库无引用（死代码）"]
+    G1R --- G2R
