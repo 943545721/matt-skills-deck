@@ -15,6 +15,29 @@ export function readableText(hex: string): "#000000" | "#ffffff" {
 }
 
 /**
+ * ISO 时刻 → 本机时间：同一天只写时分（16:50），今年内带月日（10-18 16:50），
+ * 跨年再带年份（2025-10-18 16:50）。
+ *
+ * 为什么按这个粒度：列表里时间是一列读数，扫的是「这几天动没动」，
+ * 不是「几点几分几秒」。一律写全串（2026-10-18T16:50:00Z）既占宽又难扫；
+ * 只写日期又会把「今天早上改的」和「十天前改的」看成一样。
+ * 解析不了返回空串——调用方那一格留空，不编一个时间出来。
+ */
+export function clockText(iso: string, nowMs: number = Date.now()): string {
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return "";
+  const date = new Date(at);
+  const now = new Date(nowMs);
+  const pad = (value: number): string => (value < 10 ? "0" : "") + value;
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const monthDay = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  if (date.getFullYear() !== now.getFullYear()) return `${date.getFullYear()}-${monthDay} ${clock}`;
+  const sameDay =
+    date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+  return sameDay ? clock : `${monthDay} ${clock}`;
+}
+
+/**
  * 阻塞者的显示名：跨仓库项带 `owner/repo#12`，本仓库项只写 `#12`。
  * 只给票号的话，同一块板子上两个仓库的 #12 会看起来是同一条边。
  */

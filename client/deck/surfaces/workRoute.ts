@@ -74,19 +74,9 @@ export function workRouteScopeKey(scope: "agent" | "workspace"): "ledger.scopeAg
 }
 
 /**
- * ISO 时刻 → 本机时间：同一天只写时分（16:50），跨天再带月日（10-18 16:50）。
- * 解析不了回空串，调用方退回显示原串；不编一个时间。
+ * 台账里那条动作时间的写法。
+ *
+ * 实现搬到 `../format.ts` 的 `clockText`：任务板的每一行也要写时间，
+ * 两处对「同一时刻怎么显示」不能有两种答案。这里保留原名字，调用方与测试不用跟着改。
  */
-export function workRouteClock(iso: string, nowMs: number = Date.now()): string {
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return "";
-  const date = new Date(at);
-  const pad = (value: number): string => (value < 10 ? "0" : "") + value;
-  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
-  const now = new Date(nowMs);
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  return sameDay ? clock : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`;
-}
+export { clockText as workRouteClock } from "../format.ts";
