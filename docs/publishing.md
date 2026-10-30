@@ -47,7 +47,7 @@
 
 已经就绪：
 
-- 清单 `paseo-plugin.json`（id、`requirements.paseo: >=0.13.0 <0.14.0`）；
+- 清单 `paseo-plugin.json`（id、`requirements.paseo: >=0.13.0 <0.15.0`）；
 - 双语 overview、README、LICENSE / NOTICE；
 - 可用的 `npm run typecheck` 与 `npm test`（提交前门槛）。
 - **远端**：`git@github.com:943545721/matt-skills-deck.git`，默认分支 `main`，**已转为公开**

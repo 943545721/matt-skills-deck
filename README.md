@@ -94,7 +94,8 @@ paseo plugin ls                          # 应显示 running
 paseo plugin logs matt-skills-deck       # 出问题时看这里
 ```
 
-前提：Paseo `>=0.13.0 <0.14.0`。GitHub 后端需要 `gh` 并已登录；GitLab 后端需要 `glab` 并已登录，
+前提：Paseo `>=0.13.0 <0.15.0`（0.14 的客户端 SDK 与 0.13 逐字节相同、服务端只多出 `defineAgentTool`
+ 与几个只读字段，所以同一份代码两条线都能跑；0.15 之后没比对过，不放）。GitHub 后端需要 `gh` 并已登录；GitLab 后端需要 `glab` 并已登录，
 写操作还要求当前账号在目标项目至少是 Reporter；只用本地后端则不需要任何 CLI。没有登录时，任务板和诊断页会直接给一个「登录 GitHub」按钮：
 浏览器流程把 gh 的一次性验证码搬到面板上，连不上 github.com 时改用 Token（只经 stdin 交给 gh，插件不保存）；
 不需要自己开终端敲命令。缺什么时面板不装死，会直接说明原因。
@@ -186,7 +187,8 @@ templates/skills/    随包的 31 个技能（中英双语）
   发布 RPC 只生成 argv / dry-run，没有执行段，也还没有发布页面。
 - 版本页没有 `git worktree list`，多工作树同时开工时只能看当前工作树。
 - 更新检查需要本机有 `git` 且能访问 GitHub；失败时如实报错，不会猜一个「已是最新」。
-- 插件 API 处于实验期，`requirements.paseo` 钉在 0.13.x。
+- 插件 API 处于实验期，`requirements.paseo` 钉在 `>=0.13.0 <0.15.0`：0.13 与 0.14 比对过，
+  0.14 的**守护进程**（不只是 App）没实跑过，只在 0.13.2 的守护进程上验过。
 
 ## 许可
 
