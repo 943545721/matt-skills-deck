@@ -36,6 +36,17 @@ export const orchestrationSettingsSchema = z.object({
   routing: z.array(routingRuleSchema),
   maxDepth: z.number().int().min(1).max(6),
   maxChildrenPerDispatch: z.number().int().min(1).max(24),
+  /**
+   * 地图级并发预算；空数组 = 不限制。
+   * 存进 `.deck/orchestration.json`，派单时服务端按它数「已经开着几个」。
+   */
+  mapBudgets: z.array(
+    z.object({
+      /** 地图引用：`owner/repo#2` 或 `#2`。 */
+      map: z.string().min(3).max(300),
+      concurrency: z.number().int().min(1).max(24),
+    }),
+  ),
   reportOnFinish: z.boolean(),
 });
 
@@ -383,6 +394,8 @@ const dispatchTaskSchema = z.object({
   title: z.string().max(500).optional(),
   prompt: z.string().min(1).max(100_000),
   difficulty: difficultySchema.optional(),
+  /** 这条任务替哪张地图干活；不传就看批次上的 `map`。 */
+  map: z.string().max(300).optional(),
 });
 
 const dispatchOutcomeSchema = z.union([
@@ -407,6 +420,7 @@ const dispatchOutcomeSchema = z.union([
       "empty-prompt",
       "duplicate-key",
       "route-unavailable",
+      "map-budget-exhausted",
       "create-failed",
     ]),
     detail: z.string(),
@@ -419,6 +433,8 @@ export const orchestrationDispatchRpc = defineRpc({
     workspaceId: z.string().min(1).max(300),
     workspaceDir: z.string().min(1).max(4096),
     tasks: z.array(dispatchTaskSchema).min(1).max(24),
+    /** 这一批默认替哪张地图干活；逐条任务可以用 `map` 覆盖。有预算的地图靠它数人。 */
+    map: z.string().max(300).optional(),
     /**
      * **这次派出的子会话**所在的层数；主窗口直接派 = 1。
      *

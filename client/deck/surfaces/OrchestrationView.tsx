@@ -26,6 +26,7 @@ import { RolesPanel } from "./orchestration/RolesPanel.tsx";
 import { RoutingPanel } from "./orchestration/RoutingPanel.tsx";
 import { TreePanel } from "./orchestration/TreePanel.tsx";
 import {
+  withMapBudget,
   withRoles,
   withRoute,
   type ClientProfile,
@@ -194,6 +195,8 @@ export function OrchestrationView({
     applySettings((current) => withRoles(current, workspaceId, patch));
   const route = (difficulty: Difficulty, rule: { profileId?: string; target?: ClientTarget } | null) =>
     applySettings((current) => withRoute(current, difficulty, rule));
+  const mapBudget = (map: string, concurrency: number | null) =>
+    applySettings((current) => withMapBudget(current, map, concurrency));
 
   const styles = useMemo(
     () => ({
@@ -277,6 +280,7 @@ export function OrchestrationView({
             busy={busy}
             onPatch={roles}
             onLimits={limits}
+            onMapBudget={mapBudget}
             {...(navigation ? { onOpen: openAgent } : {})}
           />
         ) : section === "clients" ? (

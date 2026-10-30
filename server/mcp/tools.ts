@@ -1563,10 +1563,14 @@ async function runDispatchPlan(args: unknown, context: ToolContext): Promise<Too
             // 与 RPC 侧同一条上限：一次派 20 条超长提示词会把 create_agent 灌死。
             prompt: z.string().min(1).max(100_000),
             difficulty: z.enum(["trivial", "normal", "hard", "critical"]).optional(),
+            /** 这条任务替哪张地图干活；不传就看批次上的 `map`。有预算的地图靠它数人。 */
+            map: z.string().max(300).optional(),
           }),
         )
         .min(1)
         .max(20),
+      /** 这一批默认替哪张地图干活；逐条任务可以用 `map` 覆盖。 */
+      map: z.string().max(300).optional(),
       /**
        * 派单窗口自己所在层，主窗口=0。**必填**：缺省按 0 算等于「任何人都是第一层」，
        * 层数上限就形同虚设，链条可以无限往下接。
@@ -1623,10 +1627,20 @@ async function runDispatchPlan(args: unknown, context: ToolContext): Promise<Too
     tasks: input.tasks,
     maxDepth: read.settings.maxDepth,
     maxChildrenPerDispatch: read.settings.maxChildrenPerDispatch,
+    mapBudgets: read.settings.mapBudgets,
+    ...(input.map?.trim() ? { map: input.map.trim() } : {}),
     depth,
     dispatchId,
     ...(callerAgentId ? { callerAgentId } : {}),
   });
+  if (read.settings.mapBudgets.length > 0) {
+    // 这一步只出计划，会话是调用方自己建的：插件数不到「现在已经开着几个」。
+    // 说清楚边界——不说的后果是有人以为配了预算就等于不会再并行了。
+    warnings.push(
+      `地图并发预算（${read.settings.mapBudgets.map((budget) => `${budget.map}=${budget.concurrency}`).join("、")}）在这里只按本批算：` +
+        "插件数不到宿主上已经开着几个子会话，硬拦发生在面板派单（RPC）那一步；你手工建会话时自己数着",
+    );
+  }
 
   const lang = input.lang ?? "zh";
   const accepted = plan.tasks.map((task) => {
@@ -1647,6 +1661,7 @@ async function runDispatchPlan(args: unknown, context: ToolContext): Promise<Too
     return {
       key: task.key,
       title: task.title ?? null,
+      map: task.map ?? null,
       difficulty: task.difficulty,
       provider: task.target.provider,
       model: task.target.model ?? null,

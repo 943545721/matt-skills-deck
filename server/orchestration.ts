@@ -3,9 +3,11 @@ import { matchesWorkspaceScope } from "../shared/session.ts";
 import {
   buildDispatchPreamble,
   buildAgentTree,
+  isDeckChild,
   normalizeOrchestration,
   planDispatch,
   providerSpec,
+  readMapLabel,
   resolveRoute,
   resolveRouteTarget,
   routeFromOf,
@@ -15,6 +17,7 @@ import {
   type ClientProfile,
   type ClientTarget,
   type Difficulty,
+  type DispatchRejection,
   type OrchestrationSettings,
   type RoutingRule,
   type WorkspaceRoles,
@@ -960,7 +963,9 @@ export async function saveProfile(paseo: PaseoApi, input: ProfileInput): Promise
 export interface DispatchInput {
   workspaceId: string;
   workspaceDir: string;
-  tasks: Array<{ key: string; title?: string; prompt: string; difficulty?: Difficulty }>;
+  tasks: Array<{ key: string; title?: string; prompt: string; difficulty?: Difficulty; map?: string }>;
+  /** 这一批默认替哪张地图干活；逐条可以用 `tasks[].map` 覆盖。 */
+  map?: string;
   depth?: number;
   dispatchId?: string;
   /** 实际在派单的会话；缺省用绑定的派单窗口。 */
@@ -982,15 +987,8 @@ export type DispatchOutcomeResult =
   | {
       key: string;
       ok: false;
-      reason:
-        | "unknown-workspace"
-        | "no-dispatcher"
-        | "depth-exceeded"
-        | "too-many-children"
-        | "empty-prompt"
-        | "duplicate-key"
-        | "route-unavailable"
-        | "create-failed";
+      /** 与纯函数层的拒绝原因同源，另加 `create-failed`（走到宿主才失败的）。 */
+      reason: DispatchRejection | "create-failed";
       detail: string;
     };
 
@@ -1025,6 +1023,42 @@ function dispatchIdOf(): string {
  * 建会话失败**不整批回滚**：已经建出来的子会话照常工作，失败项带原因返回，
  * 让用户能补派而不是从头再来。
  */
+/**
+ * 每张地图上「已经开着」的 deck 子会话数。
+ *
+ * 口径：「开着」= 宿主状态不是 `closed`。跑着的、等着下一轮的、出错还没收的都还占着
+ * 这台机器与额度，按已结束算就等于允许无限并行。
+ *
+ * 只数带 `deck.map` 标的子会话：接这个功能之前派出去的、以及宿主里别的子代理没有这个标，
+ * 不知道它们替哪张地图干活，就不硬算进来。读不出来时返回空表并带上原因——预算这时会
+ * 退化成「只算本批」，调用方必须把这句话说出来，不能让人以为硬拦住了。
+ */
+async function runningByMapOf(
+  paseo: PaseoApi,
+  input: { workspaceId: string; workspaceDir: string },
+): Promise<{ counts: Record<string, number>; detail: string | null }> {
+  try {
+    const listed = await paseo.agents.list();
+    const entries = ((listed as { entries?: Array<{ agent?: AgentEntryView }> }).entries ?? [])
+      .map((entry) => entry.agent)
+      .filter((agent): agent is AgentEntryView => Boolean(agent?.id));
+    const counts: Record<string, number> = {};
+    for (const agent of entries) {
+      if (!matchesWorkspaceScope({ workspaceId: agent.workspaceId, cwd: agent.cwd }, input.workspaceId, input.workspaceDir)) {
+        continue;
+      }
+      if (!isDeckChild(agent.labels)) continue;
+      if (agent.status === "closed") continue;
+      const map = readMapLabel(agent.labels);
+      if (!map) continue;
+      counts[map] = (counts[map] ?? 0) + 1;
+    }
+    return { counts, detail: null };
+  } catch (error) {
+    return { counts: {}, detail: sessionErrorDetail(error) };
+  }
+}
+
 export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promise<DispatchResult> {
   if (!input.workspaceId.trim() || !input.workspaceDir.trim()) {
     return { ok: false, reason: "invalid-workspace", detail: "需要 workspaceId 与工作区目录" };
@@ -1060,6 +1094,12 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
     };
   }
 
+  // 预算要按「宿主上已经开着几个」算，所以先数一遍；数不出来就不装作拦住了（见下面的告警）。
+  const running = await runningByMapOf(paseo, {
+    workspaceId: input.workspaceId,
+    workspaceDir: input.workspaceDir,
+  });
+
   const plan = planDispatch({
     workspaceId: input.workspaceId,
     roles: stored.settings.roles,
@@ -1068,6 +1108,9 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
     tasks: input.tasks,
     maxDepth: stored.settings.maxDepth,
     maxChildrenPerDispatch: stored.settings.maxChildrenPerDispatch,
+    mapBudgets: stored.settings.mapBudgets,
+    runningByMap: running.counts,
+    ...(input.map?.trim() ? { map: input.map.trim() } : {}),
     depth: depth - 1,
     dispatchId,
     ...(input.callerAgentId?.trim() ? { callerAgentId: input.callerAgentId.trim() } : {}),
@@ -1085,6 +1128,19 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
   const warnings: string[] = [];
   if (stored.settings.maxDepth < depth + 1) {
     warnings.push(`当前第 ${depth} 层，上限 ${stored.settings.maxDepth} 层：子会话不能再往下派`);
+  }
+  if (stored.settings.mapBudgets.length > 0) {
+    if (running.detail) {
+      warnings.push(
+        `地图并发预算这次只能按本批算：宿主会话清单读不出来（${running.detail}），没法知道每张图上已经开着几个`,
+      );
+    }
+    // 有预算却没说是哪张地图的票：这条边不受约束，要说出来，别让人以为配了就生效。
+    if (!input.map?.trim() && plan.tasks.some((task) => !task.map)) {
+      warnings.push(
+        `配了地图并发预算（${stored.settings.mapBudgets.map((budget) => `${budget.map}=${budget.concurrency}`).join("、")}），但这批任务没带 map：这些任务不受预算约束`,
+      );
+    }
   }
 
   const results: DispatchOutcomeResult[] = [];

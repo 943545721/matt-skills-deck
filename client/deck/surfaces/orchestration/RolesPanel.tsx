@@ -6,6 +6,7 @@ import { PixelButton, PixelCard, PixelHead } from "../../pixel.tsx";
 import type { AgentInfo } from "../registry.ts";
 import { rolesOf, type OrchestrationSettings } from "./types.ts";
 import type { PanelKey } from "../../panel/panelText.tsx";
+import { MapBudgetPanel } from "./MapBudgetPanel.tsx";
 
 /**
  * 角色：哪个窗口负责「讨论」，哪个窗口负责「派单」。
@@ -91,6 +92,7 @@ export function RolesPanel({
   agents,
   onPatch,
   onLimits,
+  onMapBudget,
   onOpen,
   busy,
 }: {
@@ -101,6 +103,8 @@ export function RolesPanel({
   agents: AgentInfo[];
   onPatch(patch: { mainAgentId?: string | null; dispatcherAgentId?: string | null }): void;
   onLimits(patch: { maxDepth?: number; maxChildrenPerDispatch?: number; reportOnFinish?: boolean }): void;
+  /** 地图并发预算：`concurrency` 为 null 表示删掉这条。 */
+  onMapBudget(map: string, concurrency: number | null): void;
   /** 宿主能切窗时才有：点一行 = 设为角色 + 切到那个会话。没有就只设角色。 */
   onOpen?(agent: AgentInfo): void;
   /** 有保存在飞：计数按钮先禁用，避免两下都按同一份旧值算。 */
@@ -319,6 +323,10 @@ export function RolesPanel({
         />
       </View>
       <Text style={styles.hint}>{t("orch.limitsHint")}</Text>
+
+      <View style={styles.divider} />
+
+      <MapBudgetPanel skin={skin} t={t} settings={settings} busy={busy} onChange={onMapBudget} />
       {agents.length === 0 ? <Text style={styles.warn}>{t("orch.noAgentsWarn")}</Text> : null}
     </ScrollView>
   );

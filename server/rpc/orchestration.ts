@@ -102,6 +102,8 @@ export async function orchestrationDispatchHandler(
     workspaceId: input.workspaceId,
     workspaceDir: input.workspaceDir,
     tasks: input.tasks,
+    // 地图并发预算靠它数人：没有这一位，配了预算也只会按「本批」算。
+    ...(input.map ? { map: input.map } : {}),
     ...(input.depth !== undefined ? { depth: input.depth } : {}),
     ...(input.dispatchId ? { dispatchId: input.dispatchId } : {}),
     ...(input.callerAgentId ? { callerAgentId: input.callerAgentId } : {}),

@@ -71,6 +71,20 @@ export interface WorkspaceRoles {
   dispatcherAgentId?: string;
 }
 
+/**
+ * 一张地图的并发预算：同一时刻最多几个子会话在替它干活。
+ *
+ * 为什么按并发而不是总量：票能不能开工由依赖决定，frontier 一般只有一两张。
+ * 记「一共开几个」会在票还没解开时就把额度占光，最后剩下的那几张只能等；
+ * 记「同时几个」才是能执行的那条约束——凑够数就等，凑不够就派。
+ *
+ * `map` 与票面的写法一致：`owner/repo#2`（跨仓库）或 `#2`（本仓库）。
+ */
+export interface MapBudget {
+  map: string;
+  concurrency: number;
+}
+
 export interface OrchestrationSettings {
   roles: WorkspaceRoles[];
   routing: RoutingRule[];
@@ -78,12 +92,16 @@ export interface OrchestrationSettings {
   maxDepth: number;
   /** 一次派单最多建几个子会话。 */
   maxChildrenPerDispatch: number;
+  /** 地图级并发预算；没有条目 = 不限制（保持接这个功能之前的行为）。 */
+  mapBudgets: MapBudget[];
   /** 子会话结束时是否把结果推给上一级；关掉只写台账不推消息。 */
   reportOnFinish: boolean;
 }
 
 export const DEFAULT_MAX_DEPTH = 3;
 export const DEFAULT_MAX_CHILDREN = 6;
+/** 同一张地图上并行跑超过这个数，基本是失控而不是产能。 */
+export const MAX_MAP_CONCURRENCY = 12;
 
 const DEFAULT_ROUTE: ClientTarget = { provider: "claude" };
 
@@ -92,8 +110,34 @@ export const DEFAULT_ORCHESTRATION: OrchestrationSettings = {
   routing: [],
   maxDepth: DEFAULT_MAX_DEPTH,
   maxChildrenPerDispatch: DEFAULT_MAX_CHILDREN,
+  mapBudgets: [],
   reportOnFinish: true,
 };
+
+/**
+ * 地图引用归一：`owner/repo#2` / `key#2` / `#2` 都收，别的写法一律不认。
+ *
+ * 比较时按小写：GitHub 的 owner/repo 本就不分大小写，项目键规则里也只有小写。
+ */
+export function normalizeMapRef(value: unknown): string | null {
+  const raw = text(value);
+  const match = /^(?:[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+|[A-Za-z0-9._-]+)?#(\d{1,10})$/.exec(raw);
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (!Number.isInteger(number) || number <= 0) return null;
+  return raw.toLowerCase();
+}
+
+/** 某张地图的并发预算；没有条目回 null（= 不限制）。 */
+export function mapBudgetOf(
+  budgets: readonly MapBudget[],
+  map: string | null | undefined,
+): MapBudget | null {
+  const wanted = normalizeMapRef(map);
+  if (!wanted) return null;
+  return budgets.find((budget) => budget.map === wanted) ?? null;
+}
+
 
 /** `provider/model` → 两段；没有 `/` 时 model 为 undefined。 */
 export function parseProviderSpec(spec: string): { provider: string; model?: string } {
@@ -236,11 +280,19 @@ export const DECK_CHILD_LABEL = "deck.child";
 export const DECK_TICKET_LABEL = "deck.ticket";
 export const DECK_DIFFICULTY_LABEL = "deck.difficulty";
 export const DECK_DISPATCH_LABEL = "deck.dispatch";
+/**
+ * 这个子会话在替哪张地图干活。
+ *
+ * 地图级并发预算全靠它数人：没有这个标，下一次派单就不知道「已经有两个在跑了」。
+ */
+export const DECK_MAP_LABEL = "deck.map";
 
 export interface ChildLabelInput {
   dispatcherAgentId: string;
   /** 票号或地图条目键，例如 `owner/repo#12`。 */
   ticketKey?: string;
+  /** 这张票属于哪张地图；有值才写标，数预算靠它。 */
+  map?: string;
   difficulty: Difficulty;
   /** 同一次派单的批次号，便于一次撤掉。 */
   dispatchId?: string;
@@ -259,8 +311,15 @@ export function buildChildLabels(input: ChildLabelInput): Record<string, string>
     [DECK_DIFFICULTY_LABEL]: input.difficulty,
   };
   if (input.ticketKey?.trim()) labels[DECK_TICKET_LABEL] = input.ticketKey.trim();
+  const map = normalizeMapRef(input.map);
+  if (map) labels[DECK_MAP_LABEL] = map;
   if (input.dispatchId?.trim()) labels[DECK_DISPATCH_LABEL] = input.dispatchId.trim();
   return labels;
+}
+
+/** 一个子会话标签里记的地图引用；没写就是 null。 */
+export function readMapLabel(labels: Readonly<Record<string, string>> | undefined): string | null {
+  return normalizeMapRef(labels?.[DECK_MAP_LABEL]);
 }
 
 export function readParentAgentId(labels: Readonly<Record<string, string>> | undefined): string | null {
@@ -284,6 +343,8 @@ export interface DispatchTaskInput {
   prompt: string;
   /** 不传就按 normal。 */
   difficulty?: Difficulty;
+  /** 这条任务在替哪张地图干活；不传就看批次上的 `map`，都没有就不受地图预算约束。 */
+  map?: string;
 }
 
 export type DispatchRejection =
@@ -293,7 +354,8 @@ export type DispatchRejection =
   | "too-many-children"
   | "empty-prompt"
   | "duplicate-key"
-  | "route-unavailable";
+  | "route-unavailable"
+  | "map-budget-exhausted";
 
 export interface DispatchTask extends DispatchTaskInput {
   difficulty: Difficulty;
@@ -332,6 +394,17 @@ export interface DispatchPlanInput {
   tasks: readonly DispatchTaskInput[];
   maxDepth: number;
   maxChildrenPerDispatch: number;
+  /** 地图级并发预算；不传 = 不限制（与接这个功能之前一样）。 */
+  mapBudgets?: readonly MapBudget[];
+  /**
+   * 每张地图上「已经开着」的子会话数。
+   *
+   * 只有拿得到宿主会话清单的调用方（面板派单）能给；拿不到的（MCP 工具）留空，
+   * 这时预算退化成「这一批之内」的约束，且调用方要把这件事说出来。
+   */
+  runningByMap?: Readonly<Record<string, number>>;
+  /** 这一批任务默认替哪张地图干活（逐条可以用 `task.map` 覆盖）。 */
+  map?: string;
   /** 派单窗口现在是第几层；主窗口是 0，派单窗口是 1。 */
   depth: number;
   dispatchId: string;
@@ -397,6 +470,10 @@ export function planDispatch(input: DispatchPlanInput): DispatchPlan {
 
   const seen = new Set<string>();
   let accepted = 0;
+  // 每张地图这一批已经占掉的并发名额（宿主上开着的由 `runningByMap` 单独给）。
+  const usedByMap = new Map<string, number>();
+  const usedOf = (map: string): number => usedByMap.get(map) ?? 0;
+  const batchMap = normalizeMapRef(input.map);
   for (const task of input.tasks) {
     const key = task.key.trim();
     if (!key) {
@@ -416,6 +493,20 @@ export function planDispatch(input: DispatchPlanInput): DispatchPlan {
       reject({ ...task, key }, "too-many-children", `一次最多派 ${input.maxChildrenPerDispatch} 个`);
       continue;
     }
+    const taskMap = normalizeMapRef(task.map) ?? batchMap;
+    const budget = taskMap ? mapBudgetOf(input.mapBudgets ?? [], taskMap) : null;
+    if (budget && taskMap) {
+      // 已经开着的 + 这一批刚才放行的：两个都算，否则一次派 5 条能把上限当空气。
+      const used = (input.runningByMap?.[taskMap] ?? 0) + usedOf(taskMap);
+      if (used >= budget.concurrency) {
+        reject(
+          { ...task, key },
+          "map-budget-exhausted",
+          `地图 ${budget.map} 同时最多跑 ${budget.concurrency} 个子会话，现在已经有 ${used} 个（开着的与本批已放行的都算）：等一个结束再派`,
+        );
+        continue;
+      }
+    }
     const difficulty: Difficulty = task.difficulty ?? "normal";
     const rule = resolveRoute({ routing: input.routing }, difficulty);
     const resolution = resolveRouteTarget(rule, input.profiles);
@@ -425,9 +516,12 @@ export function planDispatch(input: DispatchPlanInput): DispatchPlan {
     }
     const target = resolution.target;
     accepted += 1;
+    // 放行的才占名额，被拒的不占：否则一批里前面几条失败会把后面的额度吃掉。
+    if (taskMap) usedByMap.set(taskMap, usedOf(taskMap) + 1);
     tasks.push({
       ...task,
       key,
+      ...(taskMap ? { map: taskMap } : {}),
       difficulty,
       target,
       providerSpec: providerSpec(target),
@@ -437,6 +531,7 @@ export function planDispatch(input: DispatchPlanInput): DispatchPlan {
         difficulty,
         dispatchId: input.dispatchId,
         ...(task.key ? { ticketKey: task.key } : {}),
+        ...(taskMap ? { map: taskMap } : {}),
       }),
       idempotencyKey: `deck-dispatch-${stableKey([input.workspaceId, key, input.dispatchId])}`,
     });
@@ -681,8 +776,49 @@ export function normalizeOrchestration(value: unknown): OrchestrationSettings {
     routing,
     maxDepth,
     maxChildrenPerDispatch: maxChildren,
+    mapBudgets: normalizeMapBudgets(record.mapBudgets),
     reportOnFinish: record.reportOnFinish === undefined ? true : record.reportOnFinish === true,
   };
+}
+
+/**
+ * 地图预算归一：写坏的条目丢掉而不是夹成别的数。
+ *
+ * 与数值上限的差别：`maxDepth` 写坏了夹回默认值仍然「能用」；预算写坏了例如把地图
+ * 引用写错，夹出来的是一条指向不存在地图的预算——不生效还让人以为配好了。同一张地图
+ * 写了多条取第一条：后来的重复项不会覆盖掉人认真写的那条。
+ */
+export function normalizeMapBudgets(value: unknown): MapBudget[] {
+  if (!Array.isArray(value)) return [];
+  const out: MapBudget[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const record = asRecord(item);
+    if (!record) continue;
+    const map = normalizeMapRef(record.map);
+    if (!map || seen.has(map)) continue;
+    const raw = typeof record.concurrency === "number" ? Math.round(record.concurrency) : Number.NaN;
+    if (!Number.isFinite(raw)) continue;
+    seen.add(map);
+    out.push({ map, concurrency: Math.min(MAX_MAP_CONCURRENCY, Math.max(1, raw)) });
+  }
+  return out;
+}
+
+/** 设一张地图的预算；`concurrency` 为 null 表示删掉这条（恢复不限制）。 */
+export function withMapBudget(
+  settings: OrchestrationSettings,
+  map: string,
+  concurrency: number | null,
+): OrchestrationSettings {
+  const wanted = normalizeMapRef(map);
+  if (!wanted) return settings;
+  const rest = settings.mapBudgets.filter((budget) => budget.map !== wanted);
+  const next =
+    concurrency === null
+      ? rest
+      : [...rest, { map: wanted, concurrency: clampInt(concurrency, 1, MAX_MAP_CONCURRENCY, 1) }];
+  return { ...settings, mapBudgets: next };
 }
 
 function clampInt(value: unknown, min: number, max: number, fallback: number): number {

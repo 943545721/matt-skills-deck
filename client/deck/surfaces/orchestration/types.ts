@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { MAX_MAP_CONCURRENCY } from "../../../../shared/orchestration.ts";
 import {
   agentRowSchema,
   clientProfileSchema,
@@ -78,6 +79,24 @@ export function withRoles(
   const others = settings.roles.filter((role) => role.workspaceId !== workspaceId);
   const keep = nextRole.mainAgentId || nextRole.dispatcherAgentId;
   return { ...settings, roles: keep ? [...others, nextRole] : others };
+}
+
+/**
+ * 设一张地图的并发预算；`concurrency` 为 null 表示删掉这条。
+ *
+ * 排序按地图名：面板上一行一个地图，改完值不该让行跳到别处。
+ */
+export function withMapBudget(
+  settings: OrchestrationSettings,
+  map: string,
+  concurrency: number | null,
+): OrchestrationSettings {
+  const rest = settings.mapBudgets.filter((budget) => budget.map !== map);
+  const next =
+    concurrency === null
+      ? rest
+      : [...rest, { map, concurrency: Math.min(MAX_MAP_CONCURRENCY, Math.max(1, Math.round(concurrency))) }];
+  return { ...settings, mapBudgets: next.sort((left, right) => left.map.localeCompare(right.map)) };
 }
 
 /** 换掉某一档难度的路由；`rule` 为 null 表示清掉这一档。 */
