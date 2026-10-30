@@ -69,6 +69,16 @@ export function SkillMatrix({
     .filter((row) => row.exists)
     .flatMap((row) => row.cells.map((cell) => cell.dir));
 
+  /**
+   * 会被 git 一起提交的技能目录。
+   *
+   * 只列 `ignored === false` 这一种：`null` 是「判断不了」（不是仓库、没装 git），
+   * 把它混进这份清单等于替用户下了结论。插件不改 `.gitignore`，这里只把事实摆出来。
+   */
+  const committedDirs = rows
+    .filter((row) => row.exists)
+    .flatMap((row) => row.cells.filter((cell) => cell.ignored === false).map((cell) => cell.dir));
+
   return (
     <ScrollView contentContainerStyle={{ gap: 10, paddingBottom: 20 }}>
       <Text style={skin.hintOnChecker}>{t("skillsMode.matrixHint")}</Text>
@@ -129,6 +139,12 @@ export function SkillMatrix({
           {note}
         </Text>
       ))}
+
+      {committedDirs.length ? (
+        <Text style={skin.hint} selectable>
+          {t("skillsMode.gitNotIgnored", { dirs: committedDirs.join("、") })}
+        </Text>
+      ) : null}
 
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", paddingTop: 4 }}>
         <PixelButton

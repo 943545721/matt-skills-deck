@@ -36,6 +36,13 @@ const matrixRowSchema = z.object({
       current: z.number().int(),
       differs: z.array(z.string()),
       missing: z.array(z.string()),
+      /**
+       * 这个技能目录会不会被 git 当成本项目的内容提交。
+       *
+       * `null` 表示判断不了（目录不在、不是 git 仓库、没装 git）。插件**从不**改各项目的
+       * `.gitignore`：装技能会不会把一堆文件带进提交，是用户自己的仓库策略，这里只把事实摆出来。
+       */
+      ignored: z.boolean().nullable(),
     }),
   ),
 });

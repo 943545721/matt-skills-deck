@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,6 +13,7 @@ import { makeSkill, tempRoot, workspaceWith, writeLocalSkill } from "./helpers/s
 
 const pluginDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDirs = [];
+const gitAvailable = spawnSync("git", ["--version"]).status === 0;
 
 function tempWorkspace() {
   const dir = mkdtempSync(path.join(tmpdir(), "deck-skills-"));
@@ -228,3 +230,35 @@ test("矩阵：各自模式全部更新时冲突不被覆盖，冲突逐条列�
   assert.equal(staleCell.status, "differs");
   assert.deepEqual(staleCell.differs, ["ste"]);
 });
+
+test(
+  "矩阵：说清技能目录会不会被 git 提交——忽略、没忽略、判断不了是三回事",
+  { skip: !gitAvailable && "本机没有 git" },
+  async () => {
+    const workspace = trackDir(workspaceWith([{ key: "web", dir: "apps/web" }, { key: "gone", dir: "gone" }]));
+    const skills = matrixFixtures();
+    assert.equal(spawnSync("git", ["init", "-q", workspace]).status, 0);
+    // 只忽略 .claude：另一侧照旧会被提交。
+    writeFileSync(path.join(workspace, ".gitignore"), ".claude/\n", "utf8");
+
+    // 目录不在：判断不了，不能写成「不会被提交」。
+    rmSync(path.join(workspace, "gone"), { recursive: true, force: true });
+
+    const matrix = await skillsMatrix({ skills, workspaceDir: workspace, workspaceMode: "per-project" });
+    const web = matrix.rows[0];
+    assert.equal(cellOf(web, "claude").ignored, true, ".gitignore 里有 .claude/");
+    assert.equal(cellOf(web, "codex").ignored, false, ".agents 没被忽略，装进去会跟着提交");
+    for (const cell of matrix.rows[1].cells) {
+      assert.equal(cell.ignored, null, "目录不在就是「判断不了」");
+    }
+
+    // 插件只读事实，从不改用户的 .gitignore。
+    assert.equal(readFileSync(path.join(workspace, ".gitignore"), "utf8"), ".claude/\n");
+
+    // 不是 git 仓库：同样只能说「判断不了」。
+    const plain = trackDir(workspaceWith([{ key: "web", dir: "apps/web" }]));
+    const plainMatrix = await skillsMatrix({ skills, workspaceDir: plain, workspaceMode: "per-project" });
+    for (const cell of plainMatrix.rows[0].cells) assert.equal(cell.ignored, null);
+    assert.equal(existsSync(path.join(plain, ".gitignore")), false, "不该替用户造一个 .gitignore 出来");
+  },
+);

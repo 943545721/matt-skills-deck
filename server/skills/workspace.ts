@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { promisify } from "node:util";
 import type { SkillMode } from "../../shared/workspace-projects.ts";
 import { getSettings } from "../settings.ts";
 import { readWorkspaceConfig } from "../tracker/workspace-repo.ts";
@@ -356,6 +358,8 @@ export interface MatrixCell {
   differs: string[];
   /** 这个目录里没有的技能 id。 */
   missing: string[];
+  /** 会不会被 git 提交；`null` = 判断不了（目录不在 / 不是 git 仓库 / 没装 git）。 */
+  ignored: boolean | null;
 }
 
 export interface MatrixRow {
@@ -374,6 +378,27 @@ export interface SkillsMatrix {
   notes: string[];
 }
 
+const execFileAsync = promisify(execFile);
+
+/**
+ * 这个技能目录会不会被 git 提交。
+ *
+ * 用 `git check-ignore` 问 git 自己，不自己解析 `.gitignore`——目录被忽略、父目录被忽略、
+ * 全局 excludesFile、`.git/info/exclude` 都算数，自己写一套规则迟早漏一种。
+ *
+ * `null` 是「判断不了」（目录不在、不是 git 仓库、没装 git）。这和「不会被提交」不是
+ * 一回事，界面上不能混着说：一个说「忽略」、另一个说「不知道」，人才知道要不要看一眼。
+ */
+async function gitIgnored(dir: string, rel: string): Promise<boolean | null> {
+  try {
+    await execFileAsync("git", ["-C", dir, "check-ignore", "-q", rel], { timeout: 5_000 });
+    return true;
+  } catch (error) {
+    // 退出码 1 = 没被忽略；其它（128：不是仓库，或 git 不在）一律算「不知道」。
+    return (error as { code?: unknown } | null)?.code === 1 ? false : null;
+  }
+}
+
 /**
  * 项目 × 客户端矩阵。
  *
@@ -389,46 +414,60 @@ export async function skillsMatrix(input: {
   skillDirs(input.workspaceDir);
   const workspaceMode = input.workspaceMode ?? getSettings().skillsMode;
   const { projects, notes } = await skillProjectsOf(input.workspaceDir);
-  const rows: MatrixRow[] = projects.map((project) => {
-    const resolved = resolveSkillMode(project.projectMode, workspaceMode);
-    const state = resolveSkillProjectDir(input.workspaceDir, project.dir);
-    const realDir = state.realDir;
-    const cells: MatrixCell[] = SKILL_CLIENTS.map((client) => {
-      // 目录不在也照样给出「本来该装到哪儿」的路径：界面上不留空，人也知道缺的是什么。
-      const dir = path.join(realDir ?? project.dir, SKILL_CLIENT_ROOT[client]);
-      if (!realDir) {
-        return {
-          client,
-          dir,
-          status: "none" as const,
-          total: input.skills.length,
-          current: 0,
-          differs: [],
-          missing: input.skills.map((skill) => skill.id),
-        };
-      }
-      const differs: string[] = [];
-      const missing: string[] = [];
-      let current = 0;
-      for (const skill of input.skills) {
-        const at = skillStateAt(skill, dir);
-        if (at === "current") current += 1;
-        else if (at === "differs") differs.push(skill.id);
-        else missing.push(skill.id);
-      }
-      const status: MatrixCellStatus =
-        current === input.skills.length ? "current" : differs.length > 0 ? "differs" : current > 0 ? "missing" : "none";
-      return { client, dir, status, total: input.skills.length, current, differs: differs.sort(), missing: missing.sort() };
-    });
-    return {
-      key: project.key,
-      dir: realDir ?? project.dir,
-      exists: realDir !== null,
-      problem: state.problem,
-      mode: resolved.mode,
-      modeSource: resolved.source,
-      cells,
-    };
-  });
+  const rows: MatrixRow[] = await Promise.all(
+    projects.map(async (project) => {
+      const resolved = resolveSkillMode(project.projectMode, workspaceMode);
+      const state = resolveSkillProjectDir(input.workspaceDir, project.dir);
+      const realDir = state.realDir;
+      const cells: MatrixCell[] = await Promise.all(
+        SKILL_CLIENTS.map(async (client) => {
+          // 目录不在也照样给出「本来该装到哪儿」的路径：界面上不留空，人也知道缺的是什么。
+          const rel = SKILL_CLIENT_ROOT[client];
+          const dir = path.join(realDir ?? project.dir, rel);
+          // 目录不在就没有「会不会被提交」这回事，报「不知道」——它和「不会被提交」不是一件事。
+          const ignored = realDir ? await gitIgnored(realDir, rel) : null;
+          if (!realDir) {
+            return {
+              client,
+              dir,
+              status: "none" as const,
+              total: input.skills.length,
+              current: 0,
+              differs: [],
+              missing: input.skills.map((skill) => skill.id),
+              ignored,
+            };
+          }
+          const differs: string[] = [];
+          const missing: string[] = [];
+          let current = 0;
+          for (const skill of input.skills) {
+            const at = skillStateAt(skill, dir);
+            if (at === "current") current += 1;
+            else if (at === "differs") differs.push(skill.id);
+            else missing.push(skill.id);
+          }
+          const status: MatrixCellStatus =
+            current === input.skills.length
+              ? "current"
+              : differs.length > 0
+                ? "differs"
+                : current > 0
+                  ? "missing"
+                  : "none";
+          return { client, dir, status, total: input.skills.length, current, differs: differs.sort(), missing: missing.sort(), ignored };
+        }),
+      );
+      return {
+        key: project.key,
+        dir: realDir ?? project.dir,
+        exists: realDir !== null,
+        problem: state.problem,
+        mode: resolved.mode,
+        modeSource: resolved.source,
+        cells,
+      };
+    }),
+  );
   return { workspaceMode, rows, notes };
 }
