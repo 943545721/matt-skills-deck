@@ -17,16 +17,26 @@
   header{padding:18px 22px 10px;border-bottom:1px solid var(--line)}
   header h1{margin:0 0 4px;font-size:16px;font-weight:700;letter-spacing:.02em}
   header p{margin:0;color:var(--dim);font-size:12px}
+  /* 页签的 radio 必须挂在 body 顶层：`~` 只认兄弟，main 是 body 的子元素。
+     放进 nav 里就只能选到 nav 里的标签，选不到 main —— 那会让整页只剩页签和页脚。 */
+  body > input[name="v"]{position:absolute;top:0;left:0;width:1px;height:1px;opacity:0;
+    clip-path:inset(50%)}
   nav{display:flex;flex-wrap:wrap;gap:2px;padding:8px 22px 0;border-bottom:1px solid var(--line)}
-  nav input{position:absolute;opacity:0;pointer-events:none}
   nav label{padding:5px 10px;font-size:12px;color:var(--dim);border:1px solid transparent;
     border-bottom:none;cursor:pointer;font-family:var(--mono)}
   nav label:hover{color:var(--ink)}
-  nav input:checked + label{color:var(--acc);border-color:var(--line);background:var(--card)}
+  #v1:checked ~ nav label[for="v1"], #v2:checked ~ nav label[for="v2"],
+  #v3:checked ~ nav label[for="v3"], #v4:checked ~ nav label[for="v4"],
+  #v5:checked ~ nav label[for="v5"], #v6:checked ~ nav label[for="v6"],
+  nav label:focus-visible{color:var(--acc);border-color:var(--line);background:var(--card)}
   main{padding:18px 22px 40px;max-width:1060px}
   section{display:none}
   #v1:checked ~ main #s1, #v2:checked ~ main #s2, #v3:checked ~ main #s3,
   #v4:checked ~ main #s4, #v5:checked ~ main #s5, #v6:checked ~ main #s6{display:block}
+  /* 兜底：切换规则万一没生效，也别让页面看起来是空的 */
+  main #s1{display:block}
+  #v2:checked ~ main #s1, #v3:checked ~ main #s1, #v4:checked ~ main #s1,
+  #v5:checked ~ main #s1, #v6:checked ~ main #s1{display:none}
   h2{font-size:14px;margin:0 0 6px;font-family:var(--mono);font-weight:700}
   h2::before{content:"▚ ";color:var(--acc)}
   .note{color:var(--dim);font-size:12px;margin:0 0 14px}
@@ -76,16 +86,24 @@
 
 <header>
   <h1>matt-skills-deck · 需求 → 地图 → 派单 → 回传</h1>
-  <p>六张图回答一件事：谁在哪一步动手，插件在哪一步只是配置。断网可看，单文件，无外部依赖。</p>
+  <p>六张图回答一件事：谁在哪一步动手，插件在哪一步只是配置。点上面六个页签切换；断网可看，单文件，无外部依赖。</p>
 </header>
 
+<!-- 六个页签开关。放在 body 顶层（不是 nav 里）：main 要能通过 `~` 选到它们。 -->
+<input type="radio" name="v" id="v1" checked>
+<input type="radio" name="v" id="v2">
+<input type="radio" name="v" id="v3">
+<input type="radio" name="v" id="v4">
+<input type="radio" name="v" id="v5">
+<input type="radio" name="v" id="v6">
+
 <nav>
-  <input type="radio" name="v" id="v1" checked><label for="v1">1 三种票</label>
-  <input type="radio" name="v" id="v2"><label for="v2">2 谁触发什么</label>
-  <input type="radio" name="v" id="v3"><label for="v3">3 端到端</label>
-  <input type="radio" name="v" id="v4"><label for="v4">4 派单闸门</label>
-  <input type="radio" name="v" id="v5"><label for="v5">5 回传链</label>
-  <input type="radio" name="v" id="v6"><label for="v6">6 现状缺口</label>
+  <label for="v1">1 三种票</label>
+  <label for="v2">2 谁触发什么</label>
+  <label for="v3">3 端到端</label>
+  <label for="v4">4 派单闸门</label>
+  <label for="v5">5 回传链</label>
+  <label for="v6">6 现状缺口</label>
 </nav>
 
 <main>
