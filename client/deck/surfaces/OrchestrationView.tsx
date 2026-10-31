@@ -9,6 +9,7 @@ import {
   orchestrationProviderDiagnosticRpc,
   orchestrationProviderInstallRpc,
   orchestrationProviderModelsRpc,
+  orchestrationProviderRefreshRpc,
   orchestrationProviderRevealRpc,
   orchestrationProviderRpc,
   orchestrationSaveRpc,
@@ -83,6 +84,7 @@ export function OrchestrationView({
   const diagnosticRpc = useRpc(orchestrationProviderDiagnosticRpc);
   const revealRpc = useRpc(orchestrationProviderRevealRpc);
   const modelsRpc = useRpc(orchestrationProviderModelsRpc);
+  const refreshCatalogRpc = useRpc(orchestrationProviderRefreshRpc);
   const siteRpc = useRpc(orchestrationSiteRpc);
 
   const agents = useDeckWorkspaceAgents(workspaceId, workspaceDir);
@@ -336,6 +338,19 @@ export function OrchestrationView({
                 return result.ok
                   ? { ok: true as const, endpoint: result.endpoint, models: result.models }
                   : { ok: false as const, detail: result.detail };
+              } catch (error) {
+                return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
+              }
+            }}
+            onRefreshCatalog={async () => {
+              try {
+                const result = await refreshCatalogRpc({ workspaceDir });
+                if (!result.ok) return { ok: false as const, detail: result.detail };
+                // 刷新后宿主的快照变了：本页的模型计数也重取一次，两处说的是同一份目录。
+                // 不 await：重取失败是「本页数字旧了」，不能把已经成功的刷新报成失败。
+                // 警告由客户端面板就地显示（带警告色），不再另弹一层 toast。
+                void state.refetch();
+                return result;
               } catch (error) {
                 return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
               }

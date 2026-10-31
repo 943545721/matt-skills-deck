@@ -514,3 +514,50 @@ export const orchestrationProviderModelsRpc = defineRpc({
     }),
   ]),
 });
+
+/**
+ * 刷新结果的上限。
+ *
+ * 输出要过 `output.parseAsync`：宿主报一条超长模型 id，整包校验就会失败，
+ * 一次已经成功的刷新会被报成错误。所以上限由这里定义，服务端按同一组数
+ * 截断后再返回，而不是让契约去拒收。
+ */
+export const PROVIDER_MODEL_ID_MAX = 200;
+export const PROVIDER_MODELS_MAX = 2000;
+
+export const providerModelListSchema = z.object({
+  id: z.string(),
+  models: z.array(z.string().max(PROVIDER_MODEL_ID_MAX)).max(PROVIDER_MODELS_MAX),
+});
+
+/** 刷新后一个客户端与它的模型 id。 */
+export type ProviderModelList = z.infer<typeof providerModelListSchema>;
+
+/**
+ * 让宿主重读 provider 快照。
+ *
+ * 模型清单是宿主按工作区缓存的：改完注入地址或模型列表后，宿主的模型选择器
+ * 还停在旧快照上。这里发一次 `providers.refresh` 再回读快照，界面与宿主
+ * 拿到的都是刷新后的清单。只动缓存：不重启 App，也不碰已经在跑的会话。
+ */
+export const orchestrationProviderRefreshRpc = defineRpc({
+  name: "deck.orchestration.provider.refresh",
+  input: z.object({
+    workspaceDir: z.string().min(1).max(4096),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      workspaceDir: z.string(),
+      /** 刷新后宿主报出的客户端与它的模型 id（停用的客户端不在内）。 */
+      providers: z.array(providerModelListSchema),
+      /** 刷新成功但要说清的事，例如某个客户端的目录读取失败。 */
+      warnings: z.array(z.string()),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["invalid", "refresh-failed", "snapshot-failed"]),
+      detail: z.string(),
+    }),
+  ]),
+});

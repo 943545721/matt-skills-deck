@@ -1,12 +1,14 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
+import type { ProviderModelList } from "../../../../shared/orchestration-rpc.ts";
 import { installCommandOf, installRecipeFor, installStateOf } from "../../../../shared/provider-install.ts";
 import { isModelEnvKey } from "../../../../shared/provider-models.ts";
 import { envKeysFor } from "../../../../shared/provider-env.ts";
 import type { PanelKey } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelButton, PixelCard } from "../../pixel.tsx";
+import { HostCatalogBar } from "./HostCatalogBar.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import type { ProviderRow, SiteRow } from "./types.ts";
 
@@ -45,6 +47,7 @@ export function ClientsPanel({
   onInstall,
   onReveal,
   onFetchModels,
+  onRefreshCatalog,
   onSaveSite,
   busy,
 }: {
@@ -65,6 +68,14 @@ export function ClientsPanel({
   /** 用配置里已有的 base url + 凭据去问接口要模型清单。 */
   onFetchModels(provider: string): Promise<
     { ok: true; endpoint: string; models: string[] } | { ok: false; detail: string }
+  >;
+  /**
+   * 让宿主重读模型清单（`providers.refresh` + 回读快照）。
+   * 改完地址或模型后调用：宿主的选择器立刻换成新清单，会话不受影响。
+   */
+  onRefreshCatalog(): Promise<
+    | { ok: true; providers: ProviderModelList[]; warnings: string[] }
+    | { ok: false; detail: string }
   >;
   /** 客户端下的站点：加 / 改 / 删 / 启用。启用会写宿主配置，凭证省略 = 沿用已存的那份。 */
   onSaveSite(input: {
@@ -319,6 +330,8 @@ export function ClientsPanel({
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={{ paddingBottom: 16 }}>
+      <HostCatalogBar skin={skin} t={t} disabled={busy || siteBusy} onRefresh={onRefreshCatalog} />
+
       {providers.length === 0 ? <Text style={styles.note}>{t("orch.noProviders")}</Text> : null}
 
       {providers.map((provider) => {

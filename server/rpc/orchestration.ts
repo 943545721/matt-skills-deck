@@ -6,6 +6,7 @@ import type {
   orchestrationProviderDiagnosticRpc,
   orchestrationProviderInstallRpc,
   orchestrationProviderModelsRpc,
+  orchestrationProviderRefreshRpc,
   orchestrationProviderRevealRpc,
   orchestrationProviderRpc,
   orchestrationSaveRpc,
@@ -13,9 +14,11 @@ import type {
   orchestrationStateRpc,
 } from "../../shared/orchestration-rpc.ts";
 import { installProvider } from "../provider-install.ts";
+import { refreshProviderCatalog } from "../provider-catalog-refresh.ts";
 import { fetchProviderModels } from "../provider-models-fetch.ts";
 import {
   patchProviderConfig,
+  readDaemonConfig,
   readOrchestrationState,
   revealProviderEnvValue,
   runDispatch,
@@ -179,4 +182,19 @@ export async function orchestrationProviderModelsHandler(
   context: PluginHandlerContext,
 ): Promise<RpcOutput<typeof orchestrationProviderModelsRpc>> {
   return fetchProviderModels(context.paseo, { provider: input.provider });
+}
+
+/**
+ * 让宿主重读 provider 快照。
+ *
+ * 改完接入地址或模型清单之后，宿主的模型选择器还缓存着旧清单；这里刷新一次
+ * 并回读，界面据此说明「刷新后有几家、各几个模型」。不重启、不动会话。
+ */
+export async function orchestrationProviderRefreshHandler(
+  input: RpcInput<typeof orchestrationProviderRefreshRpc>,
+  context: PluginHandlerContext,
+): Promise<RpcOutput<typeof orchestrationProviderRefreshRpc>> {
+  // 停用判断和状态页用同一份宿主配置：配置里关掉的客户端，选择器里也没有。
+  const config = await readDaemonConfig(context.paseo);
+  return refreshProviderCatalog(context.paseo, { workspaceDir: input.workspaceDir, config });
 }

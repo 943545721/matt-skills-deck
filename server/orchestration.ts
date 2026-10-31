@@ -47,6 +47,7 @@ import {
 } from "../shared/provider-models.ts";
 import { createAgent, sessionErrorDetail } from "./session.ts";
 import { record } from "./logs.ts";
+import { modelIdsOf, type ProviderSnapshotEntry } from "./provider-snapshot-view.ts";
 
 /**
  * 编排执行层。
@@ -61,13 +62,6 @@ import { record } from "./logs.ts";
 
 const SCOPE = "orchestration";
 
-interface ProviderEntryView {
-  provider?: string;
-  label?: string;
-  status?: string;
-  enabled?: boolean;
-  models?: Array<{ id?: string }>;
-}
 
 interface AgentEntryView {
   id: string;
@@ -249,7 +243,7 @@ export function profilesOf(config: DaemonConfigView | null): ClientProfile[] {
 }
 
 function providerRows(
-  snapshot: readonly ProviderEntryView[],
+  snapshot: readonly ProviderSnapshotEntry[],
   config: DaemonConfigView | null,
 ): Array<{
   id: string;
@@ -273,9 +267,7 @@ function providerRows(
     const configured = providers[id];
     // 模型名不是机密：`ANTHROPIC_*_MODEL` 的值就是模型 id，宿主自己也在模型列表里印着，
     // 再给一串 `••••lash` 只会让人看不出这台机器跑的是哪个模型。
-    const models = (entry.models ?? [])
-      .map((model) => (model?.id ?? "").trim())
-      .filter((model) => model.length > 0);
+    const models = modelIdsOf(entry);
     const env = Object.entries(configured?.env ?? {})
       .map(([key, value]) => {
         const text = typeof value === "string" ? value : "";
@@ -442,7 +434,7 @@ export async function readOrchestrationState(
   let providerList: ReturnType<typeof providerRows> = [];
   try {
     const snapshot = await paseo.providers.snapshot({ cwd: input.workspaceDir });
-    providerList = providerRows((snapshot?.entries ?? []) as ProviderEntryView[], config);
+    providerList = providerRows((snapshot?.entries ?? []) as ProviderSnapshotEntry[], config);
   } catch (error) {
     warnings.push(`客户端目录读取失败：${sessionErrorDetail(error)}`);
   }

@@ -52,6 +52,7 @@ import {
   orchestrationProviderModelsRpc,
   orchestrationProviderRevealRpc,
   orchestrationProviderRpc,
+  orchestrationProviderRefreshRpc,
   orchestrationSaveRpc,
   orchestrationSiteRpc,
   orchestrationStateRpc,
@@ -64,6 +65,7 @@ import {
   orchestrationProviderModelsHandler,
   orchestrationProviderRevealHandler,
   orchestrationProviderHandler,
+  orchestrationProviderRefreshHandler,
   orchestrationSaveHandler,
   orchestrationSiteHandler,
   orchestrationStateHandler,
@@ -211,6 +213,7 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(orchestrationProfileRpc, orchestrationProfileHandler);
   server.handle(orchestrationDispatchRpc, orchestrationDispatchHandler);
 
+  server.handle(orchestrationProviderRefreshRpc, orchestrationProviderRefreshHandler);
   server.handle(issueAttachmentSearchRpc, searchIssueAttachmentsHandler);
   server.handle(workspaceBindingRpc, workspaceBindingHandler);
 }

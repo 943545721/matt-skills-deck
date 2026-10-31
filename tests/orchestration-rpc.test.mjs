@@ -3,7 +3,11 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { orchestrationProviderDiagnosticHandler, orchestrationSaveHandler } from "../server/rpc/orchestration.ts";
+import {
+  orchestrationProviderDiagnosticHandler,
+  orchestrationProviderRefreshHandler,
+  orchestrationSaveHandler,
+} from "../server/rpc/orchestration.ts";
 import { readOrchestration } from "../server/orchestration-store.ts";
 
 /**
@@ -88,6 +92,61 @@ test("诊断 handler：宿主抛错时把原因带出来", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.reason, "failed");
   assert.match(result.detail, /provider not found/);
+});
+
+/** 刷新 handler 只搬字段：工作区与客户端原样交给宿主，刷新后的清单原样回来。 */
+const refreshContext = (entries, calls, config = {}) => ({
+  paseo: {
+    config: { get: async () => ({ config }) },
+    providers: {
+      refresh: async (input) => {
+        calls.push(["refresh", input]);
+        return { requestId: "r", acknowledged: true };
+      },
+      snapshot: async (input) => {
+        calls.push(["snapshot", input]);
+        return { entries };
+      },
+    },
+  },
+});
+
+test("刷新 handler：工作区透传给宿主，刷新后的模型清单透传回来", async () => {
+  const calls = [];
+  const result = await orchestrationProviderRefreshHandler(
+    { workspaceDir: "/tmp/ws" },
+    refreshContext(
+      [
+        { provider: "claude", status: "ready", models: [{ id: "m1" }, { id: "m2" }] },
+        { provider: "codex", status: "ready", models: [{ id: "x" }] },
+      ],
+      calls,
+    ),
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.providers, [
+    { id: "claude", models: ["m1", "m2"] },
+    { id: "codex", models: ["x"] },
+  ]);
+  assert.deepEqual(calls, [["refresh", { cwd: "/tmp/ws" }], ["snapshot", { cwd: "/tmp/ws" }]]);
+});
+
+test("刷新 handler：配置里停用的客户端不进摘要（与状态页同一套判断）", async () => {
+  const result = await orchestrationProviderRefreshHandler(
+    { workspaceDir: "/tmp/ws" },
+    refreshContext(
+      [
+        { provider: "claude", status: "ready", models: [{ id: "m1" }] },
+        { provider: "codex", status: "ready", models: [{ id: "x" }] },
+      ],
+      [],
+      { providers: { codex: { enabled: false } } },
+    ),
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.providers, [{ id: "claude", models: ["m1"] }]);
 });
 
 test("诊断 handler：provider 空白直接报 invalid，不发给宿主", async () => {
