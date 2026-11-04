@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   agentDraftKey,
+  hostLoaderErrors,
   prefillAgentDraft,
+  prefillAgentDraftWithScan,
   readSurfaceServerId,
 } from "../client/deck/session/prefill.ts";
 
-/** 一次测试内替换宿主全局；结束时恢复，避免污染同一进程里的其他用例。 */
+/**
+ * 一次测试内替换宿主全局；结束时恢复，避免污染同一进程里的其他用例。
+ * 回调返回 promise 时等它结束再恢复：分片试探在 await 之后还要读到 `__r`。
+ */
 function withGlobals(values, run) {
   const saved = new Map();
   for (const [key, value] of Object.entries(values)) {
@@ -19,11 +24,16 @@ function withGlobals(values, run) {
       else delete globalThis[key];
     }
   };
+  let outcome;
   try {
-    return run();
-  } finally {
+    outcome = run();
+  } catch (error) {
     restore();
+    throw error;
   }
+  if (outcome && typeof outcome.then === "function") return outcome.finally(restore);
+  restore();
+  return outcome;
 }
 
 /**
@@ -105,7 +115,16 @@ test("模块加载器抛异常时返回可解释的 no-store", () => {
   } }, () => prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "hello" }));
   assert.equal(result.ok, false);
   assert.equal(result.code, "no-store");
-  assert.match(result.detail, /module missing/);
+  assert.match(result.diagnostics.loaderErrors.join(" "), /module missing/);
+});
+
+test("宿主报错最多引三条：横幅放不下更多", () => {
+  const errors = ["#1: a", "#2: b", "#3: c", "#4: d"];
+  assert.equal(
+    hostLoaderErrors({ knownIds: [3598, 3601], registry: "absent", loaderErrors: errors }),
+    "#1: a | #2: b | #3: c",
+  );
+  assert.equal(hostLoaderErrors({ knownIds: [3598, 3601], registry: "absent", loaderErrors: [] }), "");
 });
 
 test("草稿是 active 时用 editDraftText 保留附件", () => {
@@ -248,4 +267,199 @@ test("store 写入抛异常时返回 write-failed", () => {
   assert.equal(result.ok, false);
   assert.equal(result.code, "write-failed");
   assert.match(result.detail, /disk full/);
+});
+
+/**
+ * 下面几条钉的是「去哪找草稿 store」。
+ *
+ * 模块编号不是公开协议：之前写死 3598，宿主换一次构建就整条路断掉。查找顺序是
+ * 记住的编号 → 已知编号 → 模块注册表 → （用户点了「自动查找」才）逐个试探。
+ */
+
+function fakeStorage(initial = {}) {
+  const data = new Map(Object.entries(initial));
+  return {
+    data,
+    storage: {
+      getItem: (key) => (data.has(key) ? data.get(key) : null),
+      setItem: (key, value) => void data.set(key, value),
+    },
+  };
+}
+
+const REMEMBER_KEY = "matt-skills-deck:draftStoreModuleId";
+
+test("注册表里已初始化的导出也能认出来（编号变了的时候）", () => {
+  const { store, drafts } = fakeDraftStore();
+  const registry = new Map([
+    [11, { publicModule: { exports: { somethingElse: true } } }],
+    [77, { publicModule: { exports: { useDraftStore: store } } }],
+  ]);
+  const loader = () => {
+    throw new Error("module not initialised");
+  };
+  loader.getModules = () => registry;
+  const { data, storage } = fakeStorage();
+
+  const result = withGlobals({ __r: loader, localStorage: storage }, () =>
+    prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.equal(result.ok, true);
+  assert.equal(drafts["agent:s1:a1"].input.text, "hello");
+  // 认出来的编号记下来，下次不必再翻注册表。
+  assert.equal(data.get(REMEMBER_KEY), "77");
+});
+
+test("记住的编号优先：宿主换过编号也能一次命中", () => {
+  const remembered = fakeDraftStore();
+  const stale = fakeDraftStore();
+  const { storage } = fakeStorage({ [REMEMBER_KEY]: "900" });
+  const loader = (id) => {
+    if (id === 900) return { useDraftStore: remembered.store };
+    if (id === 3598) return { useDraftStore: stale.store };
+    throw new Error(`no module ${id}`);
+  };
+
+  const result = withGlobals({ __r: loader, localStorage: storage }, () =>
+    prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.equal(result.ok, true);
+  assert.equal(remembered.drafts["agent:s1:a1"].input.text, "hello");
+  assert.equal(stale.drafts["agent:s1:a1"], undefined);
+});
+
+test("0.14 的宿主：3598 是别的模块也不耽误，命中 3601", () => {
+  // 实测编号：0.13.2 在 3598、0.14.0 在 3601。3598 在 0.14 里是个普通模块，
+  // 不抛错也不像 store——这时必须继续试下一个候选，而不是就此报「找不到」。
+  const { store, drafts } = fakeDraftStore();
+  const { data, storage } = fakeStorage();
+  const loader = (id) => {
+    if (id === 3598) return { useAgentDirectory: () => {} };
+    if (id === 3601) return { useDraftStore: store };
+    throw new Error(`no module ${id}`);
+  };
+  const result = withGlobals({ __r: loader, localStorage: storage }, () =>
+    prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.deepEqual(result, { ok: true, via: "draft-store" });
+  assert.equal(drafts["agent:s1:a1"].input.text, "hello");
+  assert.equal(data.get(REMEMBER_KEY), "3601");
+});
+
+test("记住的编号恰好是已知编号：只试一次，报错也只记一条", () => {
+  const { storage } = fakeStorage({ [REMEMBER_KEY]: "3598" });
+  let calls3598 = 0;
+  const loader = (id) => {
+    if (id === 3598) {
+      calls3598 += 1;
+      throw new Error("module missing");
+    }
+    throw new Error(`no module ${id}`);
+  };
+  const result = withGlobals({ __r: loader, localStorage: storage }, () =>
+    prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.equal(result.code, "no-store");
+  assert.equal(calls3598, 1);
+  assert.equal(
+    result.diagnostics.loaderErrors.filter((line) => line.startsWith("#3598:")).length,
+    1,
+  );
+});
+
+test("一个候选都不中：如实报 no-store，不记编号、不瞎写", () => {
+  const { data, storage } = fakeStorage();
+  const result = withGlobals({ __r: () => ({}), localStorage: storage }, () =>
+    prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.equal(result.code, "no-store");
+  // 界面不显示英文原句，而是拿诊断按当前语言拼；诊断必须带上事实。
+  assert.deepEqual(result.diagnostics.knownIds, [3598, 3601]);
+  assert.equal(result.diagnostics.registry, "absent");
+  assert.equal(result.diagnostics.scanned, undefined);
+  assert.equal(data.has(REMEMBER_KEY), false);
+});
+
+test("没找到时旧编号的异常原因仍留在诊断里", () => {
+  const { storage } = fakeStorage();
+  const result = withGlobals(
+    {
+      __r: () => {
+        throw new Error("module missing");
+      },
+      localStorage: storage,
+    },
+    () => prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.equal(result.code, "no-store");
+  assert.match(result.diagnostics.loaderErrors.join(" "), /module missing/);
+});
+
+test("允许试探时逐个找：命中就停，并记住这个编号", async () => {
+  const { store, drafts } = fakeDraftStore();
+  const { data, storage } = fakeStorage();
+  let calls = 0;
+  const loader = (id) => {
+    calls += 1;
+    if (id === 42) return { useDraftStore: store };
+    throw new Error(`no module ${id}`);
+  };
+
+  const refused = withGlobals({ __r: loader, localStorage: storage }, () =>
+    prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.equal(refused.code, "no-store");
+
+  calls = 0;
+  const found = await withGlobals({ __r: loader, localStorage: storage }, () =>
+    prefillAgentDraftWithScan({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.equal(found.ok, true);
+  assert.equal(drafts["agent:s1:a1"].input.text, "hello");
+  assert.equal(data.get(REMEMBER_KEY), "42");
+  // 命中即停：2 次已知编号 + 1..42 的试探，不该继续往下刷模块。
+  assert.ok(calls <= 44, `tried ${calls} modules`);
+});
+
+test("试探要够得到高位编号：store 在 3598 之后（例如 4200）也能找到", async () => {
+  // 试探范围要够到真实编号：0.13.2 的宿主包里 store 在 3598，
+  // 上限若停在它前面，点了「自动查找」也一定报失败。
+  const { store, drafts } = fakeDraftStore();
+  const { storage } = fakeStorage();
+  const loader = (id) => {
+    if (id === 4200) return { useDraftStore: store };
+    throw new Error(`no module ${id}`);
+  };
+
+  const found = await withGlobals({ __r: loader, localStorage: storage }, () =>
+    prefillAgentDraftWithScan({ serverId: "s1", agentId: "a1", text: "hi" }),
+  );
+  assert.equal(found.ok, true, found.ok ? "" : JSON.stringify(found.diagnostics));
+  assert.equal(drafts["agent:s1:a1"].input.text, "hi");
+});
+
+test("store 换了导出名也认得：按形状找，不按名字找", () => {
+  const { store, drafts } = fakeDraftStore();
+  const result = withGlobals(
+    { __r: (id) => (id === 3598 ? { composerDraft: store } : {}) },
+    () => prefillAgentDraft({ serverId: "s1", agentId: "a1", text: "renamed" }),
+  );
+  assert.equal(result.ok, true, result.ok ? "" : JSON.stringify(result.diagnostics));
+  assert.equal(drafts["agent:s1:a1"].input.text, "renamed");
+});
+
+test("试探有上限：整包里没有 store 也不会一直刷模块", async () => {
+  const { storage } = fakeStorage();
+  let calls = 0;
+  const loader = () => {
+    calls += 1;
+    throw new Error("nothing here");
+  };
+  const result = await withGlobals({ __r: loader, localStorage: storage }, () =>
+    prefillAgentDraftWithScan({ serverId: "s1", agentId: "a1", text: "hello" }),
+  );
+  assert.equal(result.code, "no-store");
+  assert.ok(calls > 0 && calls <= 20_050, `tried ${calls} modules`);
+  assert.equal(typeof result.diagnostics.scanned, "number");
+  assert.ok(result.diagnostics.scanned > 0);
 });

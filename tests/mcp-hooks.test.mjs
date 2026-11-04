@@ -6,17 +6,59 @@ import {
   mcpEntryPath,
   runtimeFeatures,
   shouldInjectDeckTools,
+  supportsExactMcpPreapproval,
   typescriptSupported,
 } from "../server/hooks.ts";
 import { MCP_SERVER_NAME, MCP_TOOLS, PREAPPROVED_TOOL_NAMES } from "../server/mcp/tools.ts";
 
 /** 注入器是纯函数：不碰 daemon、不碰文件，所以可以直接拿一份配置试。 */
 
-const request = () => ({
+const request = (provider = "claude/sonnet") => ({
   config: {
-    provider: "claude-code",
+    provider,
     cwd: "/work/deck",
   },
+});
+
+test("预授权能力：只有宿主实现 applyToolPolicy 的三家能带 toolPolicy", () => {
+  for (const provider of ["claude/sonnet", "codex", "opencode/gpt-5"]) {
+    assert.equal(supportsExactMcpPreapproval(provider), true, `${provider} 应该支持精确预授权`);
+  }
+  // cursor 这类客户端带 toolPolicy 会被宿主整条拒绝（tool_policy_unsupported），必须按不支持处理。
+  for (const provider of ["cursor", "cursor/composer", "copilot", "", "  "]) {
+    assert.equal(supportsExactMcpPreapproval(provider), false, `"${provider}" 不该被当成支持`);
+  }
+});
+
+test("注入：客户端不接受精确预授权时只挂服务，不写 toolPolicy", () => {
+  const out = injectDeckTools(request("cursor/composer"), { entry: "/e/main.ts", workspaceDir: "/work/deck" });
+  assert.equal(out.config.mcpServers[MCP_SERVER_NAME].alwaysLoad, true, "工具仍然要挂上，只是每次要用户确认");
+  assert.equal(out.config.toolPolicy, undefined, "带上 toolPolicy 宿主会拒绝整条创建");
+});
+
+test("注入：客户端不接受预授权时，其它 MCP 服务照原样保留", () => {
+  const out = injectDeckTools(
+    {
+      config: {
+        provider: "cursor/composer",
+        cwd: "/work/deck",
+        mcpServers: { other: { type: "stdio", command: "other-mcp" } },
+      },
+    },
+    { entry: "/e/main.ts", workspaceDir: "/work/deck" },
+  );
+  assert.deepEqual(Object.keys(out.config.mcpServers).sort(), [MCP_SERVER_NAME, "other"].sort());
+  assert.equal(out.config.mcpServers.other.command, "other-mcp");
+});
+
+test("注入：客户端不接受预授权时，用户自己带的那份 toolPolicy 不删也不加", () => {
+  // 已知残留：这种客户端下宿主仍会拒这条请求。删掉用户的东西不属于这里能替人决定的范围。
+  const mine = [{ kind: "mcp", server: "other", tool: "read_thing" }];
+  const out = injectDeckTools(
+    { config: { provider: "cursor/composer", cwd: "/work/deck", toolPolicy: { preapproved: mine } } },
+    { entry: "/e/main.ts", workspaceDir: "/work/deck" },
+  );
+  assert.deepEqual(out.config.toolPolicy.preapproved, mine);
 });
 
 test("注入：挂上 stdio 服务、把工作区作为启动参数，且不改 cwd", () => {
@@ -62,7 +104,7 @@ test("注入：只把只读工具放进 preapproved，写工具一个都不放",
 test("注入：保留别处已有的 MCP 服务与预授权，不重复追加自己", () => {
   const existing = {
     config: {
-      provider: "claude-code",
+      provider: "claude/sonnet",
       cwd: "/work/deck",
       mcpServers: { other: { type: "stdio", command: "other-mcp" } },
       toolPolicy: { preapproved: [{ kind: "mcp", server: "other", tool: "read_thing" }] },

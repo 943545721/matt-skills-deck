@@ -18,7 +18,18 @@ test("旧设置缺 appearance 时补成 auto，已有字段保持不变", async 
     debugLogging: false,
     appearance: "auto",
     skillsMode: "per-project",
+    autoAllowPermissions: false,
   });
+});
+
+/**
+ * 旧文档里没有「自动放行」这个字段：补默认值时必须补成**关**。
+ * 这是会替用户点头的开关，升级时被悄悄打开等于替他签了字。
+ */
+test("缺 autoAllowPermissions 时补成关，只有明确写 true 才开", async () => {
+  assert.equal((await deckSettings.schema.parseAsync({})).autoAllowPermissions, false);
+  assert.equal((await deckSettings.schema.parseAsync({ autoAllowPermissions: true })).autoAllowPermissions, true);
+  await assert.rejects(() => deckSettings.schema.parseAsync({ autoAllowPermissions: "yes" }));
 });
 
 /**

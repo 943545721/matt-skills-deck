@@ -15,6 +15,7 @@ import { ProjectStrip } from "./board/ProjectStrip";
 import { availableFacets, filterByFacets, projectRows } from "./board/projectRows";
 import type { DeckKey } from "./i18n";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
+import { labelMatches } from "./labelText";
 import { GithubAuthModal } from "./GithubAuthModal";
 import { staleBlockerLabels } from "./format";
 import { PixelBanner, PixelButton, PixelStatusLine, usePixel } from "./pixel";
@@ -87,7 +88,7 @@ export function BoardView({
   /** 把刷新策略算出的写权限交给面板，详情页沿用同一个门。 */
   onWriteGate?(allowWrite: boolean): void;
 }) {
-  const { t } = useDeckText();
+  const { t, locale } = useDeckText();
   const { t: pt } = usePanelText();
   const skin = usePixel(theme);
   const toast = useToast();
@@ -404,7 +405,7 @@ export function BoardView({
           item.title.toLowerCase().includes(needle) ||
           `#${item.number}`.includes(needle) ||
           String(item.number) === needle ||
-          item.labels.some((itemLabel) => itemLabel.name.toLowerCase().includes(needle)),
+          item.labels.some((itemLabel) => labelMatches(itemLabel.name, needle, locale)),
       )
     : facetRows;
   const shownIssues = view === "closed" ? filtered.slice(0, page * PAGE_SIZE) : filtered;
@@ -835,7 +836,12 @@ export function BoardView({
           );
 
           // 子票：靠一道竖线挂在父票下面，比自己再缩进一层的卡片窄一点，读起来才像从属关系。
-          if (boardRow.depth === 1) return <View style={styles.childWrap}>{body}</View>;
+          // 层数不设死（需求 → 地图 → 票）：每深一层多让一档，竖线仍在最外面。
+          if (boardRow.depth > 0) {
+            return (
+              <View style={[styles.childWrap, { marginLeft: 14 + (boardRow.depth - 1) * 12 }]}>{body}</View>
+            );
+          }
 
           // 折叠是父行的动作，不是整行的动作：整行点击仍然是打开这张票，
           // 所以开关不放进卡片里，单独占左边这 14px。

@@ -14,6 +14,7 @@ import {
 } from "../../shared/issues";
 import { blockerLabel, readableText } from "./format";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
+import { labelDisplayName } from "./labelText";
 import { PixelBanner, PixelButton, PixelModalBody, usePixel } from "./pixel";
 
 type PromptMode = "general" | "diagnose" | "fix" | "research" | "take" | "complete";
@@ -57,7 +58,7 @@ export function IssueModal({
   onOpenRelated?(number: number): void;
   onClose(): void;
 }) {
-  const { t } = useDeckText();
+  const { t, locale } = useDeckText();
   const [comment, setComment] = useState("");
   const [labelDraft, setLabelDraft] = useState<string | null>(null);
   const toast = useToast();
@@ -276,9 +277,10 @@ export function IssueModal({
                   {issue.labels.map((label) => (
                     <Text
                       key={label.name}
+                      accessibilityLabel={label.name}
                       style={[styles.label, { backgroundColor: `#${label.color}`, color: readableText(label.color) }]}
                     >
-                      {label.name}
+                      {labelDisplayName(label.name, locale)}
                     </Text>
                   ))}
                 </View>

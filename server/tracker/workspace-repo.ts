@@ -116,19 +116,35 @@ export type ProjectConfigRead =
  * 现在调用方拿得到具体原因，可以在界面上原样显示。
  */
 export async function readWorkspaceConfig(workspaceDir: string): Promise<ProjectConfigRead> {
+  return (await readWorkspaceConfigSnapshot(workspaceDir)).read;
+}
+
+/**
+ * 同一次读里既拿解析结果、又拿文件正文与指纹。
+ *
+ * 界面要「清单 + 指纹」两样：分两次读文件，中间被人改过就会出现「A 的行配 B 的指纹」，
+ * 保存时指纹反而吻合，把对方的改动悄悄盖掉。所以正文只读一次，解析与哈希都用它。
+ */
+export async function readWorkspaceConfigSnapshot(workspaceDir: string): Promise<{
+  read: ProjectConfigRead;
+  text: string | null;
+}> {
   let text: string;
   try {
     text = await readFile(path.join(workspaceDir, PROJECT_CONFIG_FILE), "utf8");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;
-    if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, reason: "missing" };
+    if (code === "ENOENT" || code === "ENOTDIR") return { read: { ok: false, reason: "missing" }, text: null };
     return {
-      ok: false,
-      reason: "unreadable",
-      detail: `读 ${PROJECT_CONFIG_FILE} 失败：${error instanceof Error ? error.message : String(error)}`,
+      read: {
+        ok: false,
+        reason: "unreadable",
+        detail: `读 ${PROJECT_CONFIG_FILE} 失败：${error instanceof Error ? error.message : String(error)}`,
+      },
+      text: null,
     };
   }
-  return parseWorkspaceConfigText(text);
+  return { read: parseWorkspaceConfigText(text), text };
 }
 
 /**

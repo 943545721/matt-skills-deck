@@ -9,6 +9,7 @@ import { issuesListRpc } from "../../../shared/issues";
 import { repoTargetsRpc } from "../../../shared/repo";
 import { readableText } from "../format";
 import { FAILURE_KEYS, staticText, useDeckText } from "../i18n";
+import { labelDisplayName } from "../labelText";
 import { PixelBanner, PixelButton, PixelCard, PixelNum, PixelStatusLine, usePixel } from "../pixel";
 import { refreshReasonKey, usePanelText } from "./panelText";
 import { usePanelRefresh } from "./usePanelRefresh";
@@ -268,12 +269,13 @@ export function PRTab({
                       {item.labels.map((label) => (
                         <Text
                           key={label.name}
+                          accessibilityLabel={label.name}
                           style={[
                             styles.label,
                             { backgroundColor: `#${label.color}`, color: readableText(label.color) },
                           ]}
                         >
-                          {label.name}
+                          {labelDisplayName(label.name, text.locale)}
                         </Text>
                       ))}
                     </View>

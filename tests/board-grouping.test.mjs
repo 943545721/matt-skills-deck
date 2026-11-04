@@ -61,12 +61,36 @@ test("parentKey 带仓库时按整键匹配，不跨仓库串号", () => {
   );
 });
 
-test("孙票压平在子票下面，不再多缩进一级", () => {
+test("三层就是三层：需求 → 地图 → 票，逐层缩进", () => {
   const rows = groupRows(
-    [issue(2), issue(3, { parentKey: "2" }), issue(4, { parentKey: "3" })],
+    [issue(19), issue(2, { isMap: true, parentKey: "19" }), issue(3, { parentKey: "2" })],
     new Set(),
   );
-  assert.deepEqual(keys(rows), ["0:2", "1:3", "1:4"]);
+  assert.deepEqual(keys(rows), ["0:19", "1:2", "2:3"]);
+  assert.equal(rows[0].childCount, 1);
+  assert.equal(rows[1].childCount, 1);
+});
+
+test("折叠中间那层，叶子跟着收起，父行仍说得出张数", () => {
+  const rows = groupRows(
+    [issue(19), issue(2, { isMap: true, parentKey: "19" }), issue(3, { parentKey: "2" })],
+    new Set(["o/r#2"]),
+  );
+  assert.deepEqual(keys(rows), ["0:19", "1:2"]);
+  assert.equal(rows[1].expanded, false);
+});
+
+test("层数没有死上限：四层照样缩进，不会把票吞掉", () => {
+  const rows = groupRows(
+    [
+      issue(1),
+      issue(2, { parentKey: "1" }),
+      issue(3, { parentKey: "2" }),
+      issue(4, { parentKey: "3" }),
+    ],
+    new Set(),
+  );
+  assert.deepEqual(keys(rows), ["0:1", "1:2", "2:3", "3:4"]);
 });
 
 test("自己挂自己、互相挂成环：一行都不吞，只是不缩进", () => {

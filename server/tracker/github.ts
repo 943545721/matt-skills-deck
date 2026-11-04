@@ -35,6 +35,8 @@ export interface Issue {
   parentKey?: string | null;
   /** 仅当列表显式要求正文时才有：`deck_issue_list` 要按票面标记判 spec、按正文匹配 query。 */
   body?: string;
+  /** 正文第一行的 `Derived from: #19`；同样只在读过正文时才有。 */
+  derivedFrom?: number | null;
 }
 
 const MAP_LABEL = "wayfinder:map";
@@ -375,6 +377,10 @@ export type IssueDetailResult =
       /** 原生/正文子票。只给能点过去的最小字段。 */
       children?: RelatedIssue[];
       childrenTotal?: number;
+      /** 子票清单被后端截断（读到的少于总数）：此时不能把清单当成全集。 */
+      childrenTruncated?: boolean;
+      /** 子票清单读不回来的原因：闸门要把它原样报给调用方，不能只说「没给父子信息」。 */
+      childrenProblem?: string;
       /** 反向依赖：这张票正在阻塞谁，以及这一列是否可能被截断。 */
       blocking?: BlockerRef[];
       blockingTruncated?: boolean;
@@ -506,7 +512,12 @@ export async function getIssue(
         blockersTruncated,
       },
       ...(parent === undefined ? {} : { parent }),
-      ...(children === undefined ? {} : { children, childrenTotal: typeof node.subIssues?.totalCount === "number" ? node.subIssues.totalCount : children.length }),
+      ...(children === undefined
+        ? {}
+        : (() => {
+            const total = typeof node.subIssues?.totalCount === "number" ? node.subIssues.totalCount : children.length;
+            return { children, childrenTotal: total, childrenTruncated: total > children.length };
+          })()),
       ...(kind === "issue" ? { blocking, blockingTruncated } : {}),
     };
   } catch (error) {

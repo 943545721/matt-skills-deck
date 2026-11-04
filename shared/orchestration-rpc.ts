@@ -1,5 +1,18 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { FIXED_ROLE_NAMES, MAX_ROLE_PROMPT_CHARS, ROLE_LANGS } from "./role-prompts.ts";
+import {
+  MAX_MIN_CONCURRENT_STAFF,
+  MAX_STAFF_CARDS,
+  MAX_STAFF_SESSION_QUOTA,
+  MAX_STAFF_CONCURRENCY,
+  MAX_STAFF_DUTY_CHARS,
+  MAX_STAFF_ID_CHARS,
+  MAX_STAFF_NAME_CHARS,
+  MAX_STAFF_PATHS,
+  MAX_STAFF_PATH_CHARS,
+  isValidStaffId,
+} from "./orchestration.ts";
 
 /**
  * 编排的 RPC 契约。
@@ -25,12 +38,35 @@ export const routingRuleSchema = z.object({
   target: clientTargetSchema.optional(),
 });
 
+/** 名册上的一张卡。`id` 建卡时生成、之后不改（会话标签创建后不可变）。 */
+export const staffCardSchema = z.object({
+  // 只留一份判定：与 `isValidStaffId` 同源，别再抄一遍正则与长度。
+  id: z.string().refine(isValidStaffId, `id 只能用小写字母、数字和 -，长度 1..${MAX_STAFF_ID_CHARS}`),
+  name: z.string().min(1).max(MAX_STAFF_NAME_CHARS),
+  kind: z.enum(["manager", "worker"]).optional(),
+  duty: z.string().max(MAX_STAFF_DUTY_CHARS).optional(),
+  profileId: z.string().max(200).optional(),
+  paths: z.array(z.string().max(MAX_STAFF_PATH_CHARS)).max(MAX_STAFF_PATHS).optional(),
+  maxConcurrent: z.number().int().min(1).max(MAX_STAFF_CONCURRENCY).optional(),
+});
+
 export const orchestrationSettingsSchema = z.object({
   roles: z.array(
     z.object({
       workspaceId: z.string().min(1).max(300),
       mainAgentId: z.string().max(300).optional(),
       dispatcherAgentId: z.string().max(300).optional(),
+      progressAgentId: z.string().max(300).optional(),
+      /** 用户改过的身份提示词；没改的那一段回落默认值。 */
+      prompts: z
+        .object({
+          main: z.string().max(MAX_ROLE_PROMPT_CHARS).optional(),
+          dispatcher: z.string().max(MAX_ROLE_PROMPT_CHARS).optional(),
+          progress: z.string().max(MAX_ROLE_PROMPT_CHARS).optional(),
+        })
+        .optional(),
+      /** 岗位名册；没有这一段 = 空名册，派单行为与接这个功能之前一致。 */
+      staff: z.array(staffCardSchema).max(MAX_STAFF_CARDS).optional(),
     }),
   ),
   routing: z.array(routingRuleSchema),
@@ -48,6 +84,12 @@ export const orchestrationSettingsSchema = z.object({
     }),
   ),
   reportOnFinish: z.boolean(),
+  /** 一批活至少铺在几张员工卡上；1 = 不强制铺开。 */
+  minConcurrentStaff: z.number().int().min(1).max(MAX_MIN_CONCURRENT_STAFF),
+  /** 需求定稿后、铺票前是否先列清单给人确认。 */
+  confirmRequirementSplit: z.boolean(),
+  /** 每 6 小时最多新开几个 deck 子会话；0 = 关掉这道闸。 */
+  staffSessionQuota: z.number().int().min(0).max(MAX_STAFF_SESSION_QUOTA),
 });
 
 export const clientProfileSchema = z.object({
@@ -64,7 +106,12 @@ export const clientProfileSchema = z.object({
 export const routeResolutionSchema = z.union([
   /** `via`：这条路由是从哪来的——档案 / 直接目标。 */
   z.object({ ok: z.literal(true), target: clientTargetSchema, via: z.enum(["profile", "target"]) }),
-  z.object({ ok: z.literal(false), reason: z.enum(["profile-missing", "no-target"]), detail: z.string() }),
+  z.object({
+    ok: z.literal(false),
+    /** `no-model`：只选了客户端没选模型，宿主只认 `provider/model`，这一档发不出去。 */
+    reason: z.enum(["profile-missing", "no-target", "no-model"]),
+    detail: z.string(),
+  }),
 ]);
 
 export const agentRowSchema = z.object({
@@ -87,6 +134,8 @@ export interface TreeNodeWire {
   difficulty: z.infer<typeof difficultySchema> | null;
   ticketKey: string | null;
   updatedAt: string | null;
+  /** 父会话不在本区快照里：跨区派出去的子会话，界面标「跨区 ↹」。 */
+  crossWorkspace: boolean;
   children: TreeNodeWire[];
 }
 
@@ -100,6 +149,7 @@ export const treeNodeSchema = z.lazy(() =>
     difficulty: difficultySchema.nullable(),
     ticketKey: z.string().nullable(),
     updatedAt: z.string().nullable(),
+    crossWorkspace: z.boolean(),
     children: z.array(treeNodeSchema),
   }),
 ) as unknown as z.ZodType<TreeNodeWire>;
@@ -148,6 +198,36 @@ export const providerStateRowSchema = providerRowSchema.extend({
 export const scopeSchema = z.object({
   workspaceId: z.string().min(1).max(300),
   workspaceDir: z.string().min(1).max(4096),
+});
+
+/**
+ * 阀门四：全停。
+ *
+ * 停手没有「暂停 / 挂起」这种可恢复态——只能撤掉正在等的权限、打断正在跑的一轮，
+ * 可选归档。界面文案不要写成「暂停」。
+ */
+export const orchestrationStaffStopRpc = defineRpc({
+  name: "deck.orchestration.staff-stop",
+  input: scopeSchema.extend({
+    /** 停手之后顺手归档。默认不归档：还能接着看它做到哪了。 */
+    archive: z.boolean().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      stopped: z.number().int(),
+      denied: z.number().int(),
+      interrupted: z.number().int(),
+      archived: z.number().int(),
+      /** 逐条失败原因：一个会话失败不影响其它会话停手。 */
+      failures: z.array(z.string()),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["invalid-workspace", "agents-failed"]),
+      detail: z.string(),
+    }),
+  ]),
 });
 
 export const orchestrationStateRpc = defineRpc({
@@ -396,6 +476,31 @@ const dispatchTaskSchema = z.object({
   difficulty: difficultySchema.optional(),
   /** 这条任务替哪张地图干活；不传就看批次上的 `map`。 */
   map: z.string().max(300).optional(),
+  /** 派给名册里的哪张卡；名册非空时必填（没写就拒，不猜一个人）。 */
+  staff: z.string().max(MAX_STAFF_ID_CHARS).optional(),
+  /** 这条任务落在哪个仓库；多仓库工作区必填，单仓库不填。 */
+  repoKey: z.string().max(200).optional(),
+  /**
+   * 这条任务替哪张需求干活；执行层据此过链条 / 验收票闸。
+   * 不给的话，直接走 RPC 派单就绕过了 `deck_dispatch_plan` 已经在做的检查。
+   */
+  requirementKey: z.number().int().min(1).optional(),
+  /** 需求所在的仓库；多仓库工作区里读需求正文、验收票都要用它。 */
+  requirementRepoKey: z.string().max(200).optional(),
+  /** 这条活落在哪片：仓库 + 路径前缀。`staff` 没给时按它算归属。 */
+  region: z
+    .object({
+      repoKey: z.string().min(1).max(200).optional(),
+      pathPrefix: z.string().max(MAX_STAFF_PATH_CHARS).optional(),
+    })
+    .optional(),
+});
+
+/** 这条任务落成的那张票。会话是进程，票才是这件事留下的凭证。 */
+const dispatchTicketRefSchema = z.object({
+  number: z.number(),
+  url: z.string(),
+  repoKey: z.string(),
 });
 
 const dispatchOutcomeSchema = z.union([
@@ -408,10 +513,17 @@ const dispatchOutcomeSchema = z.union([
     difficulty: difficultySchema,
     partial: z.boolean(),
     failureDetail: z.string().nullable(),
+    ticket: dispatchTicketRefSchema.nullable(),
+    /** 票建好了但附带写入没成（标签 / 父票）：票是真的，这些要人补。 */
+    ticketNotes: z.array(z.string()),
   }),
   z.object({
     key: z.string(),
     ok: z.literal(false),
+    /**
+     * `ticket-failed`：票没建成，这条活不派（没票就等于没记录）；
+     * `create-failed`：票建好了，会话没建起来——`ticket` 里带着票号，别整批重派。
+     */
     reason: z.enum([
       "unknown-workspace",
       "no-dispatcher",
@@ -421,9 +533,17 @@ const dispatchOutcomeSchema = z.union([
       "duplicate-key",
       "route-unavailable",
       "map-budget-exhausted",
+      "unknown-staff",
+      "min-concurrent-staff",
+      "repo-required",
+      "invalid-region",
+      "region-required",
+      "region-unowned",
       "create-failed",
+      "ticket-failed",
     ]),
     detail: z.string(),
+    ticket: dispatchTicketRefSchema.nullable().optional(),
   }),
 ]);
 
@@ -471,6 +591,66 @@ export const orchestrationDispatchRpc = defineRpc({
         "invalid-workspace",
         "settings-unreadable",
         "settings-corrupt",
+      ]),
+      detail: z.string(),
+    }),
+  ]),
+});
+
+/** 需求拆票清单的一行：哪个区、派给谁、用什么客户端、开几个会话。 */
+const requirementDispatchSummaryRowSchema = z.object({
+  kind: z.enum(["work", "research"]),
+  workspaceId: z.string(),
+  area: z.string(),
+  repoKey: z.string().nullable(),
+  pathPrefix: z.string().nullable(),
+  staffId: z.string().nullable(),
+  staffName: z.string().nullable(),
+  provider: z.string().nullable(),
+  model: z.string().nullable(),
+  providerSpec: z.string().nullable(),
+  sessions: z.number().int(),
+});
+
+/**
+ * 需求 → 每区一张票 + 每区一批派单。
+ *
+ * `confirm !== true` 且工作区设置要求先确认时只回清单（`created:false`），不写任何东西；
+ * `confirm === true` 覆盖设置直接铺，设置里 `confirmRequirementSplit=false` 时也一样。
+ */
+export const orchestrationRequirementDispatchRpc = defineRpc({
+  name: "deck.orchestration.requirement-dispatch",
+  input: z.object({
+    workspaceId: z.string().min(1).max(300),
+    workspaceDir: z.string().min(1).max(4096),
+    requirementNumber: z.number().int().min(0),
+    requirementRepoKey: z.string().max(200).optional(),
+    confirm: z.boolean().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      created: z.boolean(),
+      requiresConfirmation: z.boolean(),
+      summary: z.array(requirementDispatchSummaryRowSchema),
+      /** 完整计划：票面 / 任务 / 拒绝原因。界面按需展开，不在这里再抄一份形状。 */
+      plan: z.unknown(),
+      batches: z.array(z.unknown()),
+      research: z.array(z.unknown()),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum([
+        "no-requirement",
+        "bad-impact",
+        "missing-impact",
+        "unknown-workspace",
+        "not-finalized",
+        "empty-impact",
+        "no-workspace",
+        "settings-unreadable",
+        "settings-corrupt",
+        "no-dispatcher",
       ]),
       detail: z.string(),
     }),
@@ -557,6 +737,246 @@ export const orchestrationProviderRefreshRpc = defineRpc({
     z.object({
       ok: z.literal(false),
       reason: z.enum(["invalid", "refresh-failed", "snapshot-failed"]),
+      detail: z.string(),
+    }),
+  ]),
+});
+
+/**
+ * 已归档会话的一行。
+ *
+ * 归档是宿主的软删除：记录与 provider 侧的会话都还在，只是不再出现在默认会话列表里。
+ * 宿主**没有**「取消归档」的接口（协议里只有 `archive_agent_request`），所以恢复只能
+ * 把那条 provider 会话重新 import 回来——这一行因此必须同时带上会话 id 和一条
+ * 能直接粘进终端的命令，光有一个内部 agent id 用户什么也做不了。
+ */
+export const archivedAgentRowSchema = agentRowSchema.omit({ parentAgentId: true }).extend({
+  cwd: z.string().nullable(),
+  archivedAt: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+  /** provider 那侧的会话 id：`paseo import` 要的就是它。 */
+  sessionId: z.string().nullable(),
+  /** 能直接粘进终端的恢复命令；缺会话 id / 客户端 / 目录时为 null。 */
+  restoreCommand: z.string().nullable(),
+  /** 为什么给不出恢复命令；能给出命令时为 null。 */
+  restoreBlocked: z.string().nullable(),
+  /** 宿主的客户端目录里已经找不到这个 provider（卸载了 / 停用了）。 */
+  providerUnavailable: z.boolean(),
+});
+
+export type ArchivedAgentRow = z.infer<typeof archivedAgentRowSchema>;
+
+/**
+ * 已归档会话清单。
+ *
+ * 单独一个 RPC 而不是塞进 `state`：这份清单要翻宿主的存档（`includeArchived`），
+ * 比状态重，且只在用户打开「已归档」页签时才需要。
+ *
+ * 一次调用最多翻几页（见 `server/archived-agents.ts` 的 `MAX_PAGES`），翻不完就给回
+ * `nextCursor`：宿主的归档是跨全部工作区的，本工作区的记录可能排得很后面，
+ * 光有一句「没读完」而没有继续往前的路，用户要查的那个 id 就永远查不到。
+ */
+export const orchestrationArchivedRpc = defineRpc({
+  name: "deck.orchestration.archived",
+  input: scopeSchema.extend({
+    /** 从哪一批之后继续往前读；省略表示从最新的一条开始。 */
+    cursor: z.string().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      workspaceId: z.string(),
+      workspaceDir: z.string(),
+      rows: z.array(archivedAgentRowSchema),
+      /** 宿主那边还有更多没读完：界面要说清楚别让人以为全在这儿。 */
+      truncated: z.boolean(),
+      /** 继续往前读的游标；没有更早的记录（或宿主给不出游标）时为 null。 */
+      nextCursor: z.string().nullable(),
+      warnings: z.array(z.string()),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["invalid-workspace", "agents-failed"]),
+      detail: z.string(),
+    }),
+  ]),
+});
+
+/* ---------------------------------------------------------------- 协调收件箱 */
+
+/**
+ * 协调收件箱：`.deck/coordination.jsonl` 的线上形状。
+ *
+ * 客户端没有文件系统访问，收件箱必须由 RPC 吐出来；`index` 是它在文件里的行下标，
+ * 后续「批准 / 转派 / 不派」都拿这个下标指记录（写请求不能由客户端直接落盘）。
+ */
+export const coordinationKindSchema = z.enum(["territory", "staffing", "contract", "lineage"]);
+
+export const coordinationStateSchema = z.enum([
+  "pending",
+  "approved-once",
+  "consumed",
+  "reassigned",
+  "denied",
+  "staffed",
+  "declined",
+  "contract-changed",
+  "impl-changed",
+  "superseded",
+  "cancelled",
+  "recorded",
+]);
+
+/**
+ * 收件箱上的动作。允许的组合由服务端按 kind 校验：
+ * territory 只认前三个，staffing 只认 staff / decline，contract 只认后两个。
+ */
+export const coordinationActionSchema = z.enum([
+  "approve-once",
+  "reassign",
+  "deny",
+  "staff",
+  "decline",
+  "contract-changed",
+  "impl-changed",
+]);
+
+export type CoordinationActionWire = z.infer<typeof coordinationActionSchema>;
+
+export const coordinationRecordWireSchema = z.object({
+  at: z.string(),
+  kind: coordinationKindSchema,
+  state: coordinationStateSchema,
+  fromStaff: z.string(),
+  toStaff: z.string().nullable(),
+  paths: z.array(z.string()),
+  sessionAgentId: z.string(),
+  taskSummary: z.string(),
+  /** 仅 staffing：要什么人、为什么。 */
+  need: z.string().optional(),
+  /** 仅 contract：哪一条字段 / 路由对不上。 */
+  field: z.string().optional(),
+});
+
+export const coordinationInboxRowSchema = coordinationRecordWireSchema.extend({
+  /** 记录在文件里的下标；动作 RPC 用它定位。 */
+  index: z.number().int().min(0),
+  /** 这次读取时因超过 24 小时被自动取消的那条（不是历史上所有 cancelled）。 */
+  expired: z.boolean().optional(),
+});
+
+export type CoordinationInboxRowWire = z.infer<typeof coordinationInboxRowSchema>;
+
+export const orchestrationInboxRpc = defineRpc({
+  name: "deck.orchestration.inbox",
+  input: scopeSchema,
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      records: z.array(coordinationInboxRowSchema),
+      /** 坏行数、自动取消条数这类「读到了但要说清」的事。 */
+      warnings: z.array(z.string()),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["invalid-workspace", "read-failed", "sweep-failed"]),
+      detail: z.string(),
+    }),
+  ]),
+});
+
+export const orchestrationInboxActRpc = defineRpc({
+  name: "deck.orchestration.inbox.act",
+  input: scopeSchema.extend({
+    /** 收件箱里那条记录的下标（见 `deck.orchestration.inbox` 的 `index`）。 */
+    index: z.number().int().min(0),
+    action: coordinationActionSchema,
+    /** 仅 territory 的 reassign：转给名册里的哪张卡；不传就沿用记录上的目标。 */
+    toStaff: z.string().max(MAX_STAFF_ID_CHARS).optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      record: coordinationRecordWireSchema,
+      warnings: z.array(z.string()),
+    }),
+    z.object({
+      ok: z.literal(false),
+      /**
+       * `invalid-action`：kind 与动作不匹配（例如 staffing 点「批准一次」）；
+       * `invalid-state`：状态机不允许（例如已处置过的记录再点一次）；
+       * `action-failed` / `write-failed`：状态机拒绝或写盘失败，`detail` 是原话。
+       */
+      reason: z.enum([
+        "invalid-workspace",
+        "invalid-action",
+        "invalid-state",
+        "not-found",
+        "read-failed",
+        "sweep-failed",
+        "write-failed",
+        "action-failed",
+      ]),
+      detail: z.string(),
+    }),
+  ]),
+});
+
+/**
+ * 建窗口的失败原因。
+ *
+ * 服务端从这里派生自己的联合类型，免得两边各写一份枚举、加一项时漏改一边。
+ */
+export const WINDOW_FAILURE_REASONS = [
+  "invalid-workspace",
+  "settings-unreadable",
+  "settings-corrupt",
+  "route-unavailable",
+  "create-failed",
+  "write-failed",
+] as const;
+
+export type WindowFailureReason = (typeof WINDOW_FAILURE_REASONS)[number];
+
+/**
+ * 按角色的身份提示词建一个固定窗口。
+ *
+ * 客户端/模型跟 **normal 档路由**走，不新增配置项；会话建出来停在 idle，
+ * **不附带首条提示词**——窗口是给人开口的地方，不是一建就自己干活。
+ *
+ * 宿主目前没有「这个客户端不支持 systemPrompt」这类回执（协议的创建快照里没有该字段），
+ * 所以建窗口不会假装提醒过；能不能生效只能靠会话里的实际表现判断。
+ */
+export const orchestrationWindowRpc = defineRpc({
+  name: "deck.orchestration.window",
+  input: z.object({
+    workspaceDir: z.string().min(1).max(4096),
+    workspaceId: z.string().min(1).max(300),
+    /** 三个固定窗口之一；不认识的 role 在 schema 这一层就拒掉。 */
+    role: z.enum(FIXED_ROLE_NAMES),
+    /** true：建好新窗口之后再归档旧的（建失败则旧窗口原样留着）。缺省 false，只建不归档。 */
+    recreate: z.boolean().optional(),
+    /** 身份提示词用哪种语言；缺省中文。窗口标题固定中文，不随它变。 */
+    lang: z.enum(ROLE_LANGS).optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      agentId: z.string(),
+      title: z.string(),
+      /** 这个槽位原来绑的会话；没有旧会话时为 null。 */
+      previousAgentId: z.string().nullable(),
+    }),
+    z.object({
+      ok: z.literal(false),
+      /**
+       * `settings-unreadable` / `settings-corrupt`：编排文件读不出来或坏了，
+       * 不是「没配过」，不能拿默认值去建窗口；
+       * `route-unavailable`：normal 这一档没有可用客户端；
+       * `create-failed`：宿主要么拒绝建、要么拒绝无提示词的创建；
+       * `write-failed`：会话建好了但槽位没写回去，`detail` 里带着新 id。
+       */
+      reason: z.enum(WINDOW_FAILURE_REASONS),
       detail: z.string(),
     }),
   ]),

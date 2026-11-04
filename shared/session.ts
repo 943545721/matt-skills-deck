@@ -6,6 +6,8 @@
  * 客户端预览、服务端执行和测试用的是同一份逻辑，不会出现预览说排队、实际却打断。
  */
 
+import { providerId } from "./orchestration.ts";
+
 export type PromptActionKind =
   | "diagnose"
   | "fix"
@@ -18,6 +20,8 @@ export type PromptActionKind =
   | "takeover"
   | "handoff"
   | "new-requirement"
+  | "discuss-wayfinder"
+  | "discuss-grill"
   | "bug"
   | "custom";
 
@@ -49,6 +53,8 @@ export const ACTION_SKILLS: Readonly<Record<PromptActionKind, string | null>> = 
   takeover: "wayfinder",
   handoff: "handoff",
   "new-requirement": "wayfinder",
+  "discuss-wayfinder": "wayfinder",
+  "discuss-grill": "grill-with-docs",
   bug: "triage",
   custom: null,
 };
@@ -181,6 +187,20 @@ const ACTIONS: Record<PromptActionKind, ActionSpec> = {
     zhLead: "把这条需求整理成可执行的票，先确认目标与非目标。",
     enLead: "Turn this requirement into an actionable ticket; settle goals and non-goals first.",
   },
+  "discuss-wayfinder": {
+    skill: "wayfinder",
+    zhWord: "探讨需求",
+    enWord: "Discuss requirement",
+    zhLead: "先探讨这个需求，边谈边把地图和路线票建出来；谈清楚之前不要改代码。",
+    enLead: "Discuss this requirement first and build the map and route tickets as you go; do not change code before it is settled.",
+  },
+  "discuss-grill": {
+    skill: "grill-with-docs",
+    zhWord: "探讨需求（只谈）",
+    enWord: "Discuss requirement (talk only)",
+    zhLead: "只探讨这个需求，逐条问清目标、边界和风险；这一步不建票、不改代码，谈完我自己再拆。",
+    enLead: "Discuss only: pin down goals, boundaries and risks question by question. Do not create tickets or change code; I will split the work myself afterwards.",
+  },
   bug: {
     skill: "triage",
     zhWord: "缺陷诊断",
@@ -209,8 +229,9 @@ export type PromptDialect = "slash" | "text";
 const SLASH_PROVIDERS = new Set(["claude", "codex", "opencode"]);
 
 export function promptDialect(provider: string | undefined): PromptDialect {
-  const id = (provider ?? "").split("/")[0]?.trim().toLowerCase() ?? "";
-  return SLASH_PROVIDERS.has(id) ? "slash" : "text";
+  // 客户端 id 归一只有 `providerId` 一个入口；这里的名单和预授权能力名单是两回事
+  // （那一份在 `server/hooks.ts`），成员碰巧相同，别合并。
+  return SLASH_PROVIDERS.has(providerId(provider)) ? "slash" : "text";
 }
 
 /** 行内文字：压掉换行与连续空白，标题不会被用户正文里的换行撑开。 */

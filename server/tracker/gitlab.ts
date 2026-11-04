@@ -19,6 +19,8 @@ const TIMEOUT = 20_000;
 const SLOW = 60_000;
 const WRITE = 30_000;
 const PER_PAGE = 100;
+/** 列表最多翻多少页：翻满还没翻完就标 capped，不假装清单是全集。 */
+const MAX_LIST_PAGES = 20;
 const CAP = 1_000;
 const ANCHOR = "<!-- DSH-IDEMPOTENCY-KEY:";
 const TRIAGE = 15; const PUSH = 30;
@@ -310,7 +312,14 @@ export async function getGitLabIssue(owner: string, name: string, issue: number)
     issue: { ...full, body: str(raw.record.description) },
     comments,
     parent,
-    ...(children.length ? { children, childrenTotal: subIssues?.ok ? subIssues.result.total : children.length } : {}),
+    // 读成功就带上清单（空数组 = 确实没有子票）；读失败时省略清单并带上原始原因，
+    // 让调用方知道「判不了」而不是「没有子票」。capped 表示候选票扫到上限还没扫完，
+    // 这时清单可能漏掉子票，必须如实标出来。
+    ...(subIssues?.ok
+      ? { children, childrenTotal: children.length, ...(subIssues.result.capped ? { childrenTruncated: true } : {}) }
+      : subIssues
+        ? { childrenProblem: subIssues.detail }
+        : {}),
     meta: { labelCount: full.labels.length, labelsTruncated: false, commentCount: comments.length, commentsTruncated: comments.length >= 100, blockersTruncated: false },
   };
 }
@@ -378,7 +387,7 @@ export async function listGitLabSubIssues(owner: string, name: string, parent: n
   let fetched = 0;
   let dropped = 0;
   let capped = false;
-  for (let page = 1; page <= 20; page += 1) {
+  for (let page = 1; page <= MAX_LIST_PAGES; page += 1) {
     const result = await runGlab(["api", issuesPath(owner, name, `state=all&per_page=${PER_PAGE}&page=${page}&order_by=created_at&sort=desc&with_labels_details=true`)]);
     if (!result.ok) return result;
     const parsed = parseJson(result.stdout);
@@ -392,8 +401,12 @@ export async function listGitLabSubIssues(owner: string, name: string, parent: n
       if (parsePartOfLine(str(rec(row)?.description)) === String(parent)) items.push(mapped);
     }
     if (capped || parsed.length < PER_PAGE) break;
+    // 最后一页还是满的：候选票没扫完，清单可能漏子票，如实标成截断。
+    if (page === MAX_LIST_PAGES) capped = true;
   }
   if (dropped > 0 && items.length === 0) return fail("glab-failed", `地图 #${parent} 的候选行一行都没能算进去（${dropped} 行形状不对）`);
+  // 有行映射失败时，那一行可能正是没关的子票：清单不再完整，按截断处理。
+  if (dropped > 0) capped = true;
   return { ok: true, result: { items, total: items.length, fetched, capped, missing: 0, dropped } };
 }
 export async function getGitLabCurrentUser(): Promise<{ ok: true; login: string; name?: string; avatarUrl?: string; bot?: true } | GlabFailure> {

@@ -7,15 +7,18 @@ import type { BoardIssue } from "../../../shared/issues";
  * 单独成文件才能被 node 直接测——「同一张图里少了一张票」这种错，
  * 在界面上扫一遍是看不出来的。
  *
- * 四条口径：
+ * 三条口径：
  * 1. 父子关系只认服务端给的 `parentKey`（GitHub 原生 sub-issue / GitLab part-of /
- *    本地 fallback 的 `DSH-PARENT`），不从标签或标题猜。
+ *    本地 fallback 的 `DSH-PARENT`；地图的「来自需求」由服务端翻成 parentKey），
+ *    不从标签或标题猜。
  * 2. `parentKey` 指向的票不在这一屏里（被筛选掉、或翻页还没拉到）时，子票留在顶层。
  *    宁可看起来是平铺，也不能让票凭空消失。
- * 3. 只认一层：子票自己的子票压平在它下面，不再多缩进一级。
- *    真正的层级与每层进度在地图页看，列表不重复那件事。
- * 4. 坏数据（自己挂自己、互相挂成环）不吞掉任何一行，只是不缩进。
+ * 3. 层数不设死：需求 → 地图 → 票就是三层，再往下也照样缩进。坏数据（自己挂自己、
+ *    互相挂成环）靠「已经吐过的不再吐」兜住，一行都不吞。
  */
+
+/** 缩进上限：再深就不是树，是数据坏了。到这一层就平铺，不吞票。 */
+const MAX_DEPTH = 8;
 
 /** 一行在屏上的身份：仓库键 + 票号。票号只在仓库内唯一，合板时必须带仓库。 */
 export function rowKeyOf(item: { repoKey: string; number: number }): string {
@@ -24,8 +27,8 @@ export function rowKeyOf(item: { repoKey: string; number: number }): string {
 
 export interface BoardRow {
   item: BoardIssue;
-  /** 1 = 子票：界面上缩进并画一道竖线。 */
-  depth: 0 | 1;
+  /** 0 = 顶层；1 起是挂在父票下面的第几层，界面按它缩进。 */
+  depth: number;
   /** 只出现在「当前屏上还有子票」的父行：子票张数（按当前筛选算）。 */
   childCount?: number;
   /** 父行才有：现在是否展开。折叠时子票不出现在 rows 里。 */
@@ -72,12 +75,14 @@ export function groupRows(items: readonly BoardIssue[], collapsed: ReadonlySet<s
     for (const kid of childrenOf.get(key) ?? []) suppress(kid);
   };
 
-  const emit = (item: BoardIssue, depth: 0 | 1): void => {
+  const emit = (item: BoardIssue, depth: number): void => {
     const key = rowKeyOf(item);
     if (emitted.has(key) || suppressed.has(key)) return;
     emitted.add(key);
     const kids = childrenOf.get(key) ?? [];
-    if (depth === 0 && kids.length > 0) {
+    // 到缩进上限就不再往下开：接着平铺，也不吞票。
+    const nest = kids.length > 0 && depth < MAX_DEPTH;
+    if (nest) {
       const expanded = !collapsed.has(key);
       rows.push({ item, depth, childCount: kids.length, expanded });
       if (!expanded) {
@@ -87,12 +92,21 @@ export function groupRows(items: readonly BoardIssue[], collapsed: ReadonlySet<s
     } else {
       rows.push({ item, depth });
     }
-    // 子票按父级顺序落位；孙票压平到 depth 1（口径 3）。
-    for (const kid of kids) emit(kid, 1);
+    // 子票按父级顺序落位，逐层缩进。
+    for (const kid of kids) emit(kid, nest ? depth + 1 : depth);
   };
 
+  // 有父票的孩子不在顶层发：它们等父票那一轮被顺带吐出来。
+  // （服务端排序把地图排在最前，父票可能排在孩子后面，所以不能只靠「先到先得」。）
+  const hasScreenParent = new Set<string>();
+  for (const kids of childrenOf.values()) for (const kid of kids) hasScreenParent.add(rowKeyOf(kid));
+
   // 顶层顺序沿用传进来的顺序（服务端已按「地图票优先 → 未关闭优先 → 最近更新」排好）。
-  // 子票已经在父票那一轮吐过，这里跳过。
+  for (const item of items) {
+    if (!hasScreenParent.has(rowKeyOf(item))) emit(item, 0);
+  }
+  // 兜底：互相挂成环的票谁也不算「没有父票」，刚才一轮会把它们全跳过——
+  // 但界面上一行都不能少，所以没吐过的就地按顶层发一遍。
   for (const item of items) emit(item, 0);
   return rows;
 }

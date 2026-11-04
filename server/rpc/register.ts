@@ -25,6 +25,7 @@ import {
   repoTargetsRpc,
   workspaceAcknowledgeRpc,
   workspaceProjectsRpc,
+  workspaceProjectsSaveRpc,
   workspaceShapeRpc,
 } from "../../shared/repo.ts";
 import {
@@ -34,6 +35,7 @@ import {
   repoTargetsHandler,
   workspaceAcknowledgeHandler,
   workspaceProjectsHandler,
+  workspaceProjectsSaveHandler,
   workspaceShapeHandler,
 } from "./repo.ts";
 import { updateCheckRpc } from "../../shared/update.ts";
@@ -45,30 +47,42 @@ import { publishConfirmHandler, publishPlanHandler, publishRunRpcHandler } from 
 import { sessionHandoffRpc, sessionHandoffsListRpc, sessionHandoffReadRpc, sessionLedgerRpc, sessionSendRpc } from "../../shared/session-rpc.ts";
 import { sessionHandoffHandler, sessionHandoffsListHandler, sessionHandoffReadHandler, sessionLedgerHandler, sessionSendHandler } from "./session.ts";
 import {
+  orchestrationArchivedRpc,
   orchestrationDispatchRpc,
+  orchestrationInboxActRpc,
+  orchestrationInboxRpc,
   orchestrationProfileRpc,
   orchestrationProviderDiagnosticRpc,
   orchestrationProviderInstallRpc,
   orchestrationProviderModelsRpc,
+  orchestrationProviderRefreshRpc,
   orchestrationProviderRevealRpc,
   orchestrationProviderRpc,
-  orchestrationProviderRefreshRpc,
+  orchestrationRequirementDispatchRpc,
   orchestrationSaveRpc,
+  orchestrationStaffStopRpc,
   orchestrationSiteRpc,
   orchestrationStateRpc,
+  orchestrationWindowRpc,
 } from "../../shared/orchestration-rpc.ts";
 import {
+  orchestrationArchivedHandler,
   orchestrationDispatchHandler,
+  orchestrationInboxActHandler,
+  orchestrationInboxHandler,
   orchestrationProfileHandler,
   orchestrationProviderDiagnosticHandler,
   orchestrationProviderInstallHandler,
   orchestrationProviderModelsHandler,
+  orchestrationProviderRefreshHandler,
   orchestrationProviderRevealHandler,
   orchestrationProviderHandler,
-  orchestrationProviderRefreshHandler,
+  orchestrationRequirementDispatchHandler,
   orchestrationSaveHandler,
+  orchestrationStaffStopHandler,
   orchestrationSiteHandler,
   orchestrationStateHandler,
+  orchestrationWindowHandler,
 } from "./orchestration.ts";
 import { issueAttachmentSearchRpc } from "../../shared/slash.ts";
 import { workspaceBindingRpc } from "../../shared/workspace-binding.ts";
@@ -107,6 +121,8 @@ import {
   setIssueLabelsHandler,
   setIssueStateHandler,
 } from "./issues.ts";
+import { groupReadRpc, groupSendRpc } from "../../shared/group-rpc.ts";
+import { groupReadHandler, groupSendHandler } from "./group.ts";
 import { listLabelsHandler, setLabelColorsHandler, syncLabelsHandler } from "./labels.ts";
 import { mapHandler } from "./map.ts";
 import { adoptSkillHandler, listSkills, installSkillsHandler, readSkill, removeSkillsHandler } from "./skills.ts";
@@ -186,6 +202,7 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(repoInfoRpc, repoInfoHandler);
   server.handle(repoTargetsRpc, repoTargetsHandler);
   server.handle(workspaceProjectsRpc, workspaceProjectsHandler);
+  server.handle(workspaceProjectsSaveRpc, workspaceProjectsSaveHandler);
   server.handle(workspaceShapeRpc, workspaceShapeHandler);
   server.handle(workspaceAcknowledgeRpc, workspaceAcknowledgeHandler);
   server.handle(repoCandidatesRpc, repoCandidatesHandler);
@@ -203,17 +220,26 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(sessionHandoffReadRpc, sessionHandoffReadHandler);
 
   server.handle(orchestrationStateRpc, orchestrationStateHandler);
+  server.handle(orchestrationArchivedRpc, orchestrationArchivedHandler);
+  server.handle(orchestrationInboxRpc, orchestrationInboxHandler);
+  server.handle(orchestrationInboxActRpc, orchestrationInboxActHandler);
   server.handle(orchestrationSaveRpc, orchestrationSaveHandler);
+  server.handle(orchestrationStaffStopRpc, orchestrationStaffStopHandler);
   server.handle(orchestrationSiteRpc, orchestrationSiteHandler);
   server.handle(orchestrationProviderRpc, orchestrationProviderHandler);
   server.handle(orchestrationProviderInstallRpc, orchestrationProviderInstallHandler);
   server.handle(orchestrationProviderDiagnosticRpc, orchestrationProviderDiagnosticHandler);
   server.handle(orchestrationProviderRevealRpc, orchestrationProviderRevealHandler);
   server.handle(orchestrationProviderModelsRpc, orchestrationProviderModelsHandler);
+  server.handle(orchestrationProviderRefreshRpc, orchestrationProviderRefreshHandler);
   server.handle(orchestrationProfileRpc, orchestrationProfileHandler);
   server.handle(orchestrationDispatchRpc, orchestrationDispatchHandler);
+  server.handle(orchestrationRequirementDispatchRpc, orchestrationRequirementDispatchHandler);
+  server.handle(orchestrationWindowRpc, orchestrationWindowHandler);
 
-  server.handle(orchestrationProviderRefreshRpc, orchestrationProviderRefreshHandler);
+  server.handle(groupSendRpc, groupSendHandler);
+  server.handle(groupReadRpc, groupReadHandler);
+
   server.handle(issueAttachmentSearchRpc, searchIssueAttachmentsHandler);
   server.handle(workspaceBindingRpc, workspaceBindingHandler);
 }

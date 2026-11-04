@@ -1,4 +1,5 @@
-import type { PaseoAgentCreateOptions, PaseoAgentHandle, PaseoApi } from "@getpaseo/client";
+import type { PaseoAgentHandle, PaseoApi, PaseoWorkspaceAgentCreateOptions } from "@getpaseo/client";
+import { parseProviderSpec } from "../shared/orchestration.ts";
 import { renderHandoff, type SessionSendPlan } from "../shared/session.ts";
 import { applyWorkRouteEvent, type WorkRouteTicket } from "../shared/work-route.ts";
 import {
@@ -45,6 +46,10 @@ const ERROR_PATTERNS: ReadonlyArray<{ kind: SessionErrorKind; pattern: RegExp }>
     pattern:
       /(?:repo(?:sitory)?|workspace|directory|cwd).*(?:not found|missing|invalid|no such|does not exist|not exist)|not a git repository|ENOENT|\b404\b/i,
   },
+  // 宿主对 provider 格式的拒绝（`Expected config.provider in "provider/model" format`）：
+  // 这是我们自己传错了参数，不是宿主故障，归到 invalid-input 而不是 unknown，
+  // 否则用户只看到「unknown: ...」不知道该去改哪。
+  { kind: "invalid-input", pattern: /expected config\.provider|provider\/model format/i },
 ];
 
 export function sessionErrorDetail(error: unknown): string {
@@ -97,6 +102,11 @@ export interface LedgerNote {
   detail?: string;
 }
 
+/** 参数问题：形状固定，四处在写同一份字面量，抽出来免得哪天只改了一处。 */
+function invalidCreateInput(detail: string): SessionFailure {
+  return { kind: "invalid-input", detail, phase: null, agentId: null, outcomeUnknown: false };
+}
+
 function ledgerFailed(result: LedgerUpdateResult): LedgerNote {
   return result.ok ? { ok: true, skipped: false } : { ok: false, skipped: false, detail: `${result.reason}: ${result.detail}` };
 }
@@ -118,10 +128,25 @@ function snapshotFailure(snapshot: CreationSnapshotView | null): SessionFailure 
 }
 
 export interface CreateAgentInput {
-  cwd: string;
-  /** `claude` / `codex` / `opencode`，或 `provider/model`。 */
+  /** 有 `workspaceId` 时可选：目录由句柄决定，传了也不会下发。 */
+  cwd?: string;
+  /**
+   * 会话要落进哪条工作区。
+   *
+   * 给了就必须走 `workspaces.ref(id).agents.create`：裸 `agents.create({ cwd })` 由宿主
+   * **按目录重新解析**工作区，同一目录下有多条工作区记录时它会再开一条新的——用户点三次
+   * 「建窗口」，侧栏就多出三条同名工作区（实测 wks_c619d2… / wks_de5ac0… / wks_d05a40…，
+   * 每条里只有那一个窗口）。没有 id（例如旧调用方）才退回 cwd。
+   */
+  workspaceId?: string;
+  /** 必须是 `provider/model`（宿主 `config.provider` 的格式），只给客户端 id 会被拒。 */
   provider: string;
   prompt?: string;
+  /**
+   * 身份提示词。宿主把它映射成各客户端原生的指令字段（`config.systemPrompt`），
+   * 与该会话的每轮对话一起生效。
+   */
+  systemPrompt?: string;
   title?: string;
   idempotencyKey?: string;
   modeId?: string;
@@ -180,28 +205,46 @@ async function recordTicket(
  */
 export async function createAgent(paseo: PaseoApi, input: CreateAgentInput): Promise<CreateAgentResult> {
   const provider = input.provider.trim();
-  if (!provider || !input.cwd.trim()) {
+  const cwd = input.cwd?.trim() ?? "";
+  const workspaceId = input.workspaceId === undefined ? "" : input.workspaceId.trim();
+  // 「传了但空白」不能当成「没传」：那会静默退回按目录建会话，正是多开工作区的来源。
+  // 与 `orchestrationSaveHandler` 同一口径——要么给一个真的 id，要么别传。
+  if (input.workspaceId !== undefined && !workspaceId) {
     return {
       ok: false,
-      failure: {
-        kind: "invalid-input",
-        detail: "新建会话需要 provider 与工作区目录",
-        phase: null,
-        agentId: null,
-        outcomeUnknown: false,
-      },
+      failure: invalidCreateInput("workspaceId 传了但是空白：要么给一个真的工作区 id，要么别传"),
+    };
+  }
+  // 有工作区 id 时目录由句柄决定，不再要求 cwd。
+  if (!provider || (!workspaceId && !cwd)) {
+    return { ok: false, failure: invalidCreateInput("新建会话需要 provider 与工作区目录") };
+  }
+  // 最后一道闸：宿主的 `config.provider` 只认 `provider/model`，只给 `claude` 会在
+  // 建会话时才抛 `Expected config.provider in "provider/model" format`。在那里才失败
+  // 意味着窗口可能已经被归档、票可能已经建好，所以在这里先拦住并说清楚。
+  const spec = parseProviderSpec(provider);
+  if (!spec.provider || !spec.model) {
+    return {
+      ok: false,
+      failure: invalidCreateInput(
+        `provider 要写成 provider/model（例如 claude/sonnet），"${provider}" 缺${
+          spec.provider ? "模型" : "客户端"
+        }，宿主不会接受`,
+      ),
     };
   }
   let lastSnapshot: CreationSnapshotView | null = null;
   const title = input.title?.trim();
-  const options: PaseoAgentCreateOptions = {
+  const systemPrompt = input.systemPrompt?.trim();
+  // 公共部分按句柄的形状建：cwd 不在这里，有 workspaceId 时它由句柄决定。
+  const options: PaseoWorkspaceAgentCreateOptions = {
     config: {
       provider,
       ...(input.modeId ? { modeId: input.modeId } : {}),
       ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
       ...(input.featureValues ? { featureValues: input.featureValues } : {}),
+      ...(systemPrompt ? { systemPrompt } : {}),
     },
-    cwd: input.cwd,
     onEvent: (snapshot: CreationSnapshotView) => {
       lastSnapshot = snapshot;
     },
@@ -215,7 +258,10 @@ export async function createAgent(paseo: PaseoApi, input: CreateAgentInput): Pro
 
   let handle: PaseoAgentHandle;
   try {
-    handle = await paseo.agents.create(options);
+    // 目录由句柄带：带 cwd 的裸创建会让宿主按目录再登记一条工作区。
+    handle = workspaceId
+      ? await paseo.workspaces.ref(workspaceId).agents.create(options)
+      : await paseo.agents.create({ ...options, cwd });
   } catch (error) {
     const snapshot = lastSnapshot as CreationSnapshotView | null;
     const detail = sessionErrorDetail(error);
@@ -248,13 +294,27 @@ export async function createAgent(paseo: PaseoApi, input: CreateAgentInput): Pro
   }
   const failure = snapshotFailure(snapshot);
   const ledger = await recordTicket(agentId, input.ticket, input.ledger);
-  return { ok: true, agentId, title: title || null, partial: failure !== null, failure, ledger };
+  return {
+    ok: true,
+    agentId,
+    title: title || null,
+    partial: failure !== null,
+    failure,
+    ledger,
+  };
 }
 
 export interface SendToAgentInput {
   plan: SessionSendPlan;
   /** 新建会话时必填；`provider/model` 里的第一段是提供方。 */
   provider?: string;
+  /**
+   * 新建会话时用哪条工作区。
+   *
+   * 不传就退回 `cwd`，宿主会按目录再登记一条工作区——`target.kind === "new"` 的调用方
+   * 应当传它；`current` / `copy` 用不到。
+   */
+  workspaceId?: string;
   modeId?: string;
   thinkingOptionId?: string;
   env?: Record<string, string>;
@@ -459,6 +519,8 @@ export async function sendToAgent(paseo: PaseoApi, input: SendToAgentInput): Pro
     }
     const created = await createAgent(paseo, {
       cwd: plan.target.cwd,
+      // 空白也照传：空白 id 必须在 `createAgent` 里被拒，不能在这里丢掉、退回按目录建。
+      ...(input.workspaceId !== undefined ? { workspaceId: input.workspaceId } : {}),
       provider,
       prompt: plan.prompt,
       ...(plan.title ? { title: plan.title } : {}),

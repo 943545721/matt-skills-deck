@@ -2,7 +2,7 @@ import type { DeckLang } from "../../../shared/requirement.ts";
 import type { EntryCardCopy } from "./entryCardSvg.ts";
 
 /**
- * 「新建需求 / + bug」入口的全部界面文案，逐字照抄 DSH：
+ * 「新建需求 / 探讨需求 / + bug」入口的界面文案；卡面文案源自 DSH，但已按两扇门的语义改写：
  * - 面板按钮 `panel.newWayfinder` / `panel.newBug`（config/copy/panel.yaml）；
  * - 入口浮层标题与卡面（config/copy/cards.yaml 的 card.entry.*）；
  * - 新会话占位标题（src/shared/naming-titles.ts 的 PLACEHOLDER_TITLES）。
@@ -13,6 +13,8 @@ import type { EntryCardCopy } from "./entryCardSvg.ts";
 export interface EntryCopy {
   newRequirement: string;
   newRequirementTitle: string;
+  discussRequirement: string;
+  discussRequirementTitle: string;
   newBug: string;
   newBugTitle: string;
   chooserTitle: string;
@@ -27,53 +29,57 @@ export interface EntryCopy {
 const COPY: Record<DeckLang, EntryCopy> = {
   zh: {
     newRequirement: "新建需求",
-    newRequirementTitle: "点一下弹出两张卡：探索地图或实施地图，由你自己选",
+    newRequirementTitle: "打开建票表单，类型预选「探索需求」；真的建出一张需求票",
+    discussRequirement: "探讨需求",
+    discussRequirementTitle: "开一个新会话谈需求：边谈边建地图，或只谈不建票",
     newBug: "+ bug",
     newBugTitle: "新会话中打开 /wayfinder 新增 BUG 单 prompt（继承当前工作区）",
-    chooserTitle: "这条需求，你现在能说清要做什么吗？",
+    chooserTitle: "这次先谈，怎么谈？",
     close: "关闭",
     need: "需求",
     goalClear: "目标明确",
     explore: {
-      brow: "探索地图",
-      state: "目标大而模糊",
-      body: "想清楚了要做什么，没想清楚细节，也没想清楚做到什么程度。",
+      brow: "边谈边建地图",
+      state: "会产出地图和路线票",
+      body: "跑 /wayfinder：边谈边把地图和路线票建出来。目标大而模糊时走这条。",
       need: "需求",
       goalClear: "目标明确",
     },
     impl: {
-      brow: "实施地图",
-      state: "目标明确清晰",
-      body: "要做什么、细节和做到什么程度都想清楚了，还没写成规格。",
+      brow: "只谈",
+      state: "暂不建票",
+      body: "跑 /grill-with-docs：谈完你自己跑 /to-spec、/to-tickets。目标已经清晰时走这条。",
       need: "需求",
       goalClear: "目标明确",
     },
-    sessionTitle: { requirement: "[New] 新建需求", spec: "[New] 实施地图", bug: "[New] 新建 Bug" },
+    sessionTitle: { requirement: "[New] 探讨需求", spec: "[New] 只谈需求", bug: "[New] 新建 Bug" },
   },
   en: {
     newRequirement: "New Requirement",
-    newRequirementTitle: "Opens two cards: Explore map or Implementation map - you pick which route",
+    newRequirementTitle: "Opens the ticket form with Explore requirement preselected; creates a real requirement ticket",
+    discussRequirement: "Discuss Requirement",
+    discussRequirementTitle: "Open a new session to talk it through: build a map as you talk, or talk only",
     newBug: "+ BUG",
     newBugTitle: "Open a /wayfinder new-BUG prompt in a new session (same workspace)",
-    chooserTitle: "Can you say clearly what you want to build right now?",
+    chooserTitle: "How do you want to talk this through?",
     close: "Close",
     need: "Need",
     goalClear: "Goal clear",
     explore: {
-      brow: "Explore map",
-      state: "Big, fuzzy goal",
-      body: "You know what to build, not the details or the scope.",
+      brow: "Talk and build a map",
+      state: "Produces a map and route tickets",
+      body: "Runs /wayfinder: talk and build the map and route tickets as you go. Use it while the goal is still fuzzy.",
       need: "Need",
       goalClear: "Goal clear",
     },
     impl: {
-      brow: "Implementation map",
-      state: "Goal is clear",
-      body: "What, details and scope are clear; only the spec is not written.",
+      brow: "Talk only",
+      state: "No tickets yet",
+      body: "Runs /grill-with-docs: afterwards you run /to-spec and /to-tickets yourself. Use it when the goal is clear.",
       need: "Need",
       goalClear: "Goal clear",
     },
-    sessionTitle: { requirement: "[New] New Requirement", spec: "[New] Impl map", bug: "[New] New Bug" },
+    sessionTitle: { requirement: "[New] Discuss Requirement", spec: "[New] Talk Only", bug: "[New] New Bug" },
   },
 };
 

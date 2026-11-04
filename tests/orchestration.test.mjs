@@ -126,6 +126,28 @@ test("路由解析：档案优先，档案丢了不猜替代品", () => {
   assert.equal(direct.via, "target");
 });
 
+test("路由解析：只选客户端没选模型算坏路由，宿主不认裸 provider", () => {
+  // 宿主 `config.provider` 只收 `provider/model`；这种目标在解析阶段就该拦住，
+  // 不然要等建会话时才炸，窗口/票可能已经动过。
+  const bare = resolveRouteTarget({ difficulty: "normal", target: { provider: "claude" } }, []);
+  assert.equal(bare.ok, false);
+  assert.equal(bare.reason, "no-model");
+  assert.match(bare.detail, /provider\/model/);
+
+  const bareProfile = resolveRouteTarget({ difficulty: "normal", profileId: "half" }, [
+    { id: "half", name: "半份档案", provider: "codex" },
+  ]);
+  assert.equal(bareProfile.ok, false);
+  assert.equal(bareProfile.reason, "no-model");
+  assert.match(bareProfile.detail, /半份档案/, "指出是哪份档案不完整");
+
+  // 一档都没配时落到内置默认：同样缺模型，明确报出来而不是假装能用。
+  const fallback = resolveRoute({ routing: [] }, "normal");
+  const fallbackTarget = resolveRouteTarget(fallback, []);
+  assert.equal(fallbackTarget.ok, false);
+  assert.equal(fallbackTarget.reason, "no-model");
+});
+
 test("子会话标签：带上父 id、难度、票号与派单批次", () => {
   const labels = buildChildLabels({ dispatcherAgentId: "agent-1", difficulty: "hard", dispatchId: "d1", ticketKey: "42" });
   assert.equal(labels[PARENT_AGENT_ID_LABEL], "agent-1");
@@ -231,6 +253,12 @@ test("派单抬头：点名派单窗口、层数、难度，并要求 deck_hando
   const zh = buildDispatchPreamble({ lang: "zh", dispatcherAgentId: "agent-1", difficulty: "hard", depth: 1, ticketKey: "7" });
   assert.match(zh, /agent-1/);
   assert.match(zh, /deck_handoff/);
+  // 收尾必须是一次 deck_issue_patch 同时带 comment 与 close:true：分两次会被闸门拒掉。
+  assert.match(zh, /deck_issue_patch/);
+  assert.match(zh, /comment/);
+  assert.match(zh, /close:true/);
+  assert.match(zh, /同一次调用/);
+  assert.ok(!zh.includes("deck_issue_comment"), "不能教 agent 先单独评论再关票");
   assert.match(zh, /第 1 层/);
   assert.match(zh, /hard/);
   assert.equal(zh, preambleAgain({ lang: "zh", dispatcherAgentId: "agent-1", difficulty: "hard", depth: 1, ticketKey: "7" }));
@@ -238,6 +266,9 @@ test("派单抬头：点名派单窗口、层数、难度，并要求 deck_hando
   const en = buildDispatchPreamble({ lang: "en", dispatcherAgentId: "agent-2", difficulty: "normal", depth: 2 });
   assert.match(en, /child session/);
   assert.match(en, /deck_handoff/);
+  assert.match(en, /deck_issue_patch/);
+  assert.match(en, /close:true/);
+  assert.ok(!en.includes("deck_issue_comment"), "English preamble must not teach a separate comment step");
 });
 
 test("会话树：父 id 断链的按根显示，成环的边断开", () => {
@@ -259,6 +290,13 @@ test("会话树：父 id 断链的按根显示，成环的边断开", () => {
   assert.equal(root.children[0].children[0].agentId, "b");
   assert.equal(countTree(tree).nodes, 6);
   assert.equal(countTree(tree).depth, 3);
+  // 父 id 有值但父不在本区快照里 = 跨区派出去的子会话：按根画，并打标记。
+  const orphan = tree.find((node) => node.agentId === "orphan");
+  assert.equal(orphan.crossWorkspace, true);
+  assert.equal(root.crossWorkspace, false);
+  assert.equal(root.children[0].crossWorkspace, false);
+  // 成环被断开的节点不是「跨区」：它的父其实在本区，只是这条边不成立。
+  assert.equal(tree.find((node) => node.agentId === "x").crossWorkspace, false);
 });
 
 test("设置归一：坏值不会写进文件", () => {

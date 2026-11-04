@@ -7,7 +7,7 @@ import { copyText } from "@getpaseo/plugin/client/ui";
 import { buildActionPrompt } from "../../../shared/session.ts";
 import { DECK_SLASH_COMMANDS, parseDeckSlash } from "../../../shared/slash.ts";
 import type { DeckSlashCommand } from "../../../shared/slash.ts";
-import { DECK_PANEL_ID } from "../ids.ts";
+import { DECK_NEW_TICKET_ID, DECK_PANEL_ID } from "../ids.ts";
 import { appendDeckCommand } from "../timeline/command.ts";
 import type { DeckCommandAction, DeckCommandData } from "../timeline/command.ts";
 import { readBoard, readTicket, ticketContext } from "./deckData.ts";
@@ -171,12 +171,23 @@ async function runAgent(client: PluginClientContext, ctx: AgentContext, command:
       return;
     }
     case "new": {
+      // 建票走真表单，不是把一段提示词塞给模型：先建出票，才有「无票不干活」的前提。
+      ctx.openScreen({ screenId: DECK_NEW_TICKET_ID, params: { dir } });
       await append({
         command: "new",
         title: client.i18n.t(surfaceMessages, "slash.newTitle"),
         lines: [client.i18n.t(surfaceMessages, "slash.newHint")],
+      });
+      return;
+    }
+    case "discuss": {
+      const wayfinder = command.mode === "wayfinder";
+      await append({
+        command: "discuss",
+        title: client.i18n.t(surfaceMessages, wayfinder ? "slash.discussWayfinderTitle" : "slash.discussGrillTitle"),
+        lines: [client.i18n.t(surfaceMessages, wayfinder ? "slash.discussWayfinderHint" : "slash.discussGrillHint")],
         openBoard: true,
-        session: { action: "new-requirement", context: {} },
+        session: { action: wayfinder ? "discuss-wayfinder" : "discuss-grill", context: {} },
       });
       return;
     }
@@ -222,7 +233,13 @@ async function runWorkspace(client: PluginClientContext, ctx: WorkspaceContext, 
       openBoard();
       return;
     case "new":
-      await copyText(buildActionPrompt("new-requirement", { lang }));
+      // 工作区上下文没有会话，建票表单一页就能填完：打开它，不复制提示词。
+      ctx.openScreen({ screenId: DECK_NEW_TICKET_ID, params: { dir } });
+      return;
+    case "discuss":
+      await copyText(
+        buildActionPrompt(command.mode === "wayfinder" ? "discuss-wayfinder" : "discuss-grill", { lang }),
+      );
       openBoard();
       return;
     case "help":

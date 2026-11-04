@@ -1,5 +1,6 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server";
+import { agentIdOf, type WorkspaceRoles } from "../shared/orchestration.ts";
 import { readChildHandoff, type ChildHandoffRecord } from "./handoff-store.ts";
 import { record } from "./logs.ts";
 import { readOrchestration } from "./orchestration-store.ts";
@@ -94,6 +95,28 @@ export function renderTurnReport(input: {
     text: [head, `回合结果：${outcomeLine(input.outcome)}`, "没有回传件，也没有读到可用的输出：需要人工确认这一支做了什么。"].join("\n"),
     source: "outcome",
   };
+}
+
+/**
+ * 发给进度窗口的抄送正文。
+ *
+ * 进度窗口是旁听者，不是回传链的一环：它只要「谁、哪张票、最后什么结论」这几样，
+ * 把整份回传原样再粘一遍只会让它和上一级各收到一份噪音。
+ */
+function renderProgressCopy(input: {
+  child: { id: string; title: string | null };
+  outcome: PluginTurnOutcome;
+  handoff: ChildHandoffRecord | null;
+}): string {
+  const title = input.child.title?.trim() || input.child.id;
+  const ticket = input.handoff?.ticketKey?.trim();
+  const summary = input.handoff?.summary?.trim();
+  const lines = [
+    `【进度】${title}${ticket ? ` · 票 ${ticket}` : ""}`,
+    `回合结果：${outcomeLine(input.outcome)}`,
+  ];
+  if (summary) lines.push(`结论：${summary}`);
+  return lines.join("\n");
 }
 
 /** 从时间线尾部挑出最后一条助手消息；拿不到就返回 null。 */
@@ -198,6 +221,8 @@ export class TurnReporter {
       if (key) this.remember(key);
       if (usable) this.rememberHandoff(input.agent.id, usable.createdAt);
       record("info", SCOPE, `子会话 ${input.agent.id} 已回传到 ${parentAgentId}（来源：${report.source}）`);
+      // 主投递已经成功：抄送是旁路，成败都不该改变上面的结果。
+      await this.copyToProgress(paseo, input, parentAgentId, usable);
       return { ok: true, reported: true, parentAgentId, source: report.source, text };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -213,6 +238,8 @@ export class TurnReporter {
           if (key) this.remember(key);
           if (usable) this.rememberHandoff(input.agent.id, usable.createdAt);
           record("warn", SCOPE, `回传到 ${parentAgentId} 失败（${detail}），已改送主沟通窗口 ${mainAgentId}`);
+          // 绕道也是一次成功投递：进度窗口仍应收一份，别因为上一级不可达就漏掉旁听。
+          await this.copyToProgress(paseo, input, mainAgentId, usable);
           return { ok: true, reported: true, parentAgentId: mainAgentId, source: report.source, text, rerouted: true };
         } catch (fallbackError) {
           const fallbackDetail = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
@@ -224,6 +251,58 @@ export class TurnReporter {
       return { ok: false, reason: "send-failed", parentAgentId, detail };
     }
   }
+
+  /**
+   * 主投递成功后，把结论抄一份给进度窗口。
+   *
+   * 进度窗口只是旁听：没配就跳过；只有它**就是刚收到回传的那个会话**时才不重发
+   * （否则同一段文字会在同一个窗口出现两次）。去重看的是本次实际收件人，
+   * 不是「主窗口」——正常路径的收件人是上一级，主窗口本来就没收到。
+   * 整个抄送包在 try 里——这里失败只记日志，主投递的成功结果不受影响。
+   */
+  private async copyToProgress(
+    paseo: PaseoApi,
+    input: TurnEndInput,
+    recipientAgentId: string,
+    handoff: ChildHandoffRecord | null,
+  ): Promise<void> {
+    try {
+      const progressAgentId = await progressAgentFor(input.agent.cwd, input.agent.workspaceId);
+      if (!progressAgentId || progressAgentId === recipientAgentId) return;
+      await paseo.agents.ref(progressAgentId).send(
+        renderProgressCopy({
+          child: { id: input.agent.id, title: input.agent.title },
+          outcome: input.outcome,
+          handoff,
+        }),
+        { activeTurnBehavior: "steer" },
+      );
+      record("info", SCOPE, `子会话 ${input.agent.id} 的结论已抄送进度窗口 ${progressAgentId}`);
+    } catch (error) {
+      record("warn", SCOPE, `抄送进度窗口失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
+/**
+ * 读这个工作区的角色槽位；读失败 / 文件坏了留一条日志，别让人以为「没配这个窗口」。
+ *
+ * `purpose` 只进日志：同一个工作区可能既要用主窗口兜底、又要抄送进度，
+ * 所以这里只交槽位，由调用方按角色各取各的 id，不重复读文件。
+ */
+async function roleSlotFor(
+  workspaceDir: string,
+  workspaceId: string | null,
+  purpose: "main-fallback" | "progress-copy",
+): Promise<WorkspaceRoles | null> {
+  const id = workspaceId?.trim();
+  if (!id) return null;
+  const stored = await readOrchestration(workspaceDir);
+  if (stored.readFailed || stored.corrupt) {
+    const what = purpose === "main-fallback" ? "主沟通窗口兜底" : "抄送进度窗口";
+    record("warn", SCOPE, `读不出编排设置（${stored.detail ?? "未知原因"}）：这次没法${what}`);
+  }
+  return stored.settings.roles.find((item) => item.workspaceId === id) ?? null;
 }
 
 /**
@@ -233,15 +312,17 @@ export class TurnReporter {
  * 把它配了却不用，等于那项配置只是块装饰。
  */
 export async function mainAgentFor(workspaceDir: string, workspaceId: string | null): Promise<string | null> {
-  const id = workspaceId?.trim();
-  if (!id) return null;
-  const stored = await readOrchestration(workspaceDir);
-  // 读失败 / 坏文件时角色是空的：兜底投递会静默失效。日志里留一条，别让人以为是「没配主沟通窗口」。
-  if (stored.readFailed || stored.corrupt) {
-    record("warn", SCOPE, `读不出编排设置（${stored.detail ?? "未知原因"}）：这次没法用主沟通窗口兜底`);
-  }
-  const role = stored.settings.roles.find((item) => item.workspaceId === id);
-  return role?.mainAgentId?.trim() || null;
+  return agentIdOf(await roleSlotFor(workspaceDir, workspaceId, "main-fallback"), "main");
+}
+
+/**
+ * 这个工作区指定的进度窗口。
+ *
+ * 与 `mainAgentFor` 同源读设置：进度窗口只收抄送，没配就不抄，
+ * 不在这里做任何兜底投递。
+ */
+export async function progressAgentFor(workspaceDir: string, workspaceId: string | null): Promise<string | null> {
+  return agentIdOf(await roleSlotFor(workspaceDir, workspaceId, "progress-copy"), "progress");
 }
 
 /** 读这个工作区的「结束即回传」开关；读不到按开启处理（用户要的默认行为就是会回传）。 */

@@ -14,6 +14,7 @@ import {
 import { useDeckText } from "./i18n";
 import { usePanelText } from "./panel/panelText.tsx";
 import { SkillDraftModal } from "./skills-draft/SkillDraftModal.tsx";
+import { ProjectListEditor } from "./skills/ProjectListEditor.tsx";
 import { SkillMatrix } from "./skills/SkillMatrix.tsx";
 import { PixelBanner, PixelButton, PixelCard, PixelModalBody, usePixel } from "./pixel";
 import { SessionSheet } from "./session/SessionSheet.tsx";
@@ -72,6 +73,8 @@ export function SkillsView({
   const [view, setView] = useState<"skills" | "matrix" | null>(null);
   /** 上一次「全部更新」的逐项目结果：装完之后要能按项目看到备份路径与冲突。 */
   const [report, setReport] = useState<InstallReport | null>(null);
+  /** 项目清单编辑器：矩阵的行就是它写的，改完立刻重取一次矩阵。 */
+  const [projectsOpen, setProjectsOpen] = useState(false);
 
   const listSkills = useRpc(skillsListRpc);
   const installSkills = useRpc(skillsInstallRpc);
@@ -334,6 +337,7 @@ export function SkillsView({
           report={report}
           pending={install.isPending}
           onUpdateAll={() => install.mutate(undefined)}
+          onEditProjects={() => setProjectsOpen(true)}
         />
       ) : (
         <FlatList
@@ -397,6 +401,14 @@ export function SkillsView({
             )}
           />
       )}
+
+      <ProjectListEditor
+        skin={skin}
+        workspaceDir={workspaceDir}
+        open={projectsOpen}
+        onOpenChange={setProjectsOpen}
+        onSaved={() => void list.refetch()}
+      />
 
       <Modal
         title={detailId ?? t("tabs.skills")}

@@ -32,6 +32,18 @@ export const deckSettings = defineSettings({
      * 单个项目可以在 `.paseo-deck.json` 的 `skillsMode` 里覆盖这里。
      */
     skillsMode: z.enum(SKILL_MODES).default("per-project"),
+    /**
+     * 自动同意会话发出的工具权限请求，默认关。
+     *
+     * 为什么需要它：cursor 这类客户端的请求在宿主里没有工具身份（`paseo permit ls --json`
+     * 里只有 name=other、description=-），既不能在创建会话时预授权，也没法只放行 deck 工具，
+     * 于是每调一次 `deck_issue_list` 都要人点一次。
+     *
+     * 代价要说清楚：打开后，装过 deck 工具的工作区里，**所有**工具权限请求都会被自动同意——
+     * 包括改文件、跑命令。只对 tool / other 两类生效；plan / question / mode 不碰
+     * （那是替用户拍板方案或回答问题，不是「工具放行」）。
+     */
+    autoAllowPermissions: z.boolean().default(false),
   }),
 });
 

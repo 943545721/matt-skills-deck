@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { after, test } from "node:test";
 import { fakeGh } from "./helpers/fake-gh.mjs";
 import { findTool } from "../server/mcp/tools.ts";
-import { initializeLocalScratch } from "../server/tracker/local.ts";
+import { initializeLocalScratch, replaceLocalLabels } from "../server/tracker/local.ts";
 import { EDGE_LANDING } from "../shared/edge-rules.ts";
 
 /**
@@ -692,7 +692,187 @@ test("本地后端：地图计划先建地图再逐张建票，票落在同一�
     const task = readFileSync(path.join(ws, ".deck", "issues", "3.md"), "utf8");
     assert.match(task, /wayfinder:task/);
     assert.match(task, /Part of map #1\./);
+    // 正文指针只是给人看的；机器读子票清单靠文件头这条边。
+    assert.match(task, /^parentKey: 1$/m);
     assert.deepEqual(gh.calls(), []);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("本地 .deck：deck_issue_create 建地图工单时父边落盘（不再要求 .scratch）", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    const plan = json(
+      await run("deck_map_plan_create", { title: "地图", destination: "跑通地图", tickets: [{ title: "第一张", kind: "task" }] }, ws),
+    );
+    const mapNumber = plan.map.number;
+    const created = json(
+      await run("deck_issue_create", { title: "后补工单", kind: "map-ticket", label: "wayfinder:task", parentKey: String(mapNumber) }, ws),
+    );
+    assert.equal(created.parent.linked, true);
+
+    const detail = json(await run("deck_issue_get", { number: mapNumber }, ws));
+    assert.deepEqual(
+      detail.relations.children.map((child) => child.number).sort((a, b) => a - b),
+      [plan.tickets[0].number, created.number].sort((a, b) => a - b),
+    );
+  } finally {
+    gh.restore();
+  }
+});
+
+test("deck_issue_get：本地有坏票文件时，子票清单标成截断而不是「0 张完整」", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    const plan = json(
+      await run("deck_map_plan_create", { title: "地图", destination: "跑通地图", tickets: [{ title: "工单甲", kind: "task" }] }, ws),
+    );
+    writeFileSync(path.join(ws, ".deck", "issues", "99.md"), "这不是一张票", "utf8");
+
+    const detail = json(await run("deck_issue_get", { number: plan.map.number }, ws));
+    assert.equal(detail.relations.childrenTruncated, true);
+    assert.equal(detail.relations.childrenTotal, 1);
+    assert.deepEqual(detail.relations.children.map((child) => child.number), [plan.tickets[0].number]);
+    assert.deepEqual(gh.calls(), []);
+  } finally {
+    gh.restore();
+  }
+});
+
+/* ------------------------------------------------------------ 关容器的闸门 */
+
+test("关地图：子票没全关 / 没带核对评论都拒绝，全关后带评论才放行", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    const plan = json(
+      await run("deck_map_plan_create", { title: "地图", destination: "跑通地图", tickets: [{ title: "工单甲", kind: "task" }] }, ws),
+    );
+    const mapNumber = plan.map.number;
+    const childNumber = plan.tickets[0].number;
+    // 不手动补父边：建票时 parentKey 就该落盘，闸门按详情里的子票列数子票。
+
+    const openChild = await run("deck_issue_patch", { number: mapNumber, close: true, comment: "先核对" }, ws);
+    assert.equal(openChild.isError, true);
+    const blocked = JSON.parse(openChild.text);
+    assert.equal(blocked.reason, "container-close-children-open");
+    assert.match(blocked.detail, new RegExp(`#${childNumber}（工单甲，当前 OPEN）`));
+
+    json(await run("deck_issue_patch", { number: childNumber, close: true }, ws));
+
+    const noComment = await run("deck_issue_patch", { number: mapNumber, close: true }, ws);
+    assert.equal(noComment.isError, true);
+    assert.equal(JSON.parse(noComment.text).reason, "container-close-no-comment");
+
+    // 先把评论单独写上、再用 closeReason 关票：两者都不能顶替「同一次调用里的 comment」。
+    json(await run("deck_issue_comment", { number: mapNumber, body: "先留一条追溯评论" }, ws));
+    const reasonOnly = await run("deck_issue_patch", { number: mapNumber, close: true, closeReason: "核对过了" }, ws);
+    assert.equal(reasonOnly.isError, true);
+    assert.equal(JSON.parse(reasonOnly.text).reason, "container-close-no-comment");
+
+    const closed = json(await run("deck_issue_patch", { number: mapNumber, close: true, comment: `逐张核对：#${childNumber} 已关` }, ws));
+    assert.equal(closed.state, "CLOSED");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("关普通票不受容器闸门影响：不需要评论，也不去读子票清单", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    json(await run("deck_issue_create", { title: "普通票" }, ws));
+    const closed = json(await run("deck_issue_patch", { number: 1, close: true }, ws));
+    assert.equal(closed.state, "CLOSED");
+  } finally {
+    gh.restore();
+  }
+});
+
+/* -------------------------------------------------------------- 建票闸（需求 / 定稿 / 私标签） */
+
+test("建票闸：spec-ticket 必须挂一条已定稿的需求，没有就一个字不写", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  assert.equal((await initializeLocalScratch(ws, { name: "unit" })).ok, true);
+  const gh = toolGh('process.stdout.write("{}\n")');
+  try {
+    const requirement = json(await run("deck_issue_create", { title: "需求：商品卡改版", labels: ["requirement"], feature: "unit" }, ws));
+    const spec = json(await run("deck_issue_create", { title: "规格：商品卡", kind: "spec", feature: "unit" }, ws));
+
+    const blocked = await run(
+      "deck_issue_create",
+      { title: "实施：改卡片", kind: "spec-ticket", parentKey: "00", feature: "unit", requirementKey: requirement.number },
+      ws,
+    );
+    assert.equal(blocked.isError, true);
+    assert.match(blocked.text, /定稿/);
+    assert.match(blocked.text, /ready-for-agent 不算定稿/);
+    // 拒绝发生在写盘之前：任务板上没有那张实施票。
+    const before = json(await run("deck_issue_list", {}, ws));
+    assert.equal(before.issues.some((issue) => issue.title === "实施：改卡片"), false);
+
+    // 定稿标签只能由界面按钮写：测试里直接改本地文件模拟那一下点击。
+    await replaceLocalLabels(ws, requirement.number, ["requirement", "deck:定稿"]);
+    const created = json(await run(
+      "deck_issue_create",
+      { title: "实施：改卡片", kind: "spec-ticket", parentKey: "00", feature: "unit", requirementKey: requirement.number, staff: "w-server" },
+      ws,
+    ));
+    assert.ok(created.number > 0);
+    assert.ok(created.labels.includes("deck.staff=w-server"), "岗位写进 deck.staff 标签");
+    // 规格容器号不参与比较：只确认实施票真的落进了同一个工作区。
+    assert.equal(spec.number, 0);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("建票闸：需求影响面「依据」为空 → 拒绝，不建这一票", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  assert.equal((await initializeLocalScratch(ws, { name: "unit" })).ok, true);
+  const gh = toolGh('process.stdout.write("{}\n")');
+  try {
+    const impactBody = [
+      "## 影响面",
+      "| 区 / 仓库 | 依据 | 结论 | 核的人 | 链条（没有就留空） |",
+      "|---|---|---|---|---|",
+      "| 当前工作区 |  | 要动 | 单区，免核 | |",
+    ].join("\n");
+    const requirement = json(await run(
+      "deck_issue_create",
+      { title: "需求：补影响面", body: impactBody, labels: ["requirement"], feature: "unit" },
+      ws,
+    ));
+    await replaceLocalLabels(ws, requirement.number, ["requirement", "deck:定稿"]);
+
+    const blocked = await run(
+      "deck_issue_create",
+      { title: "实施：不该建出来", kind: "spec-ticket", parentKey: "00", feature: "unit", requirementKey: requirement.number },
+      ws,
+    );
+    assert.equal(blocked.isError, true);
+    assert.match(blocked.text, /依据/);
+    const after = json(await run("deck_issue_list", {}, ws));
+    assert.equal(after.issues.some((issue) => issue.title === "实施：不该建出来"), false, "拒绝发生在写盘之前");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("deck_issue_labels 拒绝任何 deck: 前缀标签，整组不写", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    json(await run("deck_issue_create", { title: "需求：先谈清楚" }, ws));
+    const refused = await run("deck_issue_labels", { number: 1, labels: ["requirement", "deck:定稿"] }, ws);
+    assert.equal(refused.isError, true);
+    assert.match(refused.text, /deck: 前缀只能由界面上的按钮打/);
+
+    const detail = json(await run("deck_issue_get", { number: 1 }, ws));
+    assert.deepEqual(detail.issue.labels, [], "被拒的整组标签一枚都不能写进去");
   } finally {
     gh.restore();
   }

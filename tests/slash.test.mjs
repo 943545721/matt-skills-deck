@@ -38,6 +38,18 @@ test("attach 接受 # 前缀，且只收一个正整数", () => {
   assert.equal(huge.code, "invalid-number");
 });
 
+test("discuss：默认 wayfinder，也可显式选 grill", () => {
+  assert.deepEqual(parseDeckSlash("discuss"), { kind: "discuss", mode: "wayfinder" });
+  assert.deepEqual(parseDeckSlash("  DISCUSS  "), { kind: "discuss", mode: "wayfinder" });
+  assert.deepEqual(parseDeckSlash("discuss grill"), { kind: "discuss", mode: "grill" });
+  assert.deepEqual(parseDeckSlash("discuss wayfinder"), { kind: "discuss", mode: "wayfinder" });
+});
+
+test("discuss 只认两种谈法，多给参数直接报错而不是猜", () => {
+  assert.equal(parseDeckSlash("discuss 中文").code, "extra-args");
+  assert.equal(parseDeckSlash("discuss wayfinder grill").code, "extra-args");
+});
+
 test("无参命令带多余参数直接报错", () => {
   for (const name of ["status", "next", "handoff", "fixate", "new", "help"]) {
     const parsed = parseDeckSlash(`${name} now`);

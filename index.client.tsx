@@ -1,10 +1,11 @@
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
 import { DeckHome } from "./client/deck/Home";
+import { DeckNewTicketScreen } from "./client/deck/entry/NewTicketScreen";
 import { DeckPanel } from "./client/deck/Panel";
 import { DeckSettingsScreen } from "./client/deck/SettingsView";
 import { deckMessages } from "./client/deck/i18n";
-import { DECK_PANEL_ID, DECK_SCREEN_ID, DECK_SETTINGS_ID, DECK_SIDEBAR_ID } from "./client/deck/ids";
+import { DECK_NEW_TICKET_ID, DECK_PANEL_ID, DECK_SCREEN_ID, DECK_SETTINGS_ID, DECK_SIDEBAR_ID } from "./client/deck/ids";
 import { contributeSurfaces } from "./client/deck/surfaces/contribution.tsx";
 import { bindHost } from "./client/deck/surfaces/host.tsx";
 import { DeckDirectory } from "./client/deck/surfaces/registry.ts";
@@ -48,6 +49,12 @@ export default function contribute(client: PluginClientContext) {
       Component: bindHost(client, directory, DeckPanel),
     }),
     client.addScreen({ id: DECK_SCREEN_ID, title: BOARD_TITLE, Component: DeckHome }),
+    // `/deck new` 的落点：整页建票表单，带着工作区目录参数打开。
+    client.addScreen({
+      id: DECK_NEW_TICKET_ID,
+      title: deckMessages.message("new.title"),
+      Component: DeckNewTicketScreen,
+    }),
     client.addSettingsScreen({
       id: DECK_SETTINGS_ID,
       title: SETTINGS_TITLE,

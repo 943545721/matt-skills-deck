@@ -1,8 +1,10 @@
 import { useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
+import { MAP_LABEL } from "../../../shared/issue-kind.ts";
 import type { ItemKind } from "../../../shared/issues";
 import type { BoardIssue } from "../../../shared/issues";
 import { issueAreas, issueRoles } from "../board/projectRows";
+import { labelDisplayName } from "../labelText";
 import { activeBlockers, blockerLabel, clockText, readableText } from "../format";
 import { useDeckText } from "../i18n";
 import type { PixelSkin } from "../pixel";
@@ -35,7 +37,7 @@ export function TicketRow({
   onOpen(ref: { repoKey: string; number: number; kind: ItemKind }): void;
   onOpenMap(ref: { repoKey: string; number: number }): void;
 }) {
-  const { t } = useDeckText();
+  const { t, locale } = useDeckText();
   const styles = useMemo(
     () => ({
       item: { marginBottom: 8 },
@@ -59,9 +61,9 @@ export function TicketRow({
       title: { color: skin.colors.ink, fontSize: 13, fontWeight: "700" as const, flexShrink: 1, lineHeight: 19 },
       labels: { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 4 },
       label: {
-        fontSize: 10,
-        lineHeight: 16,
-        paddingHorizontal: 6,
+        fontSize: 12,
+        lineHeight: 18,
+        paddingHorizontal: 7,
         overflow: "hidden" as const,
         borderWidth: 1,
         borderColor: skin.colors.line,
@@ -78,7 +80,12 @@ export function TicketRow({
   // area / role 单独成徽标：它们是配置里的定位信息，混在几十个标签里等于没显示。
   const areas = issueAreas(item);
   const roles = issueRoles(item);
-  const otherLabels = item.labels.filter((label) => !/^(area|role):/.test(label.name));
+  // 地图票的身份已经由行首的「地图」角标表达，再挂一枚 wayfinder:map 就是同一句话说两遍。
+  const otherLabels = item.labels.filter(
+    (label) =>
+      !/^(area|role):/.test(label.name) &&
+      !(item.containerKind === "map" && label.name.toLowerCase() === MAP_LABEL),
+  );
   // 只报还在挡路的：对方已经关掉的边留在历史里，照抄出来会让「能接了」的票看起来还堵着。
   const blocking = activeBlockers(item);
   // 行上没有时间时（解析不了）这一格留空，不写「未知时间」这种占位。
@@ -95,7 +102,7 @@ export function TicketRow({
           <View style={styles.headWrap}>
             <View style={styles.head}>
               <PixelNum skin={skin}>#{item.number}</PixelNum>
-              {item.containerKind ? <Text style={[styles.label, { backgroundColor: item.containerKind === "spec" ? "#dbeafe" : skin.colors.acc, color: item.containerKind === "spec" ? "#1e3a8a" : skin.colors.accInk }]}>{item.containerKind === "spec" ? "SPEC" : "MAP"}</Text> : null}
+              {item.containerKind ? <Text style={[styles.label, { backgroundColor: item.containerKind === "spec" ? "#dbeafe" : skin.colors.acc, color: item.containerKind === "spec" ? "#1e3a8a" : skin.colors.accInk }]}>{item.containerKind === "spec" ? t("board.spec") : t("board.map")}</Text> : null}
               {showRepo ? <Text style={[styles.label, neutral]}>{repoName ?? item.repoKey}</Text> : null}
               {areas.map((area) => (
                 <Text key={`area-${area}`} style={[styles.label, { borderColor: skin.colors.acc, color: skin.colors.acc }]}>
@@ -145,9 +152,11 @@ export function TicketRow({
               {otherLabels.map((label) => (
                 <Text
                   key={label.name}
+                  // 界面上是中文写法；读屏仍报仓库里的真名，方便核对与筛选。
+                  accessibilityLabel={label.name}
                   style={[styles.label, { backgroundColor: `#${label.color}`, color: readableText(label.color) }]}
                 >
-                  {label.name}
+                  {labelDisplayName(label.name, locale)}
                 </Text>
               ))}
             </View>

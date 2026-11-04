@@ -416,13 +416,58 @@ test("详情父子边：DSH-PARENT 能读回父票，父票能列出手下子票
   const childDetail = await getLocalIssue(dir, child.number);
   assert.equal(childDetail.ok, true);
   assert.deepEqual(childDetail.parent, { number: parent.number, title: "父票" });
-  assert.equal(childDetail.children, undefined);
+  // 本地每次都扫全量：没有子票就是空数组，而不是「没查」。
+  assert.deepEqual(childDetail.children, []);
+  assert.equal(childDetail.childrenTotal, 0);
 
   const blocked = await createLocalIssue(dir, { title: "被父票阻塞", body: "", labels: [], blockedBy: [parent.number] });
   assert.equal(blocked.ok, true);
   const blockingDetail = await getLocalIssue(dir, parent.number);
   assert.equal(blockingDetail.ok, true);
   assert.deepEqual(blockingDetail.blocking?.map((item) => item.number), [blocked.number]);
+});
+
+test(".deck 建票：parentKey 落到文件头，父票必须是地图，前导零按数值认", async (t) => {
+  const dir = await makeWorkspace(t);
+  const map = await createLocalIssue(dir, { title: "地图", body: "", labels: ["wayfinder:map"] });
+  assert.equal(map.ok, true);
+  // "01" 与 #1 是同一张票：存进去要归一成 "1"，否则读回时按字符串比会漏。
+  const child = await createLocalIssue(dir, { title: "工单", body: "", labels: ["wayfinder:map-ticket"], parentKey: "01" });
+  assert.equal(child.ok, true);
+
+  const mapDetail = await getLocalIssue(dir, map.number);
+  assert.equal(mapDetail.ok, true);
+  assert.deepEqual(mapDetail.children?.map((item) => item.number), [child.number]);
+  const raw = await readFile(path.join(dir, ".deck", "issues", `${child.number}.md`), "utf8");
+  assert.match(raw, /^parentKey: 1$/m);
+
+  const missing = await createLocalIssue(dir, { title: "孤儿", body: "", labels: [], parentKey: "99" });
+  assert.equal(missing.ok, false);
+  assert.match(missing.detail, /没有父票 #99/);
+
+  const plain = await createLocalIssue(dir, { title: "普通票", body: "", labels: [] });
+  assert.equal(plain.ok, true);
+  const badParent = await createLocalIssue(dir, { title: "挂普通票", body: "", labels: [], parentKey: String(plain.number) });
+  assert.equal(badParent.ok, false);
+  assert.match(badParent.detail, /不是探索地图/);
+
+  const badFormat = await createLocalIssue(dir, { title: "怪父票", body: "", labels: [], parentKey: "abc" });
+  assert.equal(badFormat.ok, false);
+  assert.match(badFormat.detail, /父票号必须是正整数/);
+  const specTicket = await createLocalIssue(dir, { title: "实施票", body: "", labels: [], kind: "spec-ticket" });
+  assert.equal(specTicket.ok, false);
+  assert.match(specTicket.detail, /没有规格容器/);
+});
+
+test(".deck 有坏票文件时，详情把子票清单标成截断（关容器不能拿残表核对）", async (t) => {
+  const dir = await makeWorkspace(t);
+  const map = await createLocalIssue(dir, { title: "地图", body: "", labels: ["wayfinder:map"] });
+  assert.equal(map.ok, true);
+  await put(dir, ".deck/issues/99.md", "这不是一张票");
+
+  const detail = await getLocalIssue(dir, map.number);
+  assert.equal(detail.ok, true);
+  assert.equal(detail.childrenTruncated, true);
 });
 
 test("新工作区：没显式初始化就不建 .scratch，票落在 .deck", async (t) => {

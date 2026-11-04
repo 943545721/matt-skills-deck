@@ -118,7 +118,13 @@ export interface LocalStoreState {
   primary: LocalLayout; tracker: LocalTrackerState;
 }
 
-interface AllEntries { state: LocalStoreState; entries: LocalEntry[]; byNumber: Map<number, LocalEntry> }
+interface AllEntries {
+  state: LocalStoreState;
+  entries: LocalEntry[];
+  byNumber: Map<number, LocalEntry>;
+  /** 读不回来的票文件数：板子照常显示，但「清单是否完整」的判定必须知道它。 */
+  unreadable: number;
+}
 
 const asString = (value: unknown, fallback = ""): string => (typeof value === "string" ? value : fallback);
 
@@ -168,8 +174,15 @@ function scratchRecordOf(text: string, number: number, fileName: string, stamp: 
   return { ...parsed, createdAt: parsed.createdAt || stamp, updatedAt: parsed.updatedAt || stamp, isMap: parsed.labels.includes(MAP_LABEL) };
 }
 
-async function readTicketFiles(issuesDir: string, readOnly: boolean): Promise<LocalEntry[]> {
+/** 一次票文件扫描的结果：`skipped` 是读不回来的票文件数（坏文件不能让整块板失败，但必须被记住）。 */
+interface TicketFileRead {
+  entries: LocalEntry[];
+  skipped: number;
+}
+
+async function readTicketFiles(issuesDir: string, readOnly: boolean): Promise<TicketFileRead> {
   const entries: LocalEntry[] = [];
+  let skipped = 0;
   for (const name of ticketFileNamesOf(await readDirSafe(issuesDir))) {
     const number = numberOfFile(name);
     // 没有编号的文件（README、草稿）进不了数字票号模型：跳过，不猜一个号。
@@ -180,22 +193,30 @@ async function readTicketFiles(issuesDir: string, readOnly: boolean): Promise<Lo
       entries.push({ path: target, layout: "scratch", readOnly, record: scratchRecordOf(text, number, name, info.mtime.toISOString()) });
     } catch {
       // 单张票读不了不拖垮整块板：跳过它，其它票照常显示（与 .deck 的既有口径一致）。
+      skipped += 1;
     }
   }
-  return entries;
+  return { entries, skipped };
 }
 
-async function readScratchTickets(units: readonly ScratchUnit[]): Promise<LocalEntry[]> {
+async function readScratchTickets(units: readonly ScratchUnit[]): Promise<TicketFileRead> {
   const out: LocalEntry[] = [];
-  for (const unit of units) out.push(...(await readTicketFiles(path.join(unit.dir, DECK_ISSUES_DIR), unit.legacy)));
-  return out;
+  let skipped = 0;
+  for (const unit of units) {
+    const read = await readTicketFiles(path.join(unit.dir, DECK_ISSUES_DIR), unit.legacy);
+    out.push(...read.entries);
+    skipped += read.skipped;
+  }
+  return { entries: out, skipped };
 }
 
-const readLegacyTickets = async (dir: string): Promise<LocalEntry[]> => ((await dirExists(dir)) ? readTicketFiles(dir, true) : []);
+const readLegacyTickets = async (dir: string): Promise<TicketFileRead> =>
+  ((await dirExists(dir)) ? readTicketFiles(dir, true) : { entries: [], skipped: 0 });
 
-async function readDeckRecords(deckDir: string): Promise<LocalEntry[]> {
+async function readDeckRecords(deckDir: string): Promise<TicketFileRead> {
   const issuesDir = path.join(deckDir, DECK_ISSUES_DIR);
   const entries: LocalEntry[] = [];
+  let skipped = 0;
   for (const name of await readDirSafe(issuesDir)) {
     const match = /^(\d+)\.md$/.exec(name);
     if (!match) continue;
@@ -204,11 +225,13 @@ async function readDeckRecords(deckDir: string): Promise<LocalEntry[]> {
     try {
       const parsed = parseDeckIssue(await readFile(target, "utf8"), number);
       if (parsed) entries.push({ path: target, layout: "deck", readOnly: false, record: parsed });
+      else skipped += 1;
     } catch {
-      // 与旧实现一致：坏文件跳过，板子继续。
+      // 与旧实现一致：坏文件跳过，板子继续；但要计数，关容器时不能把残表当全集。
+      skipped += 1;
     }
   }
-  return entries;
+  return { entries, skipped };
 }
 
 /**
@@ -219,10 +242,13 @@ async function readAllEntries(workspaceDir: string): Promise<AllEntries> {
   const state = await resolveLocalStore(workspaceDir);
   const units = await listScratchUnits(state.scratchDir);
   const seen = new Set<string>();
+  const deckRead = await readDeckRecords(state.deckDir);
+  const scratchRead = await readScratchTickets(units);
+  const legacyRead = await readLegacyTickets(path.join(workspaceDir, DECK_ISSUES_DIR));
   const entries = [
-    ...(await readDeckRecords(state.deckDir)),
-    ...(await readScratchTickets(units)),
-    ...(await readLegacyTickets(path.join(workspaceDir, DECK_ISSUES_DIR))),
+    ...deckRead.entries,
+    ...scratchRead.entries,
+    ...legacyRead.entries,
   ].filter((entry) => {
     const key = queueKey(path.resolve(entry.path));
     if (seen.has(key)) return false;
@@ -233,7 +259,12 @@ async function readAllEntries(workspaceDir: string): Promise<AllEntries> {
   entries.sort((left, right) => priority(left) - priority(right) || left.record.number - right.record.number);
   const byNumber = new Map<number, LocalEntry>();
   for (const entry of entries) if (!byNumber.has(entry.record.number)) byNumber.set(entry.record.number, entry);
-  return { state, entries: [...byNumber.values()], byNumber };
+  return {
+    state,
+    entries: [...byNumber.values()],
+    byNumber,
+    unreadable: deckRead.skipped + scratchRead.skipped + legacyRead.skipped,
+  };
 }
 
 async function locateEntry(workspaceDir: string, number: number): Promise<{ ok: true; entry: LocalEntry; state: LocalStoreState } | LocalFailure> {
@@ -467,7 +498,12 @@ export async function getLocalIssue(workspaceDir: string, number: number): Promi
       issue,
       comments,
       parent,
-      ...(children.length ? { children, childrenTotal: children.length } : {}),
+      // 本地每次都把全部票读出来了：空数组就是「确实没有子票」，不是「没查」。
+      // 省略与空数组在关容器闸门里含义不同（省略 = 判不了，整笔拒绝）。
+      children,
+      childrenTotal: children.length,
+      // 有票文件读不回来时，子票清单可能漏掉没关的那张：标成截断，关容器时整笔拒绝。
+      childrenTruncated: all.unreadable > 0,
       blocking,
       meta: { labelCount: entry.record.labels.length, labelsTruncated: false, commentCount: comments.length, commentsTruncated: false, blockersTruncated: false },
     };
@@ -528,12 +564,30 @@ export interface LocalCreateResult {
 }
 
 async function createDeckIssue(state: LocalStoreState, input: LocalCreateInput): Promise<LocalCreateResult | LocalFailure> {
-  if (input.kind && input.kind !== "issue") return invalid("spec/map 容器需要 .scratch 布局；这个工作区在写 .deck/。请先初始化 .scratch。");
+  // `.deck` 没有容器文件：map/spec 容器与实施票（spec-ticket）都建不出来；
+  // 地图工单（map-ticket）与普通票一样是带 parentKey 的普通票，可以建。
+  if (input.kind === "map" || input.kind === "spec") return invalid("spec/map 容器需要 .scratch 布局；这个工作区在写 .deck/。请先初始化 .scratch。");
+  if (input.kind === "spec-ticket") return invalid(".deck 没有规格容器，实施票只能建在 .scratch 布局里。");
   if (input.idempotencyKey) return invalid("幂等键只在 .scratch 布局可用；.deck 的票号由递增序号生成，没有锚存储。");
-  if (input.parentKey) return invalid("父票关系只在 .scratch 布局可用；.deck 没有父子字段。");
   return withWorkspaceWriter(state.workspaceDir, async () => {
-    const entries = await readDeckRecords(state.deckDir);
+    const { entries } = await readDeckRecords(state.deckDir);
     const number = entries.reduce((max, entry) => Math.max(max, entry.record.number), 0) + 1;
+    // 父子边写在文件头的 parentKey（`setLocalParent` 已按这个字段读写）；建票时一起带上，
+    // 免得子票只在正文留一句 "Part of map #N"，机器读不回子票清单。
+    const rawParent = input.parentKey === undefined || input.parentKey === null ? "" : String(input.parentKey).replace(/^#/, "");
+    const parentNumber = rawParent === "" ? null : Number(rawParent);
+    let parentRecord: LocalRecord | null = null;
+    if (rawParent !== "") {
+      if (!/^\d+$/.test(rawParent) || parentNumber === null || !Number.isInteger(parentNumber) || parentNumber <= 0) {
+        return invalid(`父票号必须是正整数：#${rawParent}`);
+      }
+      parentRecord = entries.find((entry) => entry.record.number === parentNumber)?.record ?? null;
+      if (!parentRecord) return invalid(`本地 Markdown 里没有父票 #${parentNumber}`);
+      // 与 deck_issue_create 的契约一致：普通票 / 地图工单的父只能是地图（.deck 没有规格容器）。
+      if (containerKindOf(parentRecord) !== "map") {
+        return invalid(`父票 #${parentNumber} 不是探索地图（读到的是普通票）：地图工单的父必须是探索地图`);
+      }
+    }
     const labels = dedupeLabelNames(input.labels);
     const timestamp = new Date().toISOString();
     const record: LocalRecord = {
@@ -543,6 +597,7 @@ async function createDeckIssue(state: LocalStoreState, input: LocalCreateInput):
       labels,
       assignees: [...(input.assignees ?? [])],
       blockedBy: [...(input.blockedBy ?? [])],
+      ...(parentNumber === null ? {} : { parentKey: String(parentNumber) }),
       createdAt: timestamp,
       updatedAt: timestamp,
       body: input.body,

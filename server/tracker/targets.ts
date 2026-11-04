@@ -5,7 +5,8 @@ import { getSettings } from "../settings.ts";
 import { localRepoName } from "./local.ts";
 import { parseRemoteUrl, readRemoteUrl, webUrlFor, type RemoteRef } from "./remote.ts";
 import type { RepoOut } from "./workspace-repo.ts";
-import { listChildReposDetailed, probeProjectDir, readSelection, readWorkspaceConfig } from "./workspace-repo.ts";
+import { listChildReposDetailed, probeProjectDir, readSelection, readWorkspaceConfig, readWorkspaceConfigSnapshot } from "./workspace-repo.ts";
+import { configFingerprintOf } from "../workspace/config-write.ts";
 
 /**
  * 工作区 → 任务板要覆盖的仓库集合。
@@ -324,6 +325,21 @@ export async function listWorkspaceRepoTargets(
   };
 }
 
+/**
+ * 派单闸用的「这个工作区有哪些可写仓库」。
+ *
+ * 只回 key 列表：多仓库时调用方拿它去要求每条任务写 `repoKey`。
+ * 读不出来就回空列表并带上原因——调用方要把它变成一条 warning，
+ * 别把「读失败」悄悄当成「单仓库」。
+ */
+export async function writableRepoKeys(
+  workspaceDir: string,
+): Promise<{ keys: string[]; detail?: string }> {
+  const listing = await listWorkspaceRepoTargets(workspaceDir);
+  if (!listing.ok) return { keys: [], detail: listing.detail };
+  return { keys: listing.kind === "repos" ? listing.repos.map((repo) => repo.key) : [] };
+}
+
 export interface WorkspaceProjectRow {
   key: string;
   dir: string;
@@ -341,6 +357,8 @@ export interface WorkspaceProjectRow {
 
 export interface WorkspaceProjectListing {
   ok: true;
+  /** 当前配置正文的指纹；保存时原样带回，用来发现「别处刚改过」。 */
+  fingerprint: string;
   kind: "v1" | "v2" | "none";
   /** 读得出来时的清单；`none` 时为 null。 */
   config: WorkspaceConfig | null;
@@ -362,12 +380,16 @@ export interface WorkspaceProjectListing {
  * 说清楚，供设置页与自识别提示使用。
  */
 export async function listWorkspaceProjects(workspaceDir: string): Promise<WorkspaceProjectListing> {
-  const read = await readWorkspaceConfig(workspaceDir);
+  // 正文只读一次：解析与指纹必须出自同一份内容，否则「A 的行配 B 的指纹」会让保存
+  // 时的比对反而吻合，把别人刚写进去的改动盖掉。
+  const { read, text } = await readWorkspaceConfigSnapshot(workspaceDir);
   const scanned = (await listChildReposDetailed(workspaceDir)).repos;
+  const fingerprint = configFingerprintOf(text);
 
   if (!read.ok) {
     return {
       ok: true,
+      fingerprint,
       kind: "none",
       config: null,
       error: read.reason === "missing" ? null : { reason: read.reason, detail: read.detail },
@@ -417,6 +439,7 @@ export async function listWorkspaceProjects(workspaceDir: string): Promise<Works
 
   return {
     ok: true,
+    fingerprint,
     kind: config.version === 2 ? "v2" : "v1",
     config,
     error: null,

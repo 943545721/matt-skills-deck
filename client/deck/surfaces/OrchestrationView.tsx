@@ -1,11 +1,13 @@
 import type { PluginTheme } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
-import { useToast } from "@getpaseo/plugin/client/ui";
+import { copyText, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Text, View } from "react-native";
 import {
+  orchestrationArchivedRpc,
   orchestrationProfileRpc,
+  type ArchivedAgentRow,
   orchestrationProviderDiagnosticRpc,
   orchestrationProviderInstallRpc,
   orchestrationProviderModelsRpc,
@@ -14,26 +16,43 @@ import {
   orchestrationProviderRpc,
   orchestrationSaveRpc,
   orchestrationSiteRpc,
+  orchestrationStaffStopRpc,
   orchestrationStateRpc,
+  orchestrationWindowRpc,
 } from "../../../shared/orchestration-rpc.ts";
+import type { FixedRole } from "../../../shared/orchestration.ts";
+import { MAX_STAFF_CARDS } from "../../../shared/staff.ts";
+import type { DeckLang } from "../../../shared/requirement.ts";
 import { usePanelText, type PanelKey } from "../panel/panelText.tsx";
 import { PixelBanner, PixelButton, PixelScreen, usePixel } from "../pixel.tsx";
 import type { SessionNavigation } from "../session/SessionSheet.tsx";
 import { useDeckWorkspaceAgents } from "./host.tsx";
 import type { AgentInfo } from "./registry.ts";
+import { ArchivedPanel } from "./orchestration/ArchivedPanel.tsx";
+import { GroupPanel } from "./orchestration/GroupPanel.tsx";
+import { InboxPanel } from "./orchestration/InboxPanel.tsx";
+import { mergeArchivedRows } from "./orchestration/archivedFilter.ts";
 import { ClientsPanel } from "./orchestration/ClientsPanel.tsx";
+import { DispatchPanel } from "./orchestration/DispatchPanel.tsx";
 import { ProfilesPanel } from "./orchestration/ProfilesPanel.tsx";
 import { RolesPanel } from "./orchestration/RolesPanel.tsx";
+import type { StaffStopOutcome } from "./orchestration/StopSection.tsx";
 import { RoutingPanel } from "./orchestration/RoutingPanel.tsx";
+import { StaffPanel } from "./orchestration/StaffPanel.tsx";
 import { TreePanel } from "./orchestration/TreePanel.tsx";
 import {
+  staffOf,
   withMapBudget,
   withRoles,
   withRoute,
+  withStaff,
   type ClientProfile,
   type ClientTarget,
   type Difficulty,
+  type LimitsPatch,
   type OrchestrationSettings,
+  type RolesPatch,
+  type StaffMutation,
 } from "./orchestration/types.ts";
 
 /**
@@ -47,14 +66,32 @@ import {
  * 每个改动都是「读当前设置 → 不可变地换一项 → 整份写回」，不做局部补丁。
  */
 
-type Section = "roles" | "clients" | "profiles" | "routing" | "tree";
+type Section =
+  | "roles"
+  | "group"
+  | "inbox"
+  | "staff"
+  | "dispatch"
+  | "clients"
+  | "profiles"
+  | "routing"
+  | "tree"
+  | "archived";
+
+/** 编排页两份查询共用的新鲜期：宿主配置与归档清单都不值得每条都重读。 */
+const STALE_MS = 15_000;
 
 const SECTIONS: { key: Section; label: PanelKey }[] = [
   { key: "roles", label: "orch.section.roles" },
+  { key: "group", label: "orch.section.group" },
+  { key: "inbox", label: "orch.section.inbox" },
+  { key: "staff", label: "orch.section.staff" },
+  { key: "dispatch", label: "orch.section.dispatch" },
   { key: "clients", label: "orch.section.clients" },
   { key: "profiles", label: "orch.section.profiles" },
   { key: "routing", label: "orch.section.routing" },
   { key: "tree", label: "orch.section.tree" },
+  { key: "archived", label: "orch.section.archived" },
 ];
 
 export function OrchestrationView({
@@ -71,13 +108,18 @@ export function OrchestrationView({
   /** 宿主的切窗能力。旧宿主没有，此时角色照样能设，只是点了不跳过去。 */
   navigation?: SessionNavigation;
 }) {
-  const { t } = usePanelText();
+  const { t, zh } = usePanelText();
+  const lang: DeckLang = zh ? "zh" : "en";
   const skin = usePixel(theme);
   const toast = useToast();
   const [section, setSection] = useState<Section>("roles");
+  /** 这三页读的是自己的 RPC，不依赖编排设置：顶栏的刷新与状态报错都不该出现在它们上面。 */
+  const ownsItsQuery = section === "archived" || section === "group" || section === "inbox";
 
   const stateRpc = useRpc(orchestrationStateRpc);
+  const archivedRpc = useRpc(orchestrationArchivedRpc);
   const saveRpc = useRpc(orchestrationSaveRpc);
+  const windowRpc = useRpc(orchestrationWindowRpc);
   const providerRpc = useRpc(orchestrationProviderRpc);
   const profileRpc = useRpc(orchestrationProfileRpc);
   const installRpc = useRpc(orchestrationProviderInstallRpc);
@@ -86,6 +128,7 @@ export function OrchestrationView({
   const modelsRpc = useRpc(orchestrationProviderModelsRpc);
   const refreshCatalogRpc = useRpc(orchestrationProviderRefreshRpc);
   const siteRpc = useRpc(orchestrationSiteRpc);
+  const stopRpc = useRpc(orchestrationStaffStopRpc);
 
   const agents = useDeckWorkspaceAgents(workspaceId, workspaceDir);
 
@@ -93,11 +136,108 @@ export function OrchestrationView({
     queryKey: ["deck", "orchestration", workspaceId, workspaceDir],
     queryFn: () => stateRpc({ workspaceId, workspaceDir }),
     enabled: Boolean(workspaceId && workspaceDir),
-    staleTime: 15_000,
+    staleTime: STALE_MS,
     retry: false,
   });
 
   const data = state.data && state.data.ok ? state.data : null;
+
+  /**
+   * 已归档清单只在打开那个页签时才取：它要翻宿主的存档（`includeArchived`），
+   * 比状态那一份重，没必要每次进编排页都拉一遍。
+   */
+  const archived = useQuery({
+    queryKey: ["deck", "orchestration", "archived", workspaceId, workspaceDir],
+    queryFn: () => archivedRpc({ workspaceId, workspaceDir }),
+    enabled: section === "archived" && Boolean(workspaceId && workspaceDir),
+    staleTime: STALE_MS,
+    retry: false,
+  });
+
+  /**
+   * 往更早读的那几批。
+   *
+   * 宿主的归档是跨全部工作区的：本工作区的记录可能排在 1000 条之后，单次调用
+   * 翻不到底。`older` 存的是用户在「读取更早的」之后追加的批，跟着第一次那份
+   * 一起显示；`older` 为 null 表示「还没往后读」，此时游标才用首屏那一份的。
+   */
+  const [older, setOlder] = useState<{
+    rows: ArchivedAgentRow[];
+    nextCursor: string | null;
+    /** 最后一趟读回来的截断状态与警告：它们说的是「这次读到哪」，不能拿首屏那份顶。 */
+    truncated: boolean;
+    warnings: string[];
+  } | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+
+  /**
+   * 当前看的是哪个工作区。
+   *
+   * 「读取更早的」是一次跨宿主翻页的异步请求：等它回来时用户可能已经切了工作区，
+   * 那批行（连同命令里的 `--cwd`）属于上一个工作区，接进新清单就是错的。所以请求
+   * 回来先比一次，不一致就整批丢掉。
+   */
+  const scopeKey = `${workspaceId}\u0000${workspaceDir}`;
+  const scopeRef = useRef(scopeKey);
+  scopeRef.current = scopeKey;
+
+  // 换工作区时，已经追加的旧批必须丢掉：留着就成了上一份清单的残影。
+  useEffect(() => {
+    setOlder(null);
+  }, [scopeKey]);
+
+  /** 成功的那一份才算数：失败分支没有 rows / warnings，别在渲染处反复判三次。 */
+  const archivedView = archived.data?.ok ? archived.data : null;
+  const archivedRows = older
+    ? mergeArchivedRows(archivedView?.rows ?? [], older.rows)
+    : (archivedView?.rows ?? []);
+  const archivedCursor = older ? older.nextCursor : (archivedView?.nextCursor ?? null);
+
+  /**
+   * 失败只说 `detail`：`invalid-workspace` / `agents-failed` 是给代码看的机器码，
+   * 印给用户看的只有那句人话。传输层异常本身可能就是一句宿主内部报错，也不原样摆上来。
+   */
+  let archivedError: string | null = null;
+  if (archived.data && !archived.data.ok) archivedError = archived.data.detail;
+  else if (!archived.data && archived.error) archivedError = t("orch.archived.failed");
+
+  const loadOlder = async () => {
+    if (!archivedCursor || loadingOlder) return;
+    const startedIn = scopeRef.current;
+    setLoadingOlder(true);
+    try {
+      const result = await archivedRpc({ workspaceId, workspaceDir, cursor: archivedCursor });
+      // 走完一趟回来已经换了工作区：这批行属于上一个工作区，不能接进来。
+      if (scopeRef.current !== startedIn) return;
+      if (!result.ok) {
+        toast.error(result.detail);
+        return;
+      }
+      setOlder((previous) => ({
+        rows: mergeArchivedRows(previous?.rows ?? [], result.rows),
+        nextCursor: result.nextCursor,
+        truncated: result.truncated,
+        warnings: result.warnings,
+      }));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
+  /** 重新读首屏：追加的旧批一起清掉，否则「刷新」之后新旧两批会混着显示。 */
+  const reloadArchived = () => {
+    setOlder(null);
+    void archived.refetch();
+  };
+
+  const copyArchived = (text: string) => {
+    void copyText(text).then(
+      () => toast.show(t("orch.archived.copied"), { variant: "success" }),
+      () => toast.error(t("orch.archived.copyFailed")),
+    );
+  };
 
   /**
    * 设置是「整份写回」，所以两次改动之间必须先读一次新的：
@@ -127,33 +267,99 @@ export function OrchestrationView({
     }
   };
 
-  const applySettings = (update: (current: OrchestrationSettings) => OrchestrationSettings) => {
+  const applySettings = (update: (current: OrchestrationSettings) => OrchestrationSettings): Promise<boolean> => {
     pendingSaves.current += 1;
     setSaving(true);
-    const run = saveQueue.current.then(async () => {
-      const fresh = await stateRpc({ workspaceId, workspaceDir });
-      if (!fresh.ok) {
-        toast.error(`${fresh.reason}：${fresh.detail}`);
-        return;
+    const run = saveQueue.current.then(async (): Promise<boolean> => {
+      try {
+        const fresh = await stateRpc({ workspaceId, workspaceDir });
+        if (!fresh.ok) {
+          toast.error(`${fresh.reason}：${fresh.detail}`);
+          return false;
+        }
+        const result = await saveRpc({ workspaceId, workspaceDir, settings: update(fresh.settings) });
+        if (!result.ok) {
+          toast.error(result.detail);
+          return false;
+        }
+        for (const warning of result.warnings) toast.show(warning, { variant: "warning" });
+        toast.show(t("orch.saved"), { variant: "success" });
+        return true;
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : String(error));
+        return false;
       }
-      const result = await saveRpc({ workspaceId, workspaceDir, settings: update(fresh.settings) });
-      if (!result.ok) {
-        toast.error(result.detail);
-        return;
-      }
-      for (const warning of result.warnings) toast.show(warning, { variant: "warning" });
-      toast.show(t("orch.saved"), { variant: "success" });
     });
-    saveQueue.current = run.catch((error: unknown) => {
-      toast.error(error instanceof Error ? error.message : String(error));
-    });
-    void saveQueue.current.then(async () => {
+    const settled = run.then(async (ok) => {
       pendingSaves.current = Math.max(pendingSaves.current - 1, 0);
       // 等刷新回来再解除忙碌：否则按钮在「旧 settings 还在界面上」的那一小段里又能点，
       // 连点两下仍然按同一份旧值算，这个护栏就等于没上。
-      await state.refetch();
+      try {
+        await state.refetch();
+      } catch {
+        // 保存已经成功：重取失败只让这一屏的数字旧一会儿，下一次刷新会补上。
+      }
       if (pendingSaves.current === 0) setSaving(false);
+      return ok;
     });
+    // 队列只等「上一单结束」，不把错误往下传；调用方自己看返回值决定是否收起草稿。
+    saveQueue.current = settled.then(
+      () => undefined,
+      () => undefined,
+    );
+    return settled;
+  };
+
+  /**
+   * 建/重建一个固定窗口。
+   *
+   * 窗口由服务端用该角色的身份提示词创建，并把新会话写回槽位；这里只负责
+   * 把失败原因说清楚、成功后重取设置与角色。不另做一次 `onPatch`：
+   * 服务端已经写回了，客户端再写一遍就成了两个来源。
+   */
+  const buildWindow = async (role: FixedRole, recreate: boolean): Promise<void> => {
+    try {
+      const result = await windowRpc({
+        workspaceDir,
+        workspaceId,
+        role,
+        ...(recreate ? { recreate: true } : {}),
+        lang,
+      });
+      if (!result.ok) {
+        // `detail` 已经写清是哪一步失败；不再把 `create-failed` 这类机器码印给用户。
+        toast.error(result.detail);
+        return;
+      }
+      toast.show(t("orch.windowBuilt", { title: result.title }), { variant: "success" });
+      await state.refetch();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  /**
+   * 阀门四：全停。
+   *
+   * 结果就地显示在面板里（面板自己管「待确认 / 已停」两种状态），这里只负责调 RPC、
+   * 把失败说清楚、停完把状态重读一次——停手会改会话存活情况，名册与树都跟着变。
+   */
+  const stopStaff = async ({ archive }: { archive: boolean }): Promise<StaffStopOutcome> => {
+    try {
+      const result = await stopRpc({ workspaceId, workspaceDir, ...(archive ? { archive: true } : {}) });
+      if (!result.ok) return { ok: false, detail: result.detail };
+      void state.refetch();
+      return {
+        ok: true,
+        stopped: result.stopped,
+        denied: result.denied,
+        interrupted: result.interrupted,
+        archived: result.archived,
+        failures: result.failures,
+      };
+    } catch (error) {
+      return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+    }
   };
 
   const patchProvider = useMutation({
@@ -191,10 +397,18 @@ export function OrchestrationView({
   const settings = data?.settings ?? null;
   const busy = saving;
 
-  const limits = (patch: { maxDepth?: number; maxChildrenPerDispatch?: number; reportOnFinish?: boolean }) =>
-    applySettings((current) => ({ ...current, ...patch }));
-  const roles = (patch: { mainAgentId?: string | null; dispatcherAgentId?: string | null }) =>
-    applySettings((current) => withRoles(current, workspaceId, patch));
+  const limits = (patch: LimitsPatch) => applySettings((current) => ({ ...current, ...patch }));
+  const roles = (patch: RolesPatch) => applySettings((current) => withRoles(current, workspaceId, patch));
+  const staff = (mutate: StaffMutation) =>
+    applySettings((current) => {
+      const next = mutate(staffOf(current, workspaceId));
+      if (next.length > MAX_STAFF_CARDS) {
+        // 另一个窗口刚把名册加满：归一化会把多出来的卡悄悄截掉，所以在这里明确拒绝，
+        // 让 `applySettings` 返回 false、表单草稿留着。
+        throw new Error(t("orch.staffFull", { max: MAX_STAFF_CARDS }));
+      }
+      return withStaff(current, workspaceId, next);
+    });
   const route = (difficulty: Difficulty, rule: { profileId?: string; target?: ClientTarget } | null) =>
     applySettings((current) => withRoute(current, difficulty, rule));
   const mapBudget = (map: string, concurrency: number | null) =>
@@ -238,28 +452,32 @@ export function OrchestrationView({
           />
         ))}
         <View style={{ flex: 1 }} />
-        <PixelButton
-          skin={skin}
-          mini
-          variant="ghost"
-          label={state.isFetching ? t("common.refreshing") : t("common.refresh")}
-          onPress={() => void state.refetch()}
-        />
+        {/* 已归档、群、收件箱各自读另一份数据、各自带刷新，顶栏这颗在那几页会变成第二颗空按钮。 */}
+        {ownsItsQuery ? null : (
+          <PixelButton
+            skin={skin}
+            mini
+            variant="ghost"
+            label={state.isFetching ? t("common.refreshing") : t("common.refresh")}
+            onPress={() => void state.refetch()}
+          />
+        )}
       </View>
 
-      {state.error ? (
+      {/* 群读的是自己的 RPC：编排状态读不到时，不该在群页顶上来一条无关的报错。 */}
+      {!ownsItsQuery && state.error ? (
         <PixelBanner skin={skin}>
           <Text style={styles.error}>{state.error.message}</Text>
         </PixelBanner>
       ) : null}
-      {state.data && !state.data.ok ? (
+      {!ownsItsQuery && state.data && !state.data.ok ? (
         <PixelBanner skin={skin}>
           <Text style={styles.error}>
             {state.data.reason}：{state.data.detail}
           </Text>
         </PixelBanner>
       ) : null}
-      {data?.warnings.length ? (
+      {!ownsItsQuery && data?.warnings.length ? (
         <View style={styles.noticeBlock}>
           {data.warnings.map((warning) => (
             <Text key={warning} style={styles.noticeLine}>
@@ -270,20 +488,64 @@ export function OrchestrationView({
       ) : null}
 
       <View style={styles.content}>
-        {!data || !settings ? (
+        {section === "archived" ? (
+          <ArchivedPanel
+            skin={skin}
+            t={t}
+            rows={archivedRows}
+            // 往后读过了就以最后一趟为准：首屏那句「可以继续往前」在读到末批后已经过期。
+            truncated={older ? older.truncated : (archivedView?.truncated ?? false)}
+            warnings={older ? older.warnings : (archivedView?.warnings ?? [])}
+            loading={archived.isFetching}
+            error={archivedError}
+            hasOlder={archivedCursor !== null}
+            loadingOlder={loadingOlder}
+            onLoadOlder={() => void loadOlder()}
+            onReload={reloadArchived}
+            onCopy={copyArchived}
+          />
+        ) : section === "group" ? (
+          // 群读的是自己的 RPC，不依赖编排设置：编排数据读不到时也能进群。
+          <GroupPanel skin={skin} t={t} lang={lang} workspaceId={workspaceId} workspaceDir={workspaceDir} />
+        ) : section === "inbox" ? (
+          // 收件箱同样读自己的 RPC：越界请求与编排设置无关。
+          <InboxPanel theme={theme} workspaceId={workspaceId} workspaceDir={workspaceDir} />
+        ) : !data || !settings ? (
           <Text style={styles.notice}>{state.isPending ? t("common.loading") : t("orch.empty")}</Text>
         ) : section === "roles" ? (
           <RolesPanel
             skin={skin}
             t={t}
+            lang={lang}
             workspaceId={workspaceId}
             settings={settings}
             agents={agents}
+            knownAgentIds={data.agents.map((agent) => agent.agentId)}
             busy={busy}
             onPatch={roles}
+            onBuildWindow={buildWindow}
             onLimits={limits}
             onMapBudget={mapBudget}
+            onStop={stopStaff}
             {...(navigation ? { onOpen: openAgent } : {})}
+          />
+        ) : section === "staff" ? (
+          <StaffPanel
+            skin={skin}
+            t={t}
+            cards={staffOf(settings, workspaceId)}
+            profiles={data.profiles}
+            busy={busy}
+            onSave={staff}
+          />
+        ) : section === "dispatch" ? (
+          <DispatchPanel
+            skin={skin}
+            t={t}
+            lang={lang}
+            workspaceId={workspaceId}
+            workspaceDir={workspaceDir}
+            cards={staffOf(settings, workspaceId)}
           />
         ) : section === "clients" ? (
           <ClientsPanel
@@ -381,8 +643,8 @@ export function OrchestrationView({
         )}
       </View>
 
-      {/* 角色页的计数器已经在说明层数与单次上限，底栏再写一遍只是噪音。 */}
-      {section === "roles" ? null : (
+      {/* 角色页的计数器已经在说明层数与单次上限，底栏再写一遍只是噪音；已归档与群与派单无关。 */}
+      {section === "roles" || ownsItsQuery ? null : (
         <View style={styles.footer}>
           <Text style={styles.meta}>{t("orch.footer", { depth: settings?.maxDepth ?? 0, children: settings?.maxChildrenPerDispatch ?? 0 })}</Text>
         </View>

@@ -12,7 +12,7 @@ import { z } from "zod";
  * 作用域只允许工作区目录与 agent id，数据目录交给服务端按自身环境解析。
  */
 
-const promptAction = z.enum(["diagnose", "fix", "research", "discuss", "prototype", "supplement", "execute", "fixate", "takeover", "handoff", "new-requirement", "bug", "custom"]);
+const promptAction = z.enum(["diagnose", "fix", "research", "discuss", "prototype", "supplement", "execute", "fixate", "takeover", "handoff", "new-requirement", "discuss-wayfinder", "discuss-grill", "bug", "custom"]);
 const promptLang = z.enum(["en", "zh"]);
 const sendMode = z.enum(["queue", "interrupt", "steer"]);
 const sessionErrorKind = z.enum([
@@ -96,6 +96,11 @@ export const sessionSendRpc = defineRpc({
     plan: sessionSendPlanSchema,
     /** 只在 `target.kind === "new"` 时需要。 */
     provider: z.string().min(1).max(120).optional(),
+    /**
+     * 只在 `target.kind === "new"` 时需要：新会话落进哪条工作区。
+     * 不传就按 `cwd` 建，宿主会为同一目录再登记一条同名工作区。
+     */
+    workspaceId: z.string().max(200).optional(),
     modeId: z.string().max(200).optional(),
     thinkingOptionId: z.string().max(200).optional(),
     labels: z.record(z.string(), z.string()).optional(),

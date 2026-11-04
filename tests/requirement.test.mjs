@@ -9,6 +9,8 @@ import {
   bugLabels,
   bugMissingFields,
   deckLang,
+  mergeRequirementLabels,
+  planRequirementBody,
   requirementLabels,
   requirementSections,
 } from "../shared/requirement.ts";
@@ -37,6 +39,32 @@ test("没有备注时不凭空加一个空的 Notes 小节", () => {
 
 test("需求票统一带 requirement 标签，不抢 wayfinder 路线标签", () => {
   assert.deepEqual(requirementLabels(), ["requirement"]);
+});
+
+test("需求正文带影响面表和四列固定表头，第五列表示链条", () => {
+  const body = buildRequirementBody("explore", "", "zh");
+  assert.match(body, /^## 影响面$/m);
+  assert.match(body, /\| 区 \/ 仓库 \| 依据 \| 结论 \| 核的人 \| 链条（没有就留空） \|/);
+  assert.match(body, /\| --- \| --- \| --- \| --- \| --- \|/);
+  // 备注仍然在最后：影响面是机器读的一节，不应该把备注夹在中间。
+  const withNotes = buildRequirementBody("explore", "先看现有实现", "zh");
+  assert.ok(withNotes.indexOf("## 影响面") < withNotes.indexOf("## 备注"));
+});
+
+test("表单提交：散文套进骨架，已写好的小节原样保留", () => {
+  const fromNotes = planRequirementBody("implement", "先改 server，再补测试", "zh");
+  for (const title of requirementSections("implement", "zh")) assert.match(fromNotes, new RegExp(`## ${title}`));
+  assert.match(fromNotes, /## 影响面/);
+  assert.match(fromNotes, /## 备注\n先改 server，再补测试/);
+
+  const written = "## 目标\n只改后端\n";
+  assert.equal(planRequirementBody("implement", written, "zh"), written);
+});
+
+test("需求标签合并去重不分大小写，用户自己写过的不再重复", () => {
+  assert.deepEqual(mergeRequirementLabels(["area:pkg"]), ["area:pkg", "requirement"]);
+  assert.deepEqual(mergeRequirementLabels(["Requirement"]), ["Requirement"]);
+  assert.deepEqual(mergeRequirementLabels(["  ", "bug"]), ["bug", "requirement"]);
 });
 
 test("中文界面出中文六节，备注落在「备注」小节", () => {

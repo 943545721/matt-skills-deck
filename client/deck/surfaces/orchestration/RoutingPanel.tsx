@@ -8,6 +8,11 @@ import type { PanelKey } from "../../panel/panelText.tsx";
 import {
   DIFFICULTIES,
   DIFFICULTY_KEY,
+  directTargetOf,
+  displayTargetOf,
+  liveProfileOf,
+  modelChoicesOf,
+  profileWithoutModel,
   specOf,
   type ClientProfile,
   type ClientTarget,
@@ -15,6 +20,7 @@ import {
   type ProviderRow,
   type RoutingRow,
 } from "./types.ts";
+import { ModelChoices } from "./ModelChoices.tsx";
 
 /**
  * 难度路由：trivial / normal / hard / critical 各落到哪个客户端与模型。
@@ -90,7 +96,21 @@ export function RoutingPanel({
         const row = rowOf(difficulty);
         const open = editing === difficulty;
         const via = row.resolved.ok && row.resolved.via === "profile" ? ` · ${t("orch.route.viaProfile")}` : "";
-        const summary = row.resolved.ok ? `${specOf(row.resolved.target)}${via}` : t("orch.route.empty");
+        // 配了但发不出去（比如只选了客户端没填模型）时仍要显示配的是什么，
+        // 否则行上写「未配置」、用户会以为自己根本没选过。
+        const target = directTargetOf(row, profiles);
+        const liveProfile = liveProfileOf(row, profiles);
+        const choices = modelChoicesOf(target?.provider ?? "", providers);
+        // 走的是没写模型的档案：模型在档案里，这里点不了，得把人指回去。
+        const modelessProfile = profileWithoutModel(row, profiles);
+        // 行上只印**这一档真正会用的那条**：档案还活着时 `row.target` 是被它盖掉的旧配置，
+        // 印出来会和下面的红字各说各话；档案缺模型时也不能印成「未配置」——用户明明配过。
+        const shown = displayTargetOf(row, profiles);
+        const summary = row.resolved.ok
+          ? `${specOf(row.resolved.target)}${via}`
+          : shown
+            ? specOf(shown)
+            : t("orch.route.empty");
         return (
           <PixelCard key={difficulty} skin={skin} style={styles.row}>
             <View style={styles.head}>
@@ -118,6 +138,9 @@ export function RoutingPanel({
                 )
               : null}
             {row.resolved.ok ? null : <Text style={styles.bad}>{row.resolved.detail}</Text>}
+            {modelessProfile ? (
+              <Text style={styles.borrowed}>{t("orch.route.fixInProfile", { name: modelessProfile.name })}</Text>
+            ) : null}
 
             {open ? (
               <>
@@ -139,39 +162,70 @@ export function RoutingPanel({
 
                 <Text style={styles.meta}>{t("orch.route.pickClient")}</Text>
                 <View style={styles.chips}>
+                  {/* 宿主一个客户端都没报：不解释一句，这一排就是空的，下面还叫人「先选客户端」。 */}
+                  {providers.length === 0 ? <Text style={styles.hint}>{t("orch.noProviders")}</Text> : null}
                   {providers.map((provider) => (
                     <PixelButton
                       key={provider.id}
                       skin={skin}
                       mini
                       variant="tab"
-                      active={row.target?.provider === provider.id && !row.profileId}
+                      active={target?.provider === provider.id}
                       label={provider.id}
                       onPress={() => onPatch(difficulty, { target: { provider: provider.id } })}
                     />
                   ))}
                 </View>
+
+                {liveProfile ? (
+                  // 走档案的档位：模型在档案里，这里没有可点的东西，说清楚去哪改，
+                  // 别留一个空格子按钮让人以为「配过却不能用」。
+                  <Text style={styles.hint}>
+                    {t("orch.route.modelInProfile", { name: liveProfile.name, spec: specOf(liveProfile) })}
+                  </Text>
+                ) : (
+                  <>
+                    {/* 模型：宿主报出清单就点选，没报出来才回到手填。 */}
+                    {target ? (
+                      <ModelChoices
+                        skin={skin}
+                        t={t}
+                        state={choices}
+                        current={target.model ?? null}
+                        onPick={(picked) => onPatch(difficulty, { target: { ...target, model: picked } })}
+                      />
+                    ) : null}
+
+                    <View style={styles.form}>
+                      <TextInput
+                        accessibilityLabel={t("orch.route.modelField")}
+                        style={styles.input}
+                        value={model}
+                        onChangeText={setModel}
+                        placeholder={t("orch.route.modelField")}
+                        placeholderTextColor={skin.colors.ink2}
+                        autoCapitalize="none"
+                      />
+                      <PixelButton
+                        skin={skin}
+                        mini
+                        label={t("orch.route.useModel")}
+                        disabled={busy || !model.trim() || !target}
+                        onPress={() => {
+                          if (!target) return;
+                          onPatch(difficulty, { target: { ...target, model: model.trim() } });
+                          setModel("");
+                        }}
+                      />
+                    </View>
+                    {/* 宿主没报客户端时上面已经说了，这里不再叫「先选客户端」——没得选。 */}
+                    {target || providers.length === 0 ? null : (
+                      <Text style={styles.hint}>{t("orch.modelChoices.clientFirst")}</Text>
+                    )}
+                  </>
+                )}
+                {/* 清掉这一档：两种填法（档案 / 直填）都要能清，所以放在条件外面。 */}
                 <View style={styles.form}>
-                  <TextInput
-                    accessibilityLabel={t("orch.route.modelField")}
-                    style={styles.input}
-                    value={model}
-                    onChangeText={setModel}
-                    placeholder={t("orch.route.modelField")}
-                    placeholderTextColor={skin.colors.ink2}
-                    autoCapitalize="none"
-                  />
-                  <PixelButton
-                    skin={skin}
-                    mini
-                    label={t("orch.route.useModel")}
-                    disabled={busy || !model.trim() || !row.target}
-                    onPress={() => {
-                      if (!row.target) return;
-                      onPatch(difficulty, { target: { ...row.target, model: model.trim() } });
-                      setModel("");
-                    }}
-                  />
                   <PixelButton
                     skin={skin}
                     mini
@@ -181,7 +235,6 @@ export function RoutingPanel({
                     onPress={() => onPatch(difficulty, null)}
                   />
                 </View>
-                {!row.target ? <Text style={styles.hint}>{t("orch.route.clientFirst")}</Text> : null}
               </>
             ) : null}
           </PixelCard>

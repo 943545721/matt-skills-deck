@@ -2,6 +2,7 @@ import type { PluginTheme } from "@getpaseo/plugin";
 import { Modal, TextInput, copyText, useToast } from "@getpaseo/plugin/client/ui";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
+import { parseProviderSpec } from "../../../shared/orchestration.ts";
 import {
   buildActionPrompt,
   buildSkillPrompt,
@@ -16,8 +17,11 @@ import { AGENT_STATUS_KEY, useSurfaceText } from "../surfaces/text.ts";
 import { PixelBanner, PixelButton, PixelModalBody, usePixel } from "../pixel.tsx";
 import { fillVisibleComposer } from "./composer-fill.ts";
 import { creationOutcome, creationRoute, type CreationSnapshotLike } from "./creation.ts";
-import { prefillAgentDraft } from "./prefill.ts";
-import type { PrefillFailureCode } from "./prefill.ts";
+import { hostLoaderErrors, prefillAgentDraft, prefillAgentDraftWithScan } from "./prefill.ts";
+import type { PrefillFailureCode, PrefillResult } from "./prefill.ts";
+
+/** 失败分支的结果类型；`no-store` 会带结构化诊断，界面用它拼文案。 */
+type PrefillFailure = Extract<PrefillResult, { ok: false }>;
 
 /**
  * 会话面板：把一段提示词填进 Paseo 聊天窗口的输入框。
@@ -56,7 +60,7 @@ export interface SessionSheetProps {
   initialPrompt?: string;
   /** 技能详情入口：只给技能名，由本面板按目标 provider 选择斜杠或纯文本方言。 */
   skill?: string;
-  /** 调用方的语义默认值：新建需求应落在「新会话」，普通动作可落在已有会话。 */
+  /** 调用方的语义默认值：探讨需求应落在「新会话」，普通动作可落在已有会话。 */
   defaultTarget?: "current" | "new" | "copy";
   navigation?: SessionNavigation;
 }
@@ -88,12 +92,44 @@ export function SessionSheet(props: SessionSheetProps) {
       case "no-store":
         return t("session.prefillReason.noStore");
       case "draft-occupied":
-        return t("session.draftOccupied");
+        // 上面那条长文案带「覆盖并填入」按钮，只用在能替换的横幅里；
+        // 这里只报「已经有草稿」，不承诺一个当前界面没有的动作。
+        return t("session.prefillReason.draftOccupied");
       case "read-back-failed":
         return t("session.prefillReason.readBackFailed");
       case "write-failed":
         return t("session.prefillReason.writeFailed");
     }
+  };
+  /**
+   * 把失败结果翻成一句话。
+   *
+   * `no-store` 的诊断（试过哪些编号、注册表有没有、试探到哪了、加载器原话）
+   * 按词表拼；宿主报的错原样引用——那是宿主的词，不是我们的文案。
+   */
+  const prefillFailureText = (failure: PrefillFailure): string => {
+    const reason = prefillReason(failure.code);
+    const diagnostics = failure.diagnostics;
+    if (failure.code !== "no-store" || !diagnostics) return reason;
+    const detail = t("session.prefillReason.noStoreDetail", {
+      ids: diagnostics.knownIds.join(t("session.prefillReason.idSeparator")),
+      registry: t(
+        diagnostics.registry === "present"
+          ? "session.prefillReason.registryPresent"
+          : "session.prefillReason.registryAbsent",
+      ),
+      scanned:
+        diagnostics.scanned === undefined
+          ? ""
+          : t("session.prefillReason.scanned", { tried: diagnostics.scanned }),
+      errors:
+        diagnostics.loaderErrors.length === 0
+          ? ""
+          : t("session.prefillReason.loaderErrors", {
+              errors: hostLoaderErrors(diagnostics),
+            }),
+    });
+    return t("session.prefillWithDetail", { reason, detail });
   };
   const workspaceAgents = useDeckWorkspaceAgents(workspaceId, workspaceDir);
   const explicitAgent = useDeckAgent(agentId);
@@ -123,6 +159,17 @@ export function SessionSheet(props: SessionSheetProps) {
   const [createdAgentId, setCreatedAgentId] = useState<string | null>(null);
   /** 创建事件里先拿到的 id；即使 create 调用最终报错，也能接着填这个会话。 */
   const createdAgentIdRef = useRef("");
+  /**
+   * 上一次因为「找不到宿主的草稿 store」失败的填入。
+   *
+   * 留着它是为了给用户一个「自动查找」的重试入口：那一步会真的执行宿主模块，
+   * 不能挂在每次填入上，只能由用户点了才做。
+   */
+  // 失败时留给「自动查找」按钮的那一对目标/提示词；`created` 记住这个会话是不是
+  // 这次新建的——重试只补输入框，失败文案仍要说清「会话已经建好了」。
+  const [scanRetry, setScanRetry] = useState<
+    { agentId: string; text: string; created: boolean } | null
+  >(null);
   const busyRef = useRef(false);
   const providerTouched = useRef(false);
   const idempotencyKey = useRef<string | null>(null);
@@ -183,6 +230,7 @@ export function SessionSheet(props: SessionSheetProps) {
     setNotice(null);
     setOccupiedAgentId(null);
     setCreatedAgentId(null);
+    setScanRetry(null);
     createdAgentIdRef.current = "";
     idempotencyKey.current = null;
     // 只在打开时重置；ctx 在打开期间变化不应吞掉用户正在编辑的草稿。
@@ -220,9 +268,11 @@ export function SessionSheet(props: SessionSheetProps) {
     if (workspaceAgents.length > 0) setTarget("current");
   }, [open, agentId, target, workspaceAgents.length, busy, createdAgentId]);
 
-  // 选中的会话变了，之前为另一个会话点开的“覆盖”确认就作废。
+  // 选中的会话变了，之前为另一个会话点开的“覆盖”确认与「自动查找」重试就作废：
+  // 重试绑定的是上次失败的会话和提示词，换目标后不能把旧提示词填进旧会话。
   useEffect(() => {
     setOccupiedAgentId(null);
+    setScanRetry(null);
   }, [selectedAgentId]);
 
   const copy = async (text: string, message: string): Promise<boolean> => {
@@ -257,6 +307,19 @@ export function SessionSheet(props: SessionSheetProps) {
     }
   };
 
+  /**
+   * 填入成功后的收尾：清掉重试入口、导航到目标会话、把文字推进已挂载的输入框。
+   *
+   * 草稿 store 只对「之后才挂载」的输入框生效；已经打开的会话要靠最后一步
+   * 把文字写进唯一可见的输入框。拿不准就放弃，草稿仍在。
+   */
+  const commitFilled = (targetAgentId: string, text: string): void => {
+    setScanRetry(null);
+    setError(null);
+    openTargetAgent(targetAgentId);
+    void fillVisibleComposer(text);
+  };
+
   const fill = async (overwrite = false): Promise<void> => {
     if (busyRef.current) return;
     const prompt = draft.trim();
@@ -276,7 +339,10 @@ export function SessionSheet(props: SessionSheetProps) {
     }
     const route = creationRoute({ workspaceId, workspaceDir });
     if (target === "new") {
-      if (!provider.trim()) {
+      // 宿主只认 `provider/model`：只填客户端会在建会话那一刻抛格式错，
+      // 这里先按同一条规则拦下来，用同一句提示。
+      const spec = parseProviderSpec(provider);
+      if (!spec.provider || !spec.model) {
         setError(t("session.errorProvider"));
         return;
       }
@@ -383,12 +449,19 @@ export function SessionSheet(props: SessionSheetProps) {
       });
       if (!result.ok) {
         if (result.code === "draft-occupied") {
+          setScanRetry(null);
           setOccupiedAgentId(targetAgentId);
           setError(t("session.draftOccupied"));
           if (target === "new") openTargetAgent(targetAgentId);
           return;
         }
         setOccupiedAgentId(null);
+        // 只有「宿主 bundle 里找不到草稿 store」才值得再找一次；其余失败重试也一样。
+        setScanRetry(
+          result.code === "no-store"
+            ? { agentId: targetAgentId, text: prompt, created: target === "new" }
+            : null,
+        );
         let copied = false;
         try {
           await copyText(prompt);
@@ -396,11 +469,13 @@ export function SessionSheet(props: SessionSheetProps) {
         } catch {
           copied = false;
         }
-        const reason = prefillReason(result.code);
+        // 找不到 store 时把诊断一起带上：否则界面上只剩「找不到」，
+        // 分不清是模块加载器不对、编号变了，还是注册表根本没暴露。
+        const withDetail = prefillFailureText(result);
         setError(
           target === "new"
-            ? t("session.createdPrefillFailed", { id: targetAgentId, error: reason })
-            : t("session.prefillFailed", { error: reason }),
+            ? t("session.createdPrefillFailed", { id: targetAgentId, error: withDetail })
+            : t("session.prefillFailed", { error: withDetail }),
         );
         if (target === "new" && navigation) {
           // 已创建会话但没填进去：导航过去让用户直接粘贴；导航失败不再叠一条误导提示。
@@ -416,10 +491,7 @@ export function SessionSheet(props: SessionSheetProps) {
       }
 
       setOccupiedAgentId(null);
-      openTargetAgent(targetAgentId);
-      // 草稿 store 只对「之后才挂载」的输入框生效；已经打开的会话要靠这一步
-      // 把文字写进唯一可见的输入框。拿不准就放弃，草稿仍在。
-      void fillVisibleComposer(prompt);
+      commitFilled(targetAgentId, prompt);
       toast.show(
         target === "new" ? t("session.successNew") : t("session.successCurrent"),
         { variant: "success" },
@@ -439,10 +511,78 @@ export function SessionSheet(props: SessionSheetProps) {
     }
   };
 
+  /**
+   * 再找一次草稿 store 然后重填。
+   *
+   * 这一步会逐个试探宿主模块（执行模块顶层代码），所以只在用户点了按钮时做，
+   * 而且目标会话与提示词都沿用上次失败的那一对，不再建第二个会话。
+   */
+  const retryWithScan = async (): Promise<void> => {
+    const pending = scanRetry;
+    // `busy` 是异步的状态更新，连点时第二次调用可能还看到 false；`busyRef` 是同步的，
+    // 也只认它——两者总是一起置位，多判一个 `busy` 不会多拦下什么。
+    if (!pending || busyRef.current || !serverId) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      // 不覆盖：失败之后用户可能已经往输入框里写了字，重试只补空的那个框。
+      // 真有草稿就如实报「已经有草稿」，由用户决定复制还是清掉重来。
+      const result = await prefillAgentDraftWithScan({
+        serverId,
+        agentId: pending.agentId,
+        text: pending.text,
+        overwrite: false,
+      });
+      if (!result.ok && result.code === "draft-occupied") {
+        // 与主路径同一个出口：让底部主按钮变成「覆盖并填入」，而不是只说一句
+        // 「已有草稿」却给不出动作。目标与提示词都没变，覆盖填的仍是这一段。
+        setOccupiedAgentId(pending.agentId);
+        setError(t("session.draftOccupied"));
+        return;
+      }
+      if (!result.ok) {
+        // 重试沿用的是上次那份提示词，再复制一次，让「请粘贴已复制的提示词」这句站得住；
+        // 上次复制失败、这次仍失败时，如实说复制也失败了。
+        let copied = false;
+        try {
+          await copyText(pending.text);
+          copied = true;
+        } catch {
+          copied = false;
+        }
+        const reason = prefillFailureText(result);
+        setError(
+          pending.created
+            ? t("session.createdPrefillFailed", { id: pending.agentId, error: reason })
+            : t("session.prefillFailed", { error: reason }),
+        );
+        // 试探可能已经找到 store，只是写不进去：这时不能说「仍然找不到」。
+        const stillMissing = result.code === "no-store" || result.code === "no-loader";
+        toast.show(
+          copied
+            ? stillMissing
+              ? t("session.prefillScanFailed")
+              : t("session.prefillCopied")
+            : t("session.prefillCopyFailed"),
+          { variant: "error" },
+        );
+        return;
+      }
+      setOccupiedAgentId(null);
+      commitFilled(pending.agentId, pending.text);
+      toast.show(t("session.prefillScanFound"), { variant: "success" });
+      onOpenChange(false);
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
   const selectAgent = (id: string): void => {
     if (busy) return;
     setPickedAgentId(id);
     setOccupiedAgentId(null);
+    setScanRetry(null);
     setError(null);
     setNotice(null);
   };
@@ -458,6 +598,7 @@ export function SessionSheet(props: SessionSheetProps) {
         targetTouched.current = true;
         setTarget(kind);
         setOccupiedAgentId(null);
+        setScanRetry(null);
         setError(null);
         setNotice(null);
       }}
@@ -537,6 +678,8 @@ export function SessionSheet(props: SessionSheetProps) {
               draftTouched.current = true;
               setDraft(value);
               setOccupiedAgentId(null);
+              // 正文改过之后，重试要填的已经不是用户眼前这段字，入口作废。
+              setScanRetry(null);
             }}
             editable={!busy}
             placeholder={target === "new" ? t("session.initialPromptHint") : t("session.promptHint")}
@@ -592,6 +735,17 @@ export function SessionSheet(props: SessionSheetProps) {
           {error ? (
             <PixelBanner skin={skin}>
               <Text style={skin.bannerText}>{error}</Text>
+              {scanRetry ? (
+                <View style={{ flexDirection: "row", justifyContent: "flex-end", marginTop: 6 }}>
+                  <PixelButton
+                    skin={skin}
+                    variant="outline"
+                    label={t("session.prefillScan")}
+                    disabled={busy}
+                    onPress={() => void retryWithScan()}
+                  />
+                </View>
+              ) : null}
             </PixelBanner>
           ) : null}
           {notice ? <Text style={skin.hint}>{notice}</Text> : null}

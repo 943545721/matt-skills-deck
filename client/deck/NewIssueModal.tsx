@@ -18,6 +18,12 @@ import {
   type NewIssueDraft,
   type NewIssueRepo,
 } from "../../shared/new-issue";
+import {
+  deckLang,
+  mergeRequirementLabels,
+  planRequirementBody,
+  type RequirementMode,
+} from "../../shared/requirement.ts";
 import { PixelButton, PixelModalBody, usePixel } from "./pixel";
 import { FAILURE_KEYS, staticText, useDeckText } from "./i18n";
 import { usePanelText } from "./panel/panelText";
@@ -45,21 +51,32 @@ function sameRepoKey(left: string | null, right: string | null): boolean {
 }
 
 /**
- * 普通建票表单。
+ * 建票表单：普通票，或带六节骨架 + 影响面表的需求票。
  *
- * DSH 的「新建需求」与「+ bug」在 RequirementEntry 里：点卡直接带着技能
- * 开场白创建新会话，不先建票。这个窗口只保留它自己的职责——手动写一张普通票。
+ * 从前它只建普通票，需求入口只开会话、不建票；现在「新建需求」也走这里，
+ * 由票型决定正文骨架与 `requirement` 标签。开会话谈需求是另一扇门（「探讨需求」）。
  *
  * 多项目工作区（v2 清单里有两个以上项目）多两步：先选项目、再选模块，然后才是票型。
  * 项目决定票落在哪个仓库，模块决定 `area:<k>` 标签；项目有 owner 时再带 `role:<owner>`。
  * 单项目工作区这两步不出现，布局与以前一样——没有清单时客户端一个标签都不自己加。
  */
+/** 表单能建的三类票：普通票，或两种需求票（决定六节骨架的形状）。 */
+export type NewIssueChoice = "issue" | RequirementMode;
+
+const MODE_CHOICES: readonly { mode: NewIssueChoice; label: "new.modeIssue" | "new.modeExplore" | "new.modeImplement" }[] = [
+  { mode: "issue", label: "new.modeIssue" },
+  { mode: "explore", label: "new.modeExplore" },
+  { mode: "implement", label: "new.modeImplement" },
+];
+
 export function NewIssueModal({
   theme,
   workspaceDir,
   repos,
   defaultRepoKey,
+  defaultMode = "issue",
   open,
+  inline = false,
   onClose,
   onCreated,
 }: {
@@ -69,17 +86,23 @@ export function NewIssueModal({
   repos: NewIssueRepo[];
   /** 当前筛选的仓库：新建时默认落到它上面。 */
   defaultRepoKey: string | null;
+  /** 打开时预选的票型；面板的「新建需求」用它预选探索需求。 */
+  defaultMode?: NewIssueChoice;
   open: boolean;
+  /** 整页入口用：把表单直接铺在页面上，不套宿主 Modal，`open` 也被忽略。 */
+  inline?: boolean;
   onClose(): void;
   /** 建票成功后把界面切到能看见它的位置（仓库 / 页签 / 视图）。 */
   onCreated?(repoKey: string): void;
 }) {
-  const { t } = useDeckText();
+  const { t, locale } = useDeckText();
+  const lang = deckLang(locale);
   // 新增的两步（项目 / 模块）文案走「本线新增」的键，不往 messages.ts 里塞。
   const { t: tp } = usePanelText();
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [labels, setLabels] = useState("");
+  const [mode, setMode] = useState<NewIssueChoice>(defaultMode);
   const [isMap, setIsMap] = useState(false);
   const [pickedRepo, setPickedRepo] = useState<string | null>(null);
   /** 手选的项目键：多项目工作区里决定「票落在哪个仓库、属于哪个模块」。 */
@@ -154,7 +177,7 @@ export function NewIssueModal({
     title: "",
     body: "",
     labels: "",
-    mode: "issue",
+    mode: defaultMode,
     bug: { actual: "", expected: "", reproduce: "", environment: "" },
     bugDiagnosed: false,
     isMap: false,
@@ -165,7 +188,7 @@ export function NewIssueModal({
     title: title.trim(),
     body,
     labels,
-    mode: "issue",
+    mode,
     bug: { actual: "", expected: "", reproduce: "", environment: "" },
     bugDiagnosed: false,
     isMap,
@@ -217,10 +240,23 @@ export function NewIssueModal({
     setPickedRepo(isWritableRepo(repoKey) ? repoKey : null);
   };
 
+  /**
+   * 选票型：切到需求时把当前正文铺成六节 + 影响面表。
+   * 已经有 `## ` 小节就原样保留（用户可能自己重写过）；纯散文当成备注套进去，
+   * 不把用户刚写的那段吞掉。切回普通票不改正文——删除文字要由用户自己按。
+   */
+  const pickMode = (next: NewIssueChoice) => {
+    setMode(next);
+    if (next === "issue") return;
+    setIsMap(false);
+    setBody((current) => planRequirementBody(next, current, lang));
+  };
+
   const resetForm = () => {
     setTitle("");
     setBody("");
     setLabels("");
+    setMode(defaultMode);
     setIsMap(false);
     setPickedRepo(null);
     setPickedProject(null);
@@ -245,11 +281,16 @@ export function NewIssueModal({
     }
     setSlow(false);
 
-    const submittedLabels = draft.labels
+    const requirementMode =
+      draft.mode === "explore" || draft.mode === "implement" ? draft.mode : null;
+    const typedLabels = draft.labels
       .split(/[,，]/)
       .map((name) => name.trim())
       .filter(Boolean);
-    const bodyText = draft.body;
+    // 需求票的正文与标签在提交这一刻定形：即使人在切换票型后又把正文清空，
+    // 建出来的仍是一张有六节骨架、带 requirement 的票（闸门靠它认得出来）。
+    const submittedLabels = requirementMode ? mergeRequirementLabels(typedLabels) : typedLabels;
+    const bodyText = requirementMode ? planRequirementBody(requirementMode, draft.body, lang) : draft.body;
     try {
       const result = await createIssue({
         workspaceDir,
@@ -417,7 +458,9 @@ export function NewIssueModal({
     // 项目 / 模块不跨窗口保留：下次打开跟着当前筛选重新对一遍。
     setPickedProject(null);
     setPickedArea(null);
-  }, [workspaceDir, open]);
+    // 票型回到入口给的默认值：面板「新建需求」每次打开都预选探索需求。
+    setMode(defaultMode);
+  }, [workspaceDir, open, defaultMode]);
 
   /** 提交前的一行交代：还缺哪一步，或者这次会带哪些标签。 */
   const scopeHint: string | null = !multiProject
@@ -449,8 +492,7 @@ export function NewIssueModal({
     [skin],
   );
 
-  return (
-    <Modal title={t("new.title")} open={open} onOpenChange={(next) => { if (!next) requestClose(); }}>
+  const content = (
       <Modal.Content>
         <PixelModalBody skin={skin} style={styles.body}>
           <TextInput
@@ -481,6 +523,24 @@ export function NewIssueModal({
             placeholder={t("new.labelsField")}
             placeholderTextColor={skin.colors.ink2}
           />
+          {/* 票型：普通票，或两种需求票（决定六节骨架的形状与 requirement 标签）。 */}
+          <View style={styles.field}>
+            <Text style={styles.fieldLabel}>{t("new.kindLabel")}</Text>
+            <View style={styles.actions}>
+              {MODE_CHOICES.map((choice) => (
+                <PixelButton
+                  key={choice.mode}
+                  skin={skin}
+                  variant="tab"
+                  label={t(choice.label)}
+                  active={mode === choice.mode}
+                  disabled={busy}
+                  onPress={() => pickMode(choice.mode)}
+                />
+              ))}
+            </View>
+            <Text style={styles.hint}>{t("new.modeHint")}</Text>
+          </View>
           {/* 项目 → 模块 → 票型：多项目工作区才出现前两步，单项目保持原布局。 */}
           {multiProject ? (
             <View style={styles.field}>
@@ -557,15 +617,18 @@ export function NewIssueModal({
           ) : null}
           {blocked ? <Text style={styles.hint}>{t("new.noWritable")}</Text> : null}
 
-          <View style={styles.actions}>
-            <PixelButton
-              skin={skin}
-              label={isMap ? t("new.markMapOn") : t("new.markMap")}
-              active={isMap}
-              disabled={busy}
-              onPress={() => setIsMap((value) => !value)}
-            />
-          </View>
+          {/* 需求票不是地图票：切到需求后不摆这个开关，避免两种标记同时出现。 */}
+          {mode === "issue" ? (
+            <View style={styles.actions}>
+              <PixelButton
+                skin={skin}
+                label={isMap ? t("new.markMapOn") : t("new.markMap")}
+                active={isMap}
+                disabled={busy}
+                onPress={() => setIsMap((value) => !value)}
+              />
+            </View>
+          ) : null}
 
           {lateNoticeBody ? <Text style={styles.warnText}>{lateNoticeBody}</Text> : null}
           {busy ? <Text style={styles.hint}>{slow ? t("new.busySlow") : t("new.busy")}</Text> : null}
@@ -576,7 +639,10 @@ export function NewIssueModal({
               disabled={!canSubmit}
               onPress={() => void submit()}
             />
-            <PixelButton skin={skin} label={t("common.cancel")} disabled={busy} onPress={() => requestClose()} />
+            {/* 整页入口没有可关的浮层：退回上一步交给宿主的返回键，不摆一个点了没反应的「取消」。 */}
+            {inline ? null : (
+              <PixelButton skin={skin} label={t("common.cancel")} disabled={busy} onPress={() => requestClose()} />
+            )}
             {slow ? (
               <PixelButton skin={skin} label={t("new.forceClose")} onPress={() => requestClose(true)} />
             ) : null}
@@ -584,6 +650,15 @@ export function NewIssueModal({
           <Text style={styles.hint}>{t("new.hint")}</Text>
         </PixelModalBody>
       </Modal.Content>
+  );
+
+  // 整页入口（`/deck new`）把同一份表单直接铺在页面上：不是第二套表单，
+  // 也没有「弹窗套弹窗」；宿主 Modal 只在面板里用。
+  if (inline) return content;
+
+  return (
+    <Modal title={t("new.title")} open={open} onOpenChange={(next) => { if (!next) requestClose(); }}>
+      {content}
     </Modal>
   );
 }

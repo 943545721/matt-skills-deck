@@ -6,7 +6,7 @@ import { entryCopy } from "./entryCopy.ts";
 import { ENTRY_CARD_H, ENTRY_CARD_W, entryCardDataUri, entryCardSvg, type EntryCardCopy } from "./entryCardSvg.ts";
 
 /**
- * 「新建需求」的选路浮层：标题 + 两张整卡可点的流程示意图。
+ * 「探讨需求」的选路浮层：标题 + 两张整卡可点的流程示意图（两张卡 = 两种谈法）。
  *
  * DSH 原版是挂在 document.body 的绝对定位浮层（kernel/entry-choice.ts），
  * Paseo 没有 DOM 定位层，这里退到宿主 Modal——结构不变：两张卡竖排、

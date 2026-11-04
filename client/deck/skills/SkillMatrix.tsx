@@ -22,6 +22,15 @@ type MatrixRow = RpcOutput<typeof skillsListRpc>["projects"][number];
 type InstallReport = RpcOutput<typeof skillsInstallRpc>;
 type CellStatus = MatrixRow["cells"][number]["status"];
 
+/** 按钮 + 一句说明并排；窄屏自动折行。矩阵页里三处同形，共用一份。 */
+const ACTION_ROW = {
+  flexDirection: "row" as const,
+  alignItems: "center" as const,
+  gap: 8,
+  flexWrap: "wrap" as const,
+  paddingTop: 4,
+};
+
 export function SkillMatrix({
   skin,
   rows,
@@ -30,6 +39,7 @@ export function SkillMatrix({
   report,
   pending,
   onUpdateAll,
+  onEditProjects,
 }: {
   skin: PixelSkin;
   rows: MatrixRow[];
@@ -39,6 +49,8 @@ export function SkillMatrix({
   report: InstallReport | null;
   pending: boolean;
   onUpdateAll: () => void;
+  /** 打开项目清单编辑器：行从哪来，就在哪儿改。 */
+  onEditProjects: () => void;
 }) {
   const { t } = useDeckText();
 
@@ -146,7 +158,18 @@ export function SkillMatrix({
         </Text>
       ) : null}
 
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap", paddingTop: 4 }}>
+      {/* 清单入口单起一行：贴着上面那句「技能装在工作区根目录」，改法就在它下面。 */}
+      <View style={ACTION_ROW}>
+        <PixelButton
+          skin={skin}
+          label={t("projectsEditor.open")}
+          accessibilityLabel={t("projectsEditor.open")}
+          onPress={onEditProjects}
+        />
+        <Text style={skin.hint}>{t("projectsEditor.openHint")}</Text>
+      </View>
+
+      <View style={ACTION_ROW}>
         <PixelButton
           skin={skin}
           label={pending ? t("skillsMode.updatingAll") : t("skillsMode.updateAll")}

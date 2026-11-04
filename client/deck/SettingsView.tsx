@@ -82,9 +82,10 @@ export function DeckSettingsScreen({ theme, layout }: PluginSurfaceProps) {
     );
   }
 
-  const persist = (patch: Partial<typeof state.values>) => {
+  const persist = (patch: Partial<typeof state.values>, onSaved?: () => void) => {
     void state.save({ ...state.values, ...patch }, state.revision).then((saved) => {
       if (!saved) toast.error(t("settings.saveFailed"));
+      else onSaved?.();
     });
   };
 
@@ -166,6 +167,20 @@ export function DeckSettingsScreen({ theme, layout }: PluginSurfaceProps) {
             label: seconds === 0 ? t("settings.refreshOff") : t("settings.refreshSeconds", { n: seconds }),
           }))}
           onValueChange={saveRefresh}
+          disabled={state.saving}
+        />
+      </SettingsSection>
+
+      {/* 权限放到刷新前：它会替用户点头，属于要一眼看到的那一类，别埋在诊断下面。 */}
+      <SettingsSection title={t("settings.permissionsSection")} info={<Text style={styles.warning}>{t("settings.autoAllowWarning")}</Text>}>
+        <SettingsSwitch
+          label={t("settings.autoAllowLabel")}
+          hint={t("settings.autoAllowHint")}
+          value={state.values.autoAllowPermissions}
+          onValueChange={(value) =>
+            // 打开时再提醒一次：这一下是「以后替人点头」，不该只在页面角落的一句红字里。
+            persist({ autoAllowPermissions: value }, value ? () => toast.show(t("settings.autoAllowOn")) : undefined)
+          }
           disabled={state.saving}
         />
       </SettingsSection>

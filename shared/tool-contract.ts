@@ -9,6 +9,9 @@
  * 这样 tools/list 不会出现重复条目，旧提示词里的 `deck_issues_list` / `deck_map` 仍然能调。
  */
 import { z } from "zod";
+import { MAX_STAFF_ID_CHARS } from "./staff.ts";
+import { STAFF_REQUEST_TOOL_NAME } from "./staff-request.ts";
+import { REQUIREMENT_DISPATCH_TOOL_NAME } from "./requirement-split.ts";
 
 /** DSH 冻结的九个工具装配顺序（帮助文本与注册行都按它渲染）。 */
 export const DECK_TOOL_ORDER: readonly string[] = Object.freeze([
@@ -32,6 +35,8 @@ export const EXTENSION_TOOL_ORDER: readonly string[] = Object.freeze([
   "deck_probe",
   "deck_handoff",
   "deck_dispatch_plan",
+  REQUIREMENT_DISPATCH_TOOL_NAME,
+  STAFF_REQUEST_TOOL_NAME,
   "suggest_next_steps",
 ]);
 
@@ -156,6 +161,7 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
   deck_map_snapshot: {
     description:
       "Read one wayfinder map as structured data: destination, notes, decisions so far, open questions (fog), out of scope, plus its child issues and progress. " +
+      "map.derivedFrom is the requirement ticket this map was built from (the `Derived from: #N` line in the map body; null when there is none). " +
       "detail=thin returns only the keys, titles, states, labels, assignees and blockers; detail=full also reads each child body for progress and maintainer words. " +
       "frontierOnly keeps only children that are ready to pick up (open, unclaimed, blockers done). Read-only.",
     inputSchema: objectSchema(
@@ -254,6 +260,17 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
             "Module key; must be one of that project's `areas`. Adds `area:<key>` (and the project's `role:<owner>`) to the labels. " +
             "An unknown project key or an area the project does not list is rejected with the available values; nothing is silently dropped.",
         },
+        requirementKey: {
+          type: "number",
+          description:
+            "Requirement ticket number this work ticket belongs to. Required for work tickets (issue / spec-ticket): no ticket, no work — a session alone leaves no trace. " +
+            "The requirement must already carry deck:定稿; the gate rejects otherwise.",
+        },
+        staff: {
+          type: "string",
+          description:
+            "Card id on the workspace roster that this ticket belongs to (writes the deck.staff label). Rejected with unknown-staff when the roster is non-empty and the id is not on it.",
+        },
         repo: repoProperty,
       },
       ["title", "kind"],
@@ -342,7 +359,7 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
   deck_issue_patch: {
     description:
       "Change one issue: comment, labels, assignees, close, title, body, blockedBy, progress section, maintainer-words section; only the fields you pass are touched. " +
-      "Reopening is not available here (a human does it in the backend). Closing a map requires a comment in the same call. " +
+      "Passing false (or state:\"open\") reopens the issue. Closing a map or spec requires a comment in the same call and every child ticket must already be closed; a spec with no child tickets is not complete and cannot be closed. If the child list cannot be read in full, the close is refused. " +
       "blockedBy replaces the whole blocker set: this-repository refs go to native dependency edges, cross-repository refs (owner/repo#12 or projectKey#12) into the body's hidden `Blocked by:` section. " +
       "originalWords is idempotent on the same text + source pair; bodies over 60 KB are refused. Requires user approval.",
     inputSchema: objectSchema(
@@ -374,18 +391,18 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
         close: {
           type: "boolean",
           description:
-            "true closes the issue; closing a map requires a comment in the same call and every child must already be closed. Reopening is not supported (reopen in the backend), so false is rejected.",
+            "true closes the issue; false reopens it. Closing a map or spec requires a comment in the same call, every child must already be closed, and a spec with no child tickets cannot be closed.",
         },
         closeReason: {
           type: "string",
           description:
-            "Why this is being closed; only valid together with close:true. Sent as the close comment when no comment is given. closeReason without close:true rejects the whole call without writing anything.",
+            "Why this is being closed; only valid together with close:true. Used as the native close reason on GitHub; on other backends it is appended to the close comment (and creates one when no comment is given). It does not replace the verification comment required to close a map or spec. closeReason without close:true rejects the whole call without writing anything.",
         },
         workRouteDetail: workRouteDetailProperty,
         state: {
           type: "string",
           enum: ["open", "closed"],
-          description: "Legacy: closed is equivalent to close:true; open (reopen) is rejected.",
+          description: "Legacy: closed is equivalent to close:true; open is equivalent to close:false (reopen).",
         },
         repo: repoProperty,
       },
@@ -491,7 +508,7 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
 
   deck_dispatch_plan: {
     description:
-      "Plan how to split work across other agent windows: for each task it resolves the configured client and model for that task's difficulty, builds the child labels (including paseo.parent-agent-id) and the prompt preamble that tells the child to report back with deck_handoff. Read-only — it creates nothing; pass each accepted task's provider/model to create_agent yourself. Rejections are per task, so one unusable task never blocks the batch.",
+      "Plan how to split work across other agent windows: for each task it resolves the configured client and model for that task's difficulty, builds the child labels (including paseo.parent-agent-id) and the prompt preamble that tells the child to report back with deck_handoff. Each accepted task also carries a ready ticket spec (title / body / labels: difficulty:<tier> and client:<provider>, plus where it was dispatched from) — file it with deck_issue_create first, then create the session with labels.deck.ticket set to the new issue number, so the work leaves a record and not just a process. Read-only — it creates nothing. Rejections are per task, so one unusable task never blocks the batch.",
     inputSchema: objectSchema({
       tasks: {
         type: "array",
@@ -502,6 +519,34 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
             title: { type: "string", description: "Short title, shown in the plan." },
             prompt: { type: "string", description: "Full instruction for the child window." },
             difficulty: { type: "string", enum: ["trivial", "normal", "hard", "critical"], description: "Default: normal." },
+            staff: {
+              type: "string",
+              description:
+                "Which card on the workspace roster does this task. When the roster is not empty, give either this or `region`; giving neither is rejected with region-required, and an id that is not on the roster is rejected with unknown-staff — never guess a person. Omit both only when the roster is empty, which keeps the old difficulty-routing behaviour.",
+            },
+            repoKey: {
+              type: "string",
+              description:
+                "Which repository inside the workspace the ticket is filed in (owner/name). Required when the workspace directory holds more than one repo; omit when there is only one.",
+            },
+            region: {
+              type: "object",
+              description:
+                "Where this task lives: repo plus a path prefix inside the workspace. Used to pick the roster card by territory when `staff` is omitted. Ignored when `staff` is given.",
+              properties: {
+                repoKey: { type: "string", description: "Repository inside the workspace; omit when there is only one." },
+                pathPrefix: { type: "string", description: "Directory prefix relative to the workspace root; omit for the whole workspace." },
+              },
+            },
+            requirementKey: {
+              type: "number",
+              description:
+                "Requirement ticket number this task works for. Required: without a ticket there is no plan. The requirement must already carry deck:定稿.",
+            },
+            requirementRepoKey: {
+              type: "string",
+              description: "Repository holding the requirement ticket, when it is not in the task's own repo.",
+            },
           },
           ["key", "prompt"],
         ),
@@ -511,6 +556,58 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
       dispatchId: { type: "string", description: "Batch id, reused for idempotency keys. Default: generated." },
       lang: { type: "string", enum: ["zh", "en"], description: "Language of the generated preamble. Default zh." },
     }, ["tasks", "depth"]),
+  },
+
+  [REQUIREMENT_DISPATCH_TOOL_NAME]: {
+    description:
+      "Split a finalized requirement into one ticket per area and one dispatch batch per area. " +
+      "Returns a list only (each area, its staff card, provider/model, and how many sessions it would open) and writes nothing — the MCP process has no host connection. " +
+      "Pass confirm:true (or set confirmRequirementSplit=false in orchestration settings) to mark the list as confirmed; execution then goes through the server RPC deck.orchestration.requirement-dispatch. " +
+      "Requires deck:定稿, a complete impact table for cross-area work, and a dispatcher window in each involved workspace.",
+    inputSchema: objectSchema(
+      {
+        requirementNumber: { type: "number", description: "The requirement ticket number." },
+        requirementRepoKey: {
+          type: "string",
+          description: "Repository holding the requirement ticket; needed when the workspace has several repos and the requirement is not in the default one.",
+        },
+        confirm: {
+          type: "boolean",
+          description: "true = the list is confirmed and the server RPC may execute it. Omitted/false = list only unless the workspace setting already disabled confirmation. This tool itself never writes.",
+        },
+      },
+      ["requirementNumber"],
+    ),
+  },
+
+  [STAFF_REQUEST_TOOL_NAME]: {
+    description:
+      "Ask the manager for a hand: writes one pending staffing request to .deck/coordination.jsonl. " +
+      "Use it when the work crosses into another card's territory, or when you need more hands than your own card allows. " +
+      "This does not dispatch and does not create a session — the manager decides. No approval prompt.",
+    inputSchema: objectSchema(
+      {
+        task: { type: "string", description: "What you need done, in one sentence." },
+        why: { type: "string", description: "Why you cannot do it yourself: out of territory, too much work, or missing permissions." },
+        staff: {
+          type: "string",
+          description: "Suggested card id on the workspace roster (optional). Must exist on the roster when given.",
+        },
+        region: {
+          type: "object",
+          description: "Where the work lives: repository and/or a directory prefix inside the workspace.",
+          properties: {
+            repoKey: { type: "string", description: "Repository inside the workspace; omit when there is only one." },
+            pathPrefix: { type: "string", description: "Directory prefix relative to the workspace root; omit for the whole workspace." },
+          },
+        },
+        fromStaff: {
+          type: "string",
+          description: "Your own card id. The MCP process cannot read the deck.staff label, so pass it from your role prompt; omitted records unknown.",
+        },
+      },
+      ["task", "why"],
+    ),
   },
 });
 
@@ -752,6 +849,14 @@ export const createSchema = z.strictObject({
   project: z.string().min(1).max(64).optional(),
   /** 模块键：必须是该项目 `areas` 里登记过的一个，会自动带 `area:<k>`。 */
   area: z.string().min(1).max(32).optional(),
+  /**
+   * 这张工作票挂在哪个需求下（需求票号，`#12` / `12` / `12` 都认）。
+   * 建工作票（issue / spec-ticket）时必填，而且那张需求票必须已打 `deck:定稿`；
+   * 侦查路线票（map-ticket）与缺陷收单（bug）不需要。闸在 `shared/split-guard.ts`。
+   */
+  requirementKey: z.union([z.number().int().min(0), z.string().min(1).max(32)]).optional(),
+  /** 这张票建出来派给哪张岗位卡（`deck.staff` 标签的值）；只记名册 id，不在这里建会话。 */
+  staff: z.string().min(1).max(MAX_STAFF_ID_CHARS).optional(),
   repo: repoKey,
 });
 

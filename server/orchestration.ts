@@ -3,6 +3,7 @@ import { matchesWorkspaceScope } from "../shared/session.ts";
 import {
   buildDispatchPreamble,
   buildAgentTree,
+  DECK_TICKET_LABEL,
   isDeckChild,
   normalizeOrchestration,
   planDispatch,
@@ -11,14 +12,20 @@ import {
   resolveRoute,
   resolveRouteTarget,
   routeFromOf,
+  staffCardOf,
+  ticketLabelOf,
+  ticketSpecOf,
   withRoutingRule,
   withWorkspaceRoles,
   type AgentNodeInput,
   type ClientProfile,
   type ClientTarget,
   type Difficulty,
+  type DispatchRegion,
   type DispatchRejection,
   type OrchestrationSettings,
+  type RouteFailureReason,
+  type RouteResolution,
   type RoutingRule,
   type WorkspaceRoles,
 } from "../shared/orchestration.ts";
@@ -46,8 +53,14 @@ import {
   type ModelListKey,
 } from "../shared/provider-models.ts";
 import { createAgent, sessionErrorDetail } from "./session.ts";
-import { record } from "./logs.ts";
 import { modelIdsOf, type ProviderSnapshotEntry } from "./provider-snapshot-view.ts";
+import { createDispatchTicket, recordDispatchTicket } from "./tracker/dispatch-ticket.ts";
+import { collectStaffHistory } from "./staff-history.ts";
+import { writableRepoKeys } from "./tracker/targets.ts";
+import { readIssue } from "./tracker/read.ts";
+import { judgeDispatchTaskChain } from "./chain-gates.ts";
+import type { TicketReader } from "./contract-chain.ts";
+import { record } from "./logs.ts";
 
 /**
  * 编排执行层。
@@ -357,9 +370,7 @@ export type OrchestrationStateResult =
         difficulty: Difficulty;
         profileId: string | null;
         target: ClientTarget | null;
-        resolved:
-          | { ok: true; target: ClientTarget; via: "profile" | "target" }
-          | { ok: false; reason: "profile-missing" | "no-target"; detail: string };
+        resolved: RouteResolution;
         /** 这一档没配路由时，实际借的是哪一档；一档都没配是 `default`。 */
         routeFrom?: Difficulty | "default";
       }>;
@@ -404,7 +415,7 @@ function resolveRuleTarget(
   profiles: readonly ClientProfile[],
 ):
   | { ok: true; target: ClientTarget; via: "profile" | "target" }
-  | { ok: false; reason: "profile-missing" | "no-target"; detail: string } {
+  | { ok: false; reason: RouteFailureReason; detail: string } {
   return resolveRouteTarget(rule, profiles);
 }
 
@@ -534,7 +545,14 @@ export async function readOrchestrationState(
   for (const item of routing) {
     if (item.resolved.ok) continue;
     broken.add(item.difficulty);
-    warnings.push(`${item.difficulty} 这一档没有可用客户端：${item.resolved.detail}`);
+    // 说清楚这条路由是没配（落到内置默认）还是配坏了：两种下一步不一样。
+    const origin =
+      item.routeFrom === "default"
+        ? "（没配路由，落到内置默认目标）"
+        : item.routeFrom
+          ? `（借用 ${item.routeFrom} 档的路由）`
+          : "";
+    warnings.push(`${item.difficulty} 这一档没有可用客户端${origin}：${item.resolved.detail}`);
   }
   const borrowed = routing.filter((item) => item.resolved.ok && item.routeFrom && !broken.has(item.difficulty));
   if (borrowed.length) {
@@ -955,7 +973,23 @@ export async function saveProfile(paseo: PaseoApi, input: ProfileInput): Promise
 export interface DispatchInput {
   workspaceId: string;
   workspaceDir: string;
-  tasks: Array<{ key: string; title?: string; prompt: string; difficulty?: Difficulty; map?: string }>;
+  tasks: Array<{
+    key: string;
+    title?: string;
+    prompt: string;
+    difficulty?: Difficulty;
+    map?: string;
+    /** 派给名册上的哪张卡；名册非空时必填，或改给 `region` 按归属算。 */
+    staff?: string;
+    /** 这条任务落在哪个仓库；多仓库工作区必填。 */
+    repoKey?: string;
+    /** 这条活落在哪片：仓库 + 路径前缀。`staff` 没给时按它算归属。 */
+    region?: DispatchRegion;
+    /** 挂回哪条需求票；普通派单不传。 */
+    requirementKey?: number;
+    /** 需求票自己所在的仓库；子票仓库不能代替它判断父边能不能挂。 */
+    requirementRepoKey?: string;
+  }>;
   /** 这一批默认替哪张地图干活；逐条可以用 `tasks[].map` 覆盖。 */
   map?: string;
   depth?: number;
@@ -975,13 +1009,22 @@ export type DispatchOutcomeResult =
       difficulty: Difficulty;
       partial: boolean;
       failureDetail: string | null;
+      /** 这条任务落成的那张票：会话是进程，票才是这件事留下的凭证。 */
+      ticket: { number: number; url: string; repoKey: string } | null;
+      /** 票建好了但附带写入没成（标签 / 父票）：票是真的，这些要人补。 */
+      ticketNotes: string[];
     }
   | {
       key: string;
       ok: false;
-      /** 与纯函数层的拒绝原因同源，另加 `create-failed`（走到宿主才失败的）。 */
-      reason: DispatchRejection | "create-failed";
+      /**
+       * 与纯函数层的拒绝原因同源，另加两个走到宿主/票面才失败的：
+       * `ticket-failed`（票没建成，这条活不派）、`create-failed`（票建好了，会话没建起来）。
+       */
+      reason: DispatchRejection | "create-failed" | "ticket-failed";
       detail: string;
+      /** `create-failed` 时说明票已经建出来了：别让人以为整件事没发生又重派一遍。 */
+      ticket?: { number: number; url: string; repoKey: string } | null;
     };
 
 export type DispatchResult =
@@ -1051,7 +1094,11 @@ async function runningByMapOf(
   }
 }
 
-export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promise<DispatchResult> {
+export async function runDispatch(
+  paseo: PaseoApi,
+  input: DispatchInput,
+  options: { readonly reader?: TicketReader } = {},
+): Promise<DispatchResult> {
   if (!input.workspaceId.trim() || !input.workspaceDir.trim()) {
     return { ok: false, reason: "invalid-workspace", detail: "需要 workspaceId 与工作区目录" };
   }
@@ -1092,6 +1139,10 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
     workspaceDir: input.workspaceDir,
   });
 
+  // 多仓库工作区：没写 repoKey 的任务在这里就拒，别等票建不出来才发现。
+  const repoListing = await writableRepoKeys(input.workspaceDir);
+  const repoKeys = repoListing.keys;
+
   const plan = planDispatch({
     workspaceId: input.workspaceId,
     roles: stored.settings.roles,
@@ -1100,7 +1151,9 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
     tasks: input.tasks,
     maxDepth: stored.settings.maxDepth,
     maxChildrenPerDispatch: stored.settings.maxChildrenPerDispatch,
+    minConcurrentStaff: stored.settings.minConcurrentStaff,
     mapBudgets: stored.settings.mapBudgets,
+    repoKeys,
     runningByMap: running.counts,
     ...(input.map?.trim() ? { map: input.map.trim() } : {}),
     depth: depth - 1,
@@ -1118,6 +1171,11 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
   }
 
   const warnings: string[] = [];
+  // 仓库清单读不出来时 `repoKeys` 是空数组，多仓库校验会整段跳过：
+  // 不说出来，用户会以为每条任务都验过 repoKey 了。
+  if (repoListing.detail) {
+    warnings.push(`读不出这个工作区有哪些仓库，多仓库校验这一批跳过：${repoListing.detail}`);
+  }
   if (stored.settings.maxDepth < depth + 1) {
     warnings.push(`当前第 ${depth} 层，上限 ${stored.settings.maxDepth} 层：子会话不能再往下派`);
   }
@@ -1136,6 +1194,8 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
   }
 
   const results: DispatchOutcomeResult[] = [];
+  // 票面上要写「谁干的」：会话会被归档，票是留下的凭证。
+  const workspaceRoles = stored.settings.roles.find((role) => role.workspaceId === input.workspaceId) ?? null;
 
   for (const rejected of plan.rejected) {
     results.push({ key: rejected.key, ok: false, reason: rejected.reason, detail: rejected.detail });
@@ -1145,36 +1205,142 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
   // 而这里已经用 if 挡过空值，多抄一行换来闭包里能直接用 string。
   const dispatcherAgentId: string = plan.dispatcherAgentId;
 
-  const createFor = (task: (typeof plan.tasks)[number], target: ClientTarget, preamble: string) =>
+  const createFor = (
+    task: (typeof plan.tasks)[number],
+    target: ClientTarget,
+    preamble: string,
+    labels: Readonly<Record<string, string>>,
+  ) =>
     createAgent(paseo, {
       cwd: input.workspaceDir,
+      // 派出去的会话也落回**这条**工作区：不给 id，宿主会为同一目录再登记一条新工作区。
+      workspaceId: input.workspaceId,
       provider: providerSpec(target),
       prompt: `${preamble}\n\n${task.prompt.trim()}`,
       ...(task.title ? { title: task.title } : {}),
       ...(target.modeId ? { modeId: target.modeId } : {}),
       ...(target.thinkingOptionId ? { thinkingOptionId: target.thinkingOptionId } : {}),
       ...(target.featureValues ? { featureValues: target.featureValues } : {}),
-      labels: task.labels,
+      // 岗位职责进系统提示：这是「这张卡是谁」唯一能真正约束行为的通道。
+      ...(task.systemPrompt ? { systemPrompt: task.systemPrompt } : {}),
+      labels,
       parentAgentId: dispatcherAgentId,
       idempotencyKey: task.idempotencyKey,
       ledger: false,
     });
 
+  // 链条的事实每张需求读一次：同一批里多条任务挂同一条需求时，不逐条重复读正文。
+  const chainRequirements = new Map<
+    string,
+    { readonly body: string; readonly repoKey: string | null } | { readonly detail: string }
+  >();
   for (const task of plan.tasks) {
+    // 链条闸要在执行层再查一次：MCP 的 deck_dispatch_plan 只是预览，
+    // 直接走 RPC 派单会绕过它。按票级判定，坏的一条不拖累整批。
+    if (task.requirementKey !== undefined) {
+      const key = `${task.requirementRepoKey ?? ""}#${task.requirementKey}`;
+      let requirement = chainRequirements.get(key);
+      if (!requirement) {
+        if (typeof task.requirementBody === "string") {
+          // 需求拆票已经读过正文：直接用，避免执行层再读一遍（也避免拿工作区里不存在的票号误报）。
+          requirement = { body: task.requirementBody, repoKey: task.requirementRepoKey ?? null };
+        } else {
+          const read = await readIssue(input.workspaceDir, task.requirementKey, {
+            ...(task.requirementRepoKey ? { repoKey: task.requirementRepoKey } : {}),
+          });
+          requirement = !read.ok || !read.result.ok
+            ? { detail: read.ok ? (read.result.ok ? "需求票读回来了但没有正文" : read.result.detail) : read.detail }
+            : {
+                body: typeof read.result.issue.body === "string" ? read.result.issue.body : "",
+                repoKey: read.repoKey ?? null,
+              };
+        }
+        chainRequirements.set(key, requirement);
+      }
+      if ("detail" in requirement) {
+        results.push({
+          key: task.key,
+          ok: false,
+          // RPC 输出类型是固定的 reason 枚举（schema 不归本批改）；「票没建成」是它的既有含义，
+          // 具体是链条闸拦下的，detail 里写清楚。
+          reason: "ticket-failed",
+          detail: `读不出需求 #${task.requirementKey} 的正文，不能判链条：${requirement.detail}`,
+        });
+        continue;
+      }
+      const chain = await judgeDispatchTaskChain({
+        workspaceDir: input.workspaceDir,
+        requirementBody: requirement.body,
+        requirementRepoKey: task.requirementRepoKey ?? requirement.repoKey,
+        targetRepoKey: task.repoKey ?? task.region?.repoKey ?? null,
+        title: task.title ?? null,
+        prompt: task.prompt,
+        ...(options.reader ? { reader: options.reader } : {}),
+      });
+      if (!chain.ok) {
+        results.push({ key: task.key, ok: false, reason: "ticket-failed", detail: chain.reason });
+        continue;
+      }
+      warnings.push(...chain.warnings);
+    }
+
+    // 先建票，再建会话：这条活必须有一张票。票建不出来就不派——否则它只活在一个
+    // 进程里，窗口一关就什么都不剩，正是这次要修的毛病。
+    const card = task.staffId ? staffCardOf(workspaceRoles, task.staffId) : null;
+    const ticket = await createDispatchTicket(input.workspaceDir, {
+      ...ticketSpecOf({
+        task: { ...task, providerSpec: providerSpec(task.target) },
+        card,
+        dispatchId,
+        dispatcherAgentId,
+        depth,
+        workspaceId: input.workspaceId,
+      }),
+      idempotencyKey: task.idempotencyKey,
+    });
+    if (!ticket.ok) {
+      results.push({ key: task.key, ok: false, reason: "ticket-failed", detail: ticket.detail, ticket: null });
+      continue;
+    }
+    recordDispatchTicket(ticket, { difficulty: task.difficulty, key: task.key });
+    const ticketRef = { number: ticket.number, url: ticket.url, repoKey: ticket.repoKey };
+
+    // 会话标签里的 `deck.ticket` 指向**真建出来的**票号，不再用计划里那个任务键：
+    // 从会话反查票是这条链上唯一一处硬链接，指错了等于没有。
+    // 多仓库工作区里同号票可能不止一张：写全 `owner/repo#N`，履历反查才不会读到别仓库的同号票。
+    const labels = { ...task.labels, [DECK_TICKET_LABEL]: ticketLabelOf(ticket.repoKey, ticket.number) };
     const preamble = buildDispatchPreamble({
       ...(input.lang ? { lang: input.lang } : {}),
       dispatcherAgentId: plan.dispatcherAgentId,
       difficulty: task.difficulty,
-      ...(task.key ? { ticketKey: task.key } : {}),
+      ticketKey: `#${ticket.number}`,
       depth,
     });
-    const created = await createFor(task, task.target, preamble);
+    // 岗位履历：岗位卡不常驻，不补这一段的会话每次都是陌生工。读失败只进 warning，
+    // 不影响建票与建会话——履历是补充，不是派单的前置条件。
+    let dispatchTask = task;
+    if (task.staffId) {
+      const history = await collectStaffHistory(paseo, {
+        workspaceId: input.workspaceId,
+        staffId: task.staffId,
+        workspaceDir: input.workspaceDir,
+      });
+      warnings.push(...history.warnings);
+      if (history.text) {
+        dispatchTask = {
+          ...task,
+          systemPrompt: [task.systemPrompt, history.text].filter(Boolean).join("\n\n"),
+        };
+      }
+    }
+    const created = await createFor(dispatchTask, task.target, preamble, labels);
     if (!created.ok) {
       results.push({
         key: task.key,
         ok: false,
         reason: "create-failed",
-        detail: `${created.failure.kind}: ${created.failure.detail}`,
+        detail: `${created.failure.kind}: ${created.failure.detail}（票 #${ticket.number} 已经建好，没有派出去）`,
+        ticket: ticketRef,
       });
       continue;
     }
@@ -1187,6 +1353,8 @@ export async function runDispatch(paseo: PaseoApi, input: DispatchInput): Promis
       difficulty: task.difficulty,
       partial: created.partial,
       failureDetail: created.failure?.detail ?? null,
+      ticket: ticketRef,
+      ticketNotes: ticket.notes,
     });
   }
 

@@ -3,7 +3,14 @@ import test from "node:test";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TurnReporter, readTailText, renderTurnReport, reportEnabledFor } from "../server/report.ts";
+import {
+  TurnReporter,
+  mainAgentFor,
+  progressAgentFor,
+  readTailText,
+  renderTurnReport,
+  reportEnabledFor,
+} from "../server/report.ts";
 import { writeChildHandoff } from "../server/handoff-store.ts";
 
 /**
@@ -42,6 +49,9 @@ function fakePaseo(options = {}) {
         return {
           send: async (text, sendOptions) => {
             if (options.sendError) throw new Error(options.sendError);
+            // 抄送用：只让某个会话发送失败，主投递照常成功。
+            const perAgent = options.sendErrorFor?.(id);
+            if (perAgent) throw new Error(perAgent);
             sent.push({ id, text, options: sendOptions });
           },
           timeline: { refetch: async () => payload },
@@ -385,6 +395,166 @@ test("新回合重新写了回传件（时间更新）时，仍然按回传件�
   const second = await reporter.report(paseo, { agent: agent({ cwd: dir }), outcome: completed, turnId: "turn-2" });
   assert.equal(second.source, "handoff");
   assert.match(second.text, /又完成了 B/);
+});
+
+/** 工作区里配好任意角色组合，用来验证进度窗口的抄送与去重。 */
+async function withRoles(t, role) {
+  const dir = await handoffDir(t, "agent-child", { summary: "三段整理完毕", ticketKey: "42" });
+  await mkdir(join(dir, ".deck"), { recursive: true });
+  await writeFile(
+    join(dir, ".deck", "orchestration.json"),
+    JSON.stringify({
+      version: 1,
+      updatedAt: "2026-10-29T00:00:00.000Z",
+      roles: [{ workspaceId: "ws1", ...role }],
+      routing: [],
+      maxDepth: 3,
+      maxChildrenPerDispatch: 4,
+      reportOnFinish: true,
+    }),
+    "utf8",
+  );
+  return dir;
+}
+
+test("配了进度窗口时，主投递成功后抄送一份【进度】，只带票号和结论摘要", async (t) => {
+  const dir = await withRoles(t, {
+    mainAgentId: "agent-main",
+    dispatcherAgentId: "agent-parent",
+    progressAgentId: "agent-progress",
+  });
+  const paseo = fakePaseo();
+  const result = await new TurnReporter().report(paseo, {
+    agent: agent({ cwd: dir, workspaceId: "ws1" }),
+    outcome: completed,
+    turnId: "turn-1",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.reported, true);
+  assert.equal(result.parentAgentId, "agent-parent");
+  assert.equal(paseo.sent.length, 2, "主投递一次，进度抄送一次");
+  assert.equal(paseo.sent[0].id, "agent-parent");
+  assert.equal(paseo.sent[1].id, "agent-progress");
+  assert.deepEqual(paseo.sent[1].options, { activeTurnBehavior: "steer" });
+  assert.match(paseo.sent[1].text, /^【进度】/);
+  assert.match(paseo.sent[1].text, /票 42/);
+  assert.match(paseo.sent[1].text, /三段整理完毕/);
+  // 抄送是摘要，不是把整份回传再抄一遍
+  assert.doesNotMatch(paseo.sent[1].text, /【子会话回传】/);
+  assert.ok(paseo.sent[1].text.length < paseo.sent[0].text.length);
+});
+
+test("进度窗口就是上一级时不重复发", async (t) => {
+  const dir = await withRoles(t, {
+    dispatcherAgentId: "agent-parent",
+    progressAgentId: "agent-parent",
+  });
+  const paseo = fakePaseo();
+  const result = await new TurnReporter().report(paseo, {
+    agent: agent({ cwd: dir, workspaceId: "ws1" }),
+    outcome: completed,
+    turnId: "turn-1",
+  });
+  assert.equal(result.reported, true);
+  assert.equal(paseo.sent.length, 1, "同一个会话不该收到两份");
+  assert.equal(paseo.sent[0].id, "agent-parent");
+});
+
+test("进度窗口就是主窗口时照常抄送：主窗口本来就没收到这次回传", async (t) => {
+  const dir = await withRoles(t, {
+    mainAgentId: "agent-progress",
+    dispatcherAgentId: "agent-parent",
+    progressAgentId: "agent-progress",
+  });
+  const paseo = fakePaseo();
+  const result = await new TurnReporter().report(paseo, {
+    agent: agent({ cwd: dir, workspaceId: "ws1" }),
+    outcome: completed,
+    turnId: "turn-1",
+  });
+  assert.equal(result.reported, true);
+  assert.deepEqual(paseo.sent.map((item) => item.id), ["agent-parent", "agent-progress"]);
+});
+
+test("抄送进度窗口失败只记日志，主投递仍返回成功", async (t) => {
+  const dir = await withRoles(t, {
+    mainAgentId: "agent-main",
+    dispatcherAgentId: "agent-parent",
+    progressAgentId: "agent-progress",
+  });
+  const paseo = fakePaseo({
+    sendErrorFor: (id) => (id === "agent-progress" ? "进度窗口已归档" : undefined),
+  });
+  const result = await new TurnReporter().report(paseo, {
+    agent: agent({ cwd: dir, workspaceId: "ws1" }),
+    outcome: completed,
+    turnId: "turn-1",
+  });
+  assert.equal(result.ok, true, "旁听窗口发不出去不能把主投递算成失败");
+  assert.equal(result.reported, true);
+  assert.equal(result.parentAgentId, "agent-parent");
+  assert.equal(paseo.sent.length, 1);
+  assert.equal(paseo.sent[0].id, "agent-parent");
+});
+
+test("同一回合重放时，主投递与进度抄送都只发一次", async (t) => {
+  const dir = await withRoles(t, {
+    mainAgentId: "agent-main",
+    dispatcherAgentId: "agent-parent",
+    progressAgentId: "agent-progress",
+  });
+  const paseo = fakePaseo();
+  const reporter = new TurnReporter();
+  const first = await reporter.report(paseo, {
+    agent: agent({ cwd: dir, workspaceId: "ws1" }),
+    outcome: completed,
+    turnId: "turn-1",
+  });
+  const replay = await reporter.report(paseo, {
+    agent: agent({ cwd: dir, workspaceId: "ws1" }),
+    outcome: completed,
+    turnId: "turn-1",
+  });
+  assert.equal(first.reported, true);
+  assert.equal(replay.reported, false);
+  assert.deepEqual(
+    paseo.sent.map((item) => item.id),
+    ["agent-parent", "agent-progress"],
+    "沿用 same-turnId 去重，重放不再抄送",
+  );
+});
+
+test("角色槽位取值：主窗口与进度窗口各取各的，没配就是 null", async (t) => {
+  const dir = await withRoles(t, {
+    mainAgentId: "agent-main",
+    dispatcherAgentId: "agent-parent",
+    progressAgentId: "agent-progress",
+  });
+  assert.equal(await mainAgentFor(dir, "ws1"), "agent-main");
+  assert.equal(await progressAgentFor(dir, "ws1"), "agent-progress");
+  assert.equal(await mainAgentFor(dir, "ws-missing"), null);
+  assert.equal(await progressAgentFor(dir, null), null);
+});
+
+test("上一级收不到、改送主窗口成功时，进度窗口仍收到一份", async (t) => {
+  const dir = await withRoles(t, {
+    mainAgentId: "agent-main",
+    dispatcherAgentId: "agent-parent",
+    progressAgentId: "agent-progress",
+  });
+  const paseo = fakePaseo({ sendErrorFor: (id) => (id === "agent-parent" ? "上一级已归档" : undefined) });
+  const result = await new TurnReporter().report(paseo, {
+    agent: agent({ cwd: dir, workspaceId: "ws1" }),
+    outcome: completed,
+    turnId: "turn-reroute",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.rerouted, true);
+  assert.deepEqual(
+    paseo.sent.map((item) => item.id),
+    ["agent-main", "agent-progress"],
+    "绕道成功后，旁听的进度窗口不该漏",
+  );
 });
 
 test("回传件缺 status 或 createdAt 坏掉时按「用不了」处理，退回读时间线", async (t) => {

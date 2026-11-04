@@ -5,7 +5,8 @@ import { TextInput } from "@getpaseo/plugin/client/ui";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelButton, PixelCard, PixelHead } from "../../pixel.tsx";
 import type { PanelKey } from "../../panel/panelText.tsx";
-import { specOf, type ClientProfile, type ProviderRow } from "./types.ts";
+import { modelChoicesOf, specOf, type ClientProfile, type ProviderRow } from "./types.ts";
+import { ModelChoices } from "./ModelChoices.tsx";
 
 /**
  * 客户端档案：一个「provider + 模型 + 模式 + 思考档位」的命名组合。
@@ -133,6 +134,14 @@ export function ProfilesPanel({
           />
         ))}
       </View>
+      {/* 模型：和路由页同一套候选，点一下就填进草稿；手填那条路留着（宿主没报清单时只剩它）。 */}
+      <ModelChoices
+        skin={skin}
+        t={t}
+        state={modelChoicesOf(draft.provider, providers)}
+        current={draft.model.trim() || null}
+        onPick={(model) => set({ model })}
+      />
       <View style={styles.form}>
         <TextInput
           accessibilityLabel={t("orch.profileModel")}

@@ -429,6 +429,11 @@ test("错误分类覆盖未登录、仓库、权限、超时", () => {
   assert.equal(classifySessionError(new Error("403 forbidden")), "permission");
   assert.equal(classifySessionError(new Error("request timed out after 30s")), "timeout");
   assert.equal(classifySessionError(new Error("agent not found")), "not-found");
+  // 宿主对 provider 格式的拒绝是我们传错了参数，不是未知故障。
+  assert.equal(
+    classifySessionError(new Error('Expected config.provider in "provider/model" format')),
+    "invalid-input",
+  );
   assert.equal(classifySessionError(new Error("something odd")), "unknown");
 });
 
@@ -453,11 +458,30 @@ function fakeCreate({ snapshots = [], error = null, id = "agent-new" } = {}) {
   };
 }
 
+/** 带工作区句柄的假宿主：裸路径与句柄路径分开记，才能断言走的是哪条。 */
+function fakeBound({ id = "agent-bound" } = {}) {
+  const bare = [];
+  const bound = [];
+  return {
+    bare,
+    bound,
+    paseo: {
+      agents: { create: async (options) => (bare.push(options), { id: "agent-bare" }) },
+      workspaces: {
+        ref: (workspaceId) => ({
+          id: workspaceId,
+          agents: { create: async (options) => (bound.push({ workspaceId, options }), { id }) },
+        }),
+      },
+    },
+  };
+}
+
 test("createAgent 原样传递 provider、提示词、标题与幂等键", async () => {
   const fake = fakeCreate();
   const result = await createAgent(fake.paseo, {
     cwd: "/repo",
-    provider: "claude",
+    provider: "claude/sonnet",
     prompt: "/triage",
     title: "[New] 诊断 #1",
     idempotencyKey: "key-1",
@@ -468,10 +492,95 @@ test("createAgent 原样传递 provider、提示词、标题与幂等键", async
   assert.equal(result.ledger.skipped, true);
   const options = fake.calls[0];
   assert.equal(options.cwd, "/repo");
-  assert.equal(options.config.provider, "claude");
+  assert.equal(options.config.provider, "claude/sonnet");
   assert.equal(options.prompt, "/triage");
   assert.equal(options.title, "[New] 诊断 #1");
   assert.equal(options.idempotencyKey, "key-1");
+});
+
+test("createAgent 给了 workspaceId 就走工作区句柄，不带 cwd", async () => {
+  const fake = fakeBound();
+  const result = await createAgent(fake.paseo, {
+    cwd: "/repo",
+    workspaceId: "wks_7d9f",
+    provider: "claude/sonnet",
+    prompt: "/triage",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.agentId, "agent-bound");
+  assert.equal(fake.bare.length, 0, "裸 create 会由宿主按目录再登记一条工作区：同一目录点三次就多三条");
+  assert.equal(fake.bound.length, 1);
+  assert.equal(fake.bound[0].workspaceId, "wks_7d9f");
+  assert.equal("cwd" in fake.bound[0].options, false, "工作区句柄的创建不接受 cwd（目录由句柄决定）");
+  assert.equal(fake.bound[0].options.config.provider, "claude/sonnet");
+});
+
+test("createAgent 没有 workspaceId 时才退回 cwd（旧调用方）", async () => {
+  const fake = fakeCreate();
+  const result = await createAgent(fake.paseo, { cwd: "/repo", provider: "claude/sonnet" });
+  assert.equal(result.ok, true);
+  assert.equal(fake.calls[0].cwd, "/repo");
+});
+
+test("createAgent 只有 workspaceId、完全不给目录也放行（目录由句柄决定）", async () => {
+  const fake = fakeBound();
+  const result = await createAgent(fake.paseo, { workspaceId: "wks_7d9f", provider: "claude/sonnet" });
+  assert.equal(result.ok, true);
+  assert.equal(fake.bound.length, 1);
+});
+
+test("createAgent 既没有 workspaceId 也没有目录：拒绝", async () => {
+  const fake = fakeBound();
+  const result = await createAgent(fake.paseo, { provider: "claude/sonnet" });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.kind, "invalid-input");
+  assert.equal(fake.bare.length, 0);
+  assert.equal(fake.bound.length, 0);
+});
+
+test("createAgent 传了空白的 workspaceId：拒绝，不静默退回裸创建", async () => {
+  const fake = fakeBound();
+  for (const blank of ["", "   "]) {
+    const result = await createAgent(fake.paseo, { cwd: "/repo", workspaceId: blank, provider: "claude/sonnet" });
+    assert.equal(result.ok, false, `"${blank}" 不能当成没传`);
+    assert.equal(result.failure.kind, "invalid-input");
+    assert.match(result.failure.detail, /workspaceId/);
+  }
+  assert.equal(fake.bare.length, 0, "空白 id 退回裸创建 = 又开一条同名工作区，正是要修的那件事");
+});
+
+test("sendToAgent 新建会话时传了空白 workspaceId：拒绝，不退回落 cwd", async () => {
+  const fake = fakeBound();
+  const result = await sendToAgent(fake.paseo, {
+    plan: { target: { kind: "new", cwd: "/repo" }, prompt: "/triage", sendMode: "queue", requiresConfirmation: false },
+    provider: "claude/sonnet",
+    workspaceId: "  ",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "invalid-input");
+  assert.equal(fake.bare.length, 0, "空白 id 退回按目录建会话，就会多一条同名工作区");
+});
+
+test("sendToAgent 新建会话时把 workspaceId 带到 createAgent", async () => {
+  const fake = fakeBound();
+  const result = await sendToAgent(fake.paseo, {
+    plan: {
+      target: { kind: "new", cwd: "/repo" },
+      prompt: "/triage",
+      title: "验收",
+      sendMode: "queue",
+      requiresConfirmation: false,
+    },
+    provider: "claude/sonnet",
+    workspaceId: "wks_7d9f",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(fake.bound.length, 1, "新建会话也落回这条工作区");
+  assert.equal(fake.bound[0].workspaceId, "wks_7d9f");
+  assert.equal(fake.bare.length, 0);
 });
 
 test("创建快照 failed 时如实报告部分成功", async () => {
@@ -481,7 +590,7 @@ test("创建快照 failed 时如实报告部分成功", async () => {
       { phase: "failed", agentId: "agent-new", error: "permission denied: cannot write repo" },
     ],
   });
-  const result = await createAgent(fake.paseo, { cwd: "/repo", provider: "claude", prompt: "/triage" });
+  const result = await createAgent(fake.paseo, { cwd: "/repo", provider: "claude/sonnet", prompt: "/triage" });
   assert.equal(result.ok, true);
   assert.equal(result.partial, true);
   assert.equal(result.failure.kind, "permission");
@@ -495,7 +604,7 @@ test("创建抛错时保留已经出现的 agentId", async () => {
     snapshots: [{ phase: "agent_ready", agentId: "agent-half" }],
     error: new Error("not logged in to provider"),
   });
-  const result = await createAgent(fake.paseo, { cwd: "/repo", provider: "claude", prompt: "/triage" });
+  const result = await createAgent(fake.paseo, { cwd: "/repo", provider: "claude/sonnet", prompt: "/triage" });
   assert.equal(result.ok, false);
   assert.equal(result.failure.kind, "unauthenticated");
   assert.equal(result.failure.agentId, "agent-half");
@@ -510,12 +619,25 @@ test("createAgent 拒绝缺少 provider 或工作区", async () => {
   assert.equal(fake.calls.length, 0);
 });
 
+test("createAgent 拒绝只有客户端的 provider，不把宿主的格式错留给上层", async () => {
+  // 宿主只认 provider/model，裸 provider 会在建会话时抛
+  // `Expected config.provider in "provider/model" format`；这里先拦住。
+  for (const provider of ["claude", "claude/", "/sonnet"]) {
+    const fake = fakeCreate();
+    const result = await createAgent(fake.paseo, { cwd: "/repo", provider });
+    assert.equal(result.ok, false, `${provider} 不该被接受`);
+    assert.equal(result.failure.kind, "invalid-input");
+    assert.match(result.failure.detail, /provider\/model/);
+    assert.equal(fake.calls.length, 0, "拦住的请求不能真的去建会话");
+  }
+});
+
 test("有票且给了数据目录时写入工作路线台账", async () => {
   const root = tempRoot();
   const fake = fakeCreate({ id: "agent-ledger" });
   const result = await createAgent(fake.paseo, {
     cwd: "/repo",
-    provider: "claude",
+    provider: "claude/sonnet",
     prompt: "/triage",
     ticket: { repoKey: "o/r", number: 3, title: "登录超时" },
     ledger: { homeDir: root },
@@ -535,7 +657,7 @@ test("显式 agentId: null 记进工作区台账，而不是新会话的 agent �
   const fake = fakeCreate({ id: "agent-new" });
   const result = await createAgent(fake.paseo, {
     cwd: "/repo",
-    provider: "claude",
+    provider: "claude/sonnet",
     prompt: "/triage",
     ticket: { repoKey: "o/r", number: 4, title: "工作区票" },
     ledger: { homeDir: root, cwd: "/repo", agentId: null },
@@ -759,14 +881,14 @@ test("new 目标经 createAgent 带上提示词与标题", async () => {
     ctx: { lang: "en", provider: "codex", repoKey: "o/r", number: 3, title: "崩溃" },
     target: { kind: "new", cwd: "/repo" },
   });
-  const result = await sendToAgent(fake.paseo, { plan, provider: "codex", ledger: false });
+  const result = await sendToAgent(fake.paseo, { plan, provider: "codex/gpt-5", ledger: false });
   assert.equal(result.ok, true);
   assert.equal(result.target, "new");
   assert.equal(result.agentId, "agent-created");
   assert.equal(result.partial, false);
   assert.equal(result.skillAvailable, null);
   const options = fake.calls[0];
-  assert.equal(options.config.provider, "codex");
+  assert.equal(options.config.provider, "codex/gpt-5");
   assert.equal(options.prompt, plan.prompt);
   assert.equal(options.title, plan.title);
   assert.equal(options.idempotencyKey, plan.idempotencyKey);

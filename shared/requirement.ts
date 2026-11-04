@@ -8,6 +8,8 @@
  * 纯函数，客户端生成正文、测试校验形状都用这一份。
  */
 
+import { IMPACT_CHAIN_COLUMN, IMPACT_COLUMNS, IMPACT_HEADING } from "./impact.ts";
+
 export type RequirementMode = "explore" | "implement";
 export type DeckLang = "zh" | "en";
 
@@ -38,11 +40,41 @@ export function requirementSections(mode: RequirementMode, lang: DeckLang = "en"
   return SECTIONS[mode][lang];
 }
 
+/** 影响面表头：四列固定，第五列可选。空表不允许定稿，由 `finalizeProblem` 拦。 */
+function impactTableSkeleton(): string[] {
+  const header = [...IMPACT_COLUMNS, IMPACT_CHAIN_COLUMN];
+  return [IMPACT_HEADING, `| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`, ""];
+}
+
 export function buildRequirementBody(mode: RequirementMode, notes: string, lang: DeckLang = "en"): string {
-  const skeleton = requirementSections(mode, lang).flatMap((title) => [`## ${title}`, PLACEHOLDER[lang], ""]);
+  const skeleton = [
+    ...requirementSections(mode, lang).flatMap((title) => [`## ${title}`, PLACEHOLDER[lang], ""]),
+    // 影响面不是第七节「想法」，是派单与定稿读的机器可读表：需求票从一开始就带着它。
+    ...impactTableSkeleton(),
+  ];
   const trimmed = notes.trim();
   if (!trimmed) return skeleton.join("\n");
   return [...skeleton, `## ${pick(lang, "备注", "Notes")}`, trimmed, ""].join("\n");
+}
+
+/**
+ * 表单选「探索 / 实施需求」后真正提交的正文。
+ *
+ * 已经出现任何 `## ` 小节就原样提交：用户可能自己重写了骨架，
+ * 再套一层会把他的正文塞进「备注」，看起来像被改写。
+ * 全是散文（或空）时当作备注，套进六节 + 影响面表。
+ */
+export function planRequirementBody(mode: RequirementMode, notes: string, lang: DeckLang = "en"): string {
+  return /^##\s/m.test(notes) ? notes : buildRequirementBody(mode, notes, lang);
+}
+
+/** 需求标签与手填标签合并；去重不分大小写，用户手写了 `Requirement` 也不再重复一遍。 */
+export function mergeRequirementLabels(labels: readonly string[]): string[] {
+  const merged = labels.map((label) => label.trim()).filter(Boolean);
+  for (const label of requirementLabels()) {
+    if (!merged.some((item) => item.toLowerCase() === label.toLowerCase())) merged.push(label);
+  }
+  return merged;
 }
 
 /** 需求票统一带 `requirement`：不抢 wayfinder 路线标签，路线仍由地图显式挂。 */

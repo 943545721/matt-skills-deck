@@ -191,6 +191,7 @@ export function MapDetailView({
     );
   }
 
+  const derivedFrom = data.derivedFrom;
   const empty =
     !data.map.destination &&
     !data.map.notes &&
@@ -224,6 +225,18 @@ export function MapDetailView({
         />
         <PixelButton skin={skin} label={t("map.copyPrompt")} onPress={() => copy(mapPrompt())} />
       </View>
+
+      {/* 这张地图从哪条需求长出来的：只在地图正文写了 `Derived from: #N` 时出现，点一下回票面。 */}
+      {derivedFrom !== null ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => {
+            if (derivedFrom !== null) onOpenIssue(derivedFrom);
+          }}
+        >
+          <Text style={styles.link}>{t("map.derivedFrom", { number: derivedFrom })}</Text>
+        </Pressable>
+      ) : null}
 
       <PixelStatusLineText skin={skin} text={`${t("map.route")} · ${data.route.length}`} />
 

@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS: DeckSettings = {
   debugLogging: true,
   appearance: "auto",
   skillsMode: "per-project",
+  autoAllowPermissions: false,
 };
 
 let current: DeckSettings = DEFAULT_SETTINGS;

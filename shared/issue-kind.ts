@@ -21,9 +21,12 @@ export const MAP_TICKET_LABELS: readonly string[] = Object.freeze([
   "wayfinder:research", "wayfinder:prototype", "wayfinder:grilling", "wayfinder:task",
 ]);
 
+/** 地图容器的类型标签；建地图、认地图与界面去重都认这一枚。 */
+export const MAP_LABEL = "wayfinder:map";
+
 /** 六枚类型标签：身份由它们表达，调用方不许把它们再塞进 labels（kind=issue 的兜底除外）。 */
 export const TYPE_LABELS: readonly string[] = Object.freeze([
-  "wayfinder:map", "wayfinder:research", "wayfinder:prototype", "wayfinder:grilling", "wayfinder:task", "bug",
+  MAP_LABEL, "wayfinder:research", "wayfinder:prototype", "wayfinder:grilling", "wayfinder:task", "bug",
 ]);
 
 /** 契约层的三种类型。 */

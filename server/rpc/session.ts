@@ -37,6 +37,8 @@ export async function sessionSendHandler(
   return sendToAgent(context.paseo, {
     plan: input.plan,
     ...(input.provider ? { provider: input.provider } : {}),
+    // 空白也照传：让 `createAgent` 统一裁决，别在这里用真值判断把「传了空字符串」悄悄丢成「没传」。
+    ...(input.workspaceId !== undefined ? { workspaceId: input.workspaceId } : {}),
     ...(input.modeId ? { modeId: input.modeId } : {}),
     ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
     ...(input.labels ? { labels: input.labels } : {}),

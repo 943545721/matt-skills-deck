@@ -326,7 +326,8 @@ test("子票：只认 Part of #n；归一失败的行计入 dropped，不静默�
     assert.deepEqual(result.result.items.map((item) => item.number), [1]);
     assert.equal(result.result.fetched, 3);
     assert.equal(result.result.dropped, 1);
-    assert.equal(result.result.capped, false);
+    // 归一失败的那行可能正是没关的子票：清单不再完整，必须按截断处理，不能当全集。
+    assert.equal(result.result.capped, true);
   } finally {
     gh.restore();
   }

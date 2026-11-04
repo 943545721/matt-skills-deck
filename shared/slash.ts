@@ -14,6 +14,9 @@ import { z } from "zod";
  * `code` 让客户端按当前语言重新措辞（宿主文案不归 shared 层管）。
  */
 
+/** 探讨需求的两条路：边谈边建地图 / 只谈，谈完自己再拆票。 */
+export type DeckDiscussMode = "wayfinder" | "grill";
+
 export type DeckSlashCommand =
   | { kind: "status" }
   | { kind: "attach"; number: number }
@@ -21,6 +24,7 @@ export type DeckSlashCommand =
   | { kind: "handoff" }
   | { kind: "fixate" }
   | { kind: "new" }
+  | { kind: "discuss"; mode: DeckDiscussMode }
   | { kind: "help" }
   | { kind: "error"; message: string; code?: DeckSlashErrorCode };
 
@@ -31,11 +35,14 @@ export type DeckSlashErrorCode =
   | "unknown-command";
 
 /** 便于客户端把 code 映射成本地文案；顺序就是 `/deck help` 的展示顺序。 */
-export const DECK_SLASH_COMMANDS = ["status", "attach", "next", "handoff", "fixate", "new", "help"] as const;
+export const DECK_SLASH_COMMANDS = ["status", "attach", "next", "handoff", "fixate", "new", "discuss", "help"] as const;
 
 export type DeckSlashCommandName = (typeof DECK_SLASH_COMMANDS)[number];
 
 const NO_ARG: ReadonlySet<DeckSlashCommandName> = new Set(["status", "next", "handoff", "fixate", "new", "help"]);
+
+/** `/deck discuss` 的两个可选参数；不给就是「边谈边建地图」。 */
+const DISCUSS_MODES: ReadonlySet<DeckDiscussMode> = new Set(["wayfinder", "grill"]);
 
 const error = (code: DeckSlashErrorCode, message: string): DeckSlashCommand => ({ kind: "error", code, message });
 
@@ -69,6 +76,17 @@ export function parseDeckSlash(args: string): DeckSlashCommand {
       return error("invalid-number", `票号必须是正整数：${rawNumber}`);
     }
     return { kind: "attach", number };
+  }
+
+  if (name === "discuss") {
+    const [mode, ...extra] = rest;
+    if (extra.length > 0) {
+      return error("extra-args", "discuss 最多接受一个参数：wayfinder 或 grill。");
+    }
+    if (mode && !DISCUSS_MODES.has(mode as DeckDiscussMode)) {
+      return error("extra-args", `discuss 只认 wayfinder / grill 两种谈法，收到：${mode}`);
+    }
+    return { kind: "discuss", mode: (mode as DeckDiscussMode | undefined) ?? "wayfinder" };
   }
 
   if (NO_ARG.has(name) && rest.length > 0) {

@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findTool } from "../server/mcp/tools.ts";
+import { createLocalIssue, getLocalIssue, replaceLocalLabels } from "../server/tracker/local.ts";
 
 /**
  * 两个新工具的入口层。
@@ -19,6 +20,13 @@ async function workspace(t, settings) {
   if (settings) {
     await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings), "utf8");
   }
+  // 派单闸要读需求票的 `deck:定稿`：每个工作区先放一张 #1，测试只关心这一批任务。
+  const requirement = await createLocalIssue(dir, {
+    title: "需求 #1",
+    body: "## 需求\n\n测试用需求。",
+    labels: ["requirement", "deck:定稿"],
+  });
+  assert.equal(requirement.ok, true);
   return dir;
 }
 
@@ -42,11 +50,22 @@ const baseSettings = {
  */
 delete process.env.PASEO_AGENT_ID;
 
-const runTool = async (name, args, workspaceDir) => {
+const runToolRaw = async (name, args, workspaceDir) => {
   const tool = findTool(name);
   assert.ok(tool, `${name} 必须注册`);
   const result = await tool.run(args, { workspaceDir });
   return { isError: result.isError, body: JSON.parse(result.text), raw: result.text };
+};
+
+/**
+ * 现有派单用例默认挂到 #1 需求下；「无票不给计划」那条用 `runToolRaw` 绕开这层默认值。
+ */
+const runTool = async (name, args, workspaceDir) => {
+  const withRequirement =
+    name === "deck_dispatch_plan" && args && Array.isArray(args.tasks)
+      ? { ...args, tasks: args.tasks.map((task) => ({ requirementKey: 1, ...task })) }
+      : args;
+  return runToolRaw(name, withRequirement, workspaceDir);
 };
 
 test("deck_dispatch_plan：按难度给出客户端、标签和带抬头的提示词", async (t) => {
@@ -263,4 +282,445 @@ test("deck_handoff：没有 summary 就拒绝，不写空回传件", async (t) =
   const { isError, body } = await runTool("deck_handoff", { done: ["x"] }, dir);
   assert.equal(isError, true);
   assert.equal(body.reason, "invalid");
+});
+
+test("deck_dispatch_plan：名册非空却没写派给谁、也没写区域 → 拒绝，不猜一个人", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [{ id: "frontend", name: "前端", duty: "只改前端" }],
+      },
+    ],
+  });
+  const { body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
+  assert.equal(body.tasks.length, 0);
+  assert.equal(body.rejected[0].reason, "region-required");
+  assert.match(body.rejected[0].detail, /region/);
+});
+
+test("deck_dispatch_plan：不写 staff、只写 region → 归属算法选卡", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [
+          { id: "frontend", name: "前端", duty: "只改前端", paths: ["web"] },
+          { id: "backend", name: "后端", duty: "只改后端", paths: ["server"] },
+        ],
+      },
+    ],
+  });
+  const { body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p", region: { pathPrefix: "server/api" } }], depth: 1 },
+    dir,
+  );
+  assert.equal(body.tasks.length, 1);
+  assert.equal(body.tasks[0].staffId, "backend");
+});
+
+test("deck_dispatch_plan：显式 staff 优先于 region，不按区域改派", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [
+          { id: "frontend", name: "前端", duty: "只改前端", paths: ["web"] },
+          { id: "backend", name: "后端", duty: "只改后端", paths: ["server"] },
+        ],
+      },
+    ],
+  });
+  const { body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p", staff: "frontend", region: { pathPrefix: "server/api" } }], depth: 1 },
+    dir,
+  );
+  assert.equal(body.tasks[0].staffId, "frontend");
+});
+
+test("deck_dispatch_plan：region 没有任何卡覆盖 → 拒绝，不回落", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [{ id: "frontend", name: "前端", duty: "只改前端", paths: ["web"] }],
+      },
+    ],
+  });
+  const { body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p", region: { pathPrefix: "server/api" } }], depth: 1 },
+    dir,
+  );
+  assert.equal(body.tasks.length, 0);
+  assert.equal(body.rejected[0].reason, "region-unowned");
+});
+
+test("deck_dispatch_plan：写了名册里没有的 staff → unknown-staff", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [{ id: "frontend", name: "前端", duty: "只改前端" }],
+      },
+    ],
+  });
+  const { body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p", staff: "ghost" }], depth: 1 },
+    dir,
+  );
+  assert.equal(body.tasks.length, 0);
+  assert.equal(body.rejected[0].reason, "unknown-staff");
+});
+
+test("deck_dispatch_plan：派到卡上时，systemPrompt 与岗位名一起给出，票面也写明岗位", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [{ id: "frontend", name: "前端", duty: "只改前端，别碰后端" }],
+      },
+    ],
+  });
+  const { body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p", staff: "frontend" }], depth: 1 },
+    dir,
+  );
+  const [task] = body.tasks;
+  assert.equal(task.staffId, "frontend");
+  assert.equal(task.staffName, "前端");
+  assert.equal(task.systemPrompt, "只改前端，别碰后端");
+  assert.equal(task.labels["deck.staff"], "frontend");
+  assert.match(task.ticket.body, /岗位：前端/);
+});
+
+test("deck_dispatch_plan：没有名册的旧工作区，输出里不该多出字段", async (t) => {
+  const dir = await workspace(t, baseSettings);
+  const { body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
+  const [task] = body.tasks;
+  assert.equal(task.staffId, null);
+  assert.equal(task.systemPrompt, null);
+  assert.equal("deck.staff" in task.labels, false);
+  assert.equal(task.ticket.body.includes("岗位："), false);
+});
+
+test("deck_dispatch_plan：空名册照旧派，但计划里带一条「还没建名册」的警告", async (t) => {
+  const dir = await workspace(t, baseSettings);
+  const { body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
+  assert.equal(body.tasks.length, 1);
+  assert.ok(
+    body.warnings.some((line) => line.includes("还没建岗位名册")),
+    "空名册不拒绝，但必须说出来：否则人会以为自己在按人派活",
+  );
+});
+
+test("deck_dispatch_plan：有名册时不再带那条警告", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [{ id: "frontend", name: "前端" }],
+      },
+    ],
+  });
+  const { body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p", staff: "frontend" }], depth: 1 },
+    dir,
+  );
+  assert.equal(body.warnings.some((line) => line.includes("还没建岗位名册")), false);
+});
+
+test("deck_dispatch_plan：票面抬头写明工作区", async (t) => {
+  const dir = await workspace(t, baseSettings);
+  const { body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
+  assert.match(body.tasks[0].ticket.body, /- 工作区：`ws1`/);
+});
+
+test("deck_staff_request：员工要人落进与越界请求同一个收件箱", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [
+          { id: "frontend", name: "前端", paths: ["web"] },
+          { id: "backend", name: "后端", paths: ["server"] },
+        ],
+      },
+    ],
+  });
+  const previous = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "employee-1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+
+  const { isError, body } = await runTool(
+    "deck_staff_request",
+    {
+      task: "把登录接口的验证码校验补上",
+      why: "这块归后端，前端改不了",
+      staff: "backend",
+      region: { pathPrefix: "server/api" },
+      fromStaff: "frontend",
+    },
+    dir,
+  );
+  assert.equal(isError, false);
+  assert.equal(body.ok, true);
+  assert.equal(body.kind, "staffing");
+  assert.equal(body.state, "pending");
+  assert.equal(body.toStaff, "backend");
+  assert.deepEqual(body.paths, ["server/api"]);
+
+  const lines = (await readFile(join(dir, ".deck", "coordination.jsonl"), "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].kind, "staffing");
+  assert.equal(lines[0].workspaceId, "ws1");
+  assert.equal(lines[0].fromStaff, "frontend");
+  assert.equal(lines[0].toStaff, "backend");
+  assert.equal(lines[0].sessionAgentId, "employee-1");
+  assert.equal(lines[0].taskSummary, "把登录接口的验证码校验补上");
+  assert.equal(lines[0].need, "这块归后端，前端改不了");
+  assert.deepEqual(lines[0].paths, ["server/api"]);
+});
+
+test("deck_staff_request：名册里没有建议的卡 → 拒绝，不写收件箱", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [{ id: "frontend", name: "前端" }],
+      },
+    ],
+  });
+  const previous = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "employee-1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+
+  const { isError, body } = await runTool(
+    "deck_staff_request",
+    { task: "要人", why: "忙不过来", staff: "ghost" },
+    dir,
+  );
+  assert.equal(isError, true);
+  assert.equal(body.reason, "unknown-staff");
+  await assert.rejects(readFile(join(dir, ".deck", "coordination.jsonl"), "utf8"), /ENOENT/);
+});
+
+test("deck_staff_request：台账说是别人，就不能拿那张卡的名义发请求", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        dispatcherAgentId: "dispatch-1",
+        staff: [
+          { id: "frontend", name: "前端" },
+          { id: "backend", name: "后端" },
+        ],
+      },
+    ],
+  });
+  await writeFile(
+    join(dir, ".deck", "staff-sessions.jsonl"),
+    `${JSON.stringify({ agentId: "agent-real-1", staffId: "backend" })}\n`,
+    "utf8",
+  );
+  const previous = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "agent-real-1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+
+  const { isError, body } = await runTool(
+    "deck_staff_request",
+    { task: "要人", why: "忙不过来", fromStaff: "frontend" },
+    dir,
+  );
+  assert.equal(isError, true);
+  assert.equal(body.reason, "unknown-staff");
+  await assert.rejects(readFile(join(dir, ".deck", "coordination.jsonl"), "utf8"), /ENOENT/);
+});
+
+test("deck_staff_request：没有 PASEO_AGENT_ID 不冒充发起人", async (t) => {
+  const dir = await workspace(t, baseSettings);
+  const previous = process.env.PASEO_AGENT_ID;
+  delete process.env.PASEO_AGENT_ID;
+  t.after(() => {
+    if (previous !== undefined) process.env.PASEO_AGENT_ID = previous;
+  });
+
+  const { isError, body } = await runTool("deck_staff_request", { task: "要人", why: "忙不过来" }, dir);
+  assert.equal(isError, true);
+  assert.equal(body.reason, "no-agent-id");
+});
+
+test("deck_staff_request：缺「为什么」被参数校验挡住", async (t) => {
+  const dir = await workspace(t, baseSettings);
+  const { isError, body } = await runTool("deck_staff_request", { task: "要人" }, dir);
+  assert.equal(isError, true);
+  assert.equal(body.reason, "invalid");
+});
+
+test("deck_dispatch_plan：任务没挂需求票 → 不给计划", async (t) => {
+  const dir = await workspace(t, baseSettings);
+  const { body } = await runToolRaw(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p" }], depth: 1 },
+    dir,
+  );
+  assert.equal(body.tasks.length, 0);
+  assert.equal(body.rejected[0].reason, "no-requirement");
+  assert.match(body.rejected[0].detail, /无票不干活/);
+});
+
+test("deck_dispatch_plan：需求没打 deck:定稿 → 不给计划", async (t) => {
+  const dir = await workspace(t, baseSettings);
+  await replaceLocalLabels(dir, 1, ["requirement"]);
+  const { body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p" }], depth: 1 },
+    dir,
+  );
+  assert.equal(body.tasks.length, 0);
+  assert.equal(body.rejected[0].reason, "requirement-not-finalized");
+  assert.match(body.rejected[0].detail, /定稿/);
+});
+
+test("deck_dispatch_plan：员工卡调用在计划阶段就被拒，并指向 deck_staff_request", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [{
+      workspaceId: "ws1",
+      mainAgentId: "main-1",
+      dispatcherAgentId: "dispatch-1",
+      staff: [{ id: "frontend", name: "前端", kind: "worker" }],
+    }],
+  });
+  // 真实宿主里 `PASEO_AGENT_ID` 是会话 id，不是卡 id；靠 agent.created 写的台账反查。
+  await writeFile(
+    join(dir, ".deck", "staff-sessions.jsonl"),
+    `${JSON.stringify({ agentId: "agent-real-1", staffId: "frontend" })}\n`,
+    "utf8",
+  );
+  const previous = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "agent-real-1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+
+  const { isError, body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p" }], depth: 1 },
+    dir,
+  );
+  assert.equal(isError, true);
+  assert.equal(body.ok, false);
+  assert.equal(body.reason, "staff-cannot-dispatch");
+  assert.match(body.detail, /deck_staff_request/);
+});
+
+test("deck_dispatch_plan：认不出的调用者按非员工放行，不误杀", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [{
+      workspaceId: "ws1",
+      mainAgentId: "main-1",
+      dispatcherAgentId: "dispatch-1",
+      staff: [{ id: "frontend", name: "前端", kind: "worker" }],
+    }],
+  });
+  const previous = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "agent-with-no-ledger";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+
+  const { body } = await runTool(
+    "deck_dispatch_plan",
+    { tasks: [{ key: "t1", prompt: "p", staff: "frontend" }], depth: 1 },
+    dir,
+  );
+  assert.equal(body.ok, true);
+  assert.equal(body.tasks.length, 1);
+});
+
+const staffSettings = {
+  ...baseSettings,
+  roles: [{
+    workspaceId: "ws1",
+    mainAgentId: "main-1",
+    dispatcherAgentId: "dispatch-1",
+    staff: [{ id: "frontend", name: "前端", kind: "worker" }],
+  }],
+};
+
+test("deck_requirement_dispatch：默认只回清单，一个字节都不写", async (t) => {
+  const dir = await workspace(t, staffSettings);
+  const { isError, body } = await runToolRaw("deck_requirement_dispatch", { requirementNumber: 1 }, dir);
+  assert.equal(isError, false);
+  assert.equal(body.ok, true);
+  assert.equal(body.requiresConfirmation, true);
+  assert.equal(body.created, false);
+  assert.equal(body.execution, "list");
+  assert.equal(body.summary.length, 1);
+  assert.equal(body.summary[0].workspaceId, "ws1");
+  assert.equal(body.summary[0].staffId, "frontend");
+  assert.equal(body.summary[0].provider, "claude");
+  assert.equal(body.summary[0].sessions, 1);
+  // 需求本身是 #1；计划阶段不该多出 #2。
+  assert.equal((await getLocalIssue(dir, 2)).ok, false);
+});
+
+test("deck_requirement_dispatch：需求没定稿 → 拒绝，也不写票", async (t) => {
+  const dir = await workspace(t, staffSettings);
+  await replaceLocalLabels(dir, 1, ["requirement"]);
+  const { isError, body } = await runToolRaw("deck_requirement_dispatch", { requirementNumber: 1 }, dir);
+  assert.equal(isError, true);
+  assert.equal(body.ok, false);
+  assert.equal(body.reason, "not-finalized");
+  assert.equal((await getLocalIssue(dir, 2)).ok, false);
 });

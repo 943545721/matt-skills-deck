@@ -6,11 +6,12 @@ import type {
   repoTargetsRpc,
   workspaceAcknowledgeRpc,
   workspaceProjectsRpc,
+  workspaceProjectsSaveRpc,
   workspaceShapeRpc,
 } from "../../shared/repo.ts";
 import { readRepoInfo } from "../tracker/repo-info.ts";
 import { listWorkspaceProjects, listWorkspaceRepoTargets } from "../tracker/targets.ts";
-import { acknowledgeShape } from "../workspace/config-write.ts";
+import { acknowledgeShape, saveProjectList } from "../workspace/config-write.ts";
 import { detectWorkspaceShape } from "../workspace/shape.ts";
 import { readRepoCandidates, writeSelection } from "../tracker/workspace-repo.ts";
 
@@ -19,6 +20,7 @@ type RepoCandidatesInput = RpcInput<typeof repoCandidatesRpc>;
 type RepoSelectInput = RpcInput<typeof repoSelectRpc>;
 type RepoTargetsInput = RpcInput<typeof repoTargetsRpc>;
 type WorkspaceProjectsInput = RpcInput<typeof workspaceProjectsRpc>;
+type WorkspaceProjectsSaveInput = RpcInput<typeof workspaceProjectsSaveRpc>;
 type WorkspaceShapeInput = RpcInput<typeof workspaceShapeRpc>;
 type WorkspaceAcknowledgeInput = RpcInput<typeof workspaceAcknowledgeRpc>;
 
@@ -62,15 +64,28 @@ export async function repoSelectHandler(input: RepoSelectInput): Promise<RpcOutp
 }
 
 /**
- * 项目清单与磁盘实况：只读，不写配置。
+ * 项目清单与磁盘实况。
  *
- * 界面用它画「这些项目都在这」的列表、显示配置错误与漂移提示；
- * 写清单是人的事（或项目梳理技能给人确认后由人落笔），这里不代劳。
+ * 读是只读的：界面用它画「这些项目都在这」的列表、显示配置错误与漂移提示。
+ * 写清单走下面那条单独的 RPC，人在面板里按下保存才发生。
  */
 export async function workspaceProjectsHandler(
   input: WorkspaceProjectsInput,
 ): Promise<RpcOutput<typeof workspaceProjectsRpc>> {
   return listWorkspaceProjects(input.workspaceDir);
+}
+
+/**
+ * 保存项目清单（v2）：面板里唯一能改「工作区有哪些项目」的动作。
+ *
+ * 校验、备份、原子写、写完读回全在 `saveProjectList` 里做；这里只转一手。
+ * 失败按返回码下发（invalid / stale / write-failed），不抛异常——
+ * 界面要能逐条说清「哪一行哪一位不合规」，而不是弹一句 500。
+ */
+export async function workspaceProjectsSaveHandler(
+  input: WorkspaceProjectsSaveInput,
+): Promise<RpcOutput<typeof workspaceProjectsSaveRpc>> {
+  return saveProjectList(input.workspaceDir, input.projects, input.expectedFingerprint);
 }
 
 /**

@@ -171,14 +171,16 @@ test("编排状态：没配的难度行必须带 routeFrom，并进 warnings", a
   assert.ok(state.warnings.some((line) => line.includes("hard") && line.includes("借用")));
 });
 
-test("编排状态：一档路由都没有时，四档都标 default 且明说用内置默认目标", async (t) => {
+test("编排状态：一档路由都没有时，四档都标 default 并说明内置默认缺模型发不出去", async (t) => {
   const dir = await workspace(t);
   await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings({ routing: [] })), "utf8");
   const state = await readOrchestrationState(fakePaseo(), { workspaceId: "ws1", workspaceDir: dir });
   assert.equal(state.ok, true);
   for (const row of state.routing) {
     assert.equal(row.routeFrom, "default");
-    assert.equal(row.resolved.ok, true, "内置默认目标必须能解析出客户端");
+    // 内置默认只有客户端没有模型，宿主不认：界面上要如实标成「发不出去」，不能装作可用。
+    assert.equal(row.resolved.ok, false);
+    assert.equal(row.resolved.reason, "no-model");
   }
   assert.ok(state.warnings.some((line) => line.includes("内置默认目标")));
 });

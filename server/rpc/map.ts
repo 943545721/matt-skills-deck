@@ -160,6 +160,8 @@ export async function mapHandler(input: MapInput): Promise<RpcOutput<typeof mapR
       state: detail.issue.state,
     },
     map,
+    // 读路径已经把正文那行解析好了，地图页不必再看一遍 Markdown。
+    derivedFrom: detail.issue.derivedFrom ?? null,
     containerKind: containerKind === "spec" ? "spec" : "map",
     spec: containerKind === "spec" ? parseSpecBody(detail.issue.body) : null,
     route,

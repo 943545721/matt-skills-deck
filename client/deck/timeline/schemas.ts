@@ -15,6 +15,8 @@ export const promptActionSchema = z.enum([
   "takeover",
   "handoff",
   "new-requirement",
+  "discuss-wayfinder",
+  "discuss-grill",
   "bug",
   "custom",
 ]);

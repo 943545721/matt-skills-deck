@@ -14,6 +14,7 @@ import { repoTargetsRpc } from "../../shared/repo";
 import type { RequirementMode } from "../../shared/requirement";
 import { deckSettings } from "../../shared/settings";
 import { BoardView } from "./BoardView";
+import { NewIssueModal } from "./NewIssueModal";
 import { DiagnosticsView } from "./DiagnosticsView";
 import { LabelsView } from "./LabelsView";
 import { PixelButton, PixelScreen, usePixel } from "./pixel";
@@ -116,12 +117,13 @@ export function DeckPanel({ theme, layout, workspaceId, tab, navigation }: Plugi
   const toast = useToast();
   const [writeAllowed, setWriteAllowed] = useState(true);
   const lang: "zh" | "en" = zh ? "zh" : "en";
+  const [createOpen, setCreateOpen] = useState(false);
   const [entryOpen, setEntryOpen] = useState(false);
   const [entrySheet, setEntrySheet] = useState<{
     open: boolean;
     prompt: string;
     title: string;
-    /** 新建需求语义上就是新会话；地图动作等默认跟随当前选中会话。 */
+    /** 探讨需求语义上就是新会话；地图动作等默认跟随当前选中会话。 */
     defaultTarget?: "new";
   }>({
     open: false,
@@ -210,7 +212,7 @@ export function DeckPanel({ theme, layout, workspaceId, tab, navigation }: Plugi
         borderBottomWidth: 1,
         borderBottomColor: skin.colors.line,
       },
-      // DSH 页签行右端的两颗动作按钮：透明底、1px 描边、图标 + 文字（新建需求再带下箭头）。
+      // 页签行右端的动作按钮：透明底、1px 描边、图标 + 文字（会展开浮层的「探讨需求」带下箭头）。
       entryButton: {
         flexDirection: "row" as const,
         alignItems: "center" as const,
@@ -464,11 +466,12 @@ export function DeckPanel({ theme, layout, workspaceId, tab, navigation }: Plugi
           />
         ))}
         <View style={{ flex: 1 }} />
+        {/* 牌子归建票那条：这里真的建一张需求票，不是开一个会话。 */}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={copy.newRequirementTitle}
           disabled={!entryReady}
-          onPress={() => setEntryOpen(true)}
+          onPress={() => setCreateOpen(true)}
           style={({ pressed }) => [
             styles.entryButton,
             { borderColor: skin.colors.acc },
@@ -476,11 +479,29 @@ export function DeckPanel({ theme, layout, workspaceId, tab, navigation }: Plugi
             !entryReady ? { opacity: 0.5 } : null,
           ]}
         >
-          <Icon name="Map" size={11} color={skin.colors.acc} />
+          <Icon name="Plus" size={11} color={skin.colors.acc} />
           <Text style={[styles.entryButtonText, { color: skin.colors.acc }]} numberOfLines={1}>
             {copy.newRequirement}
           </Text>
-          <Icon name="ChevronDown" size={9} color={skin.colors.acc} />
+        </Pressable>
+        {/* 开会话 + 预填提示词的那条路改叫「探讨需求」：两张卡各是一种谈法。 */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={copy.discussRequirementTitle}
+          disabled={!entryReady}
+          onPress={() => setEntryOpen(true)}
+          style={({ pressed }) => [
+            styles.entryButton,
+            { borderColor: skin.colors.ink2 },
+            pressed ? { opacity: 0.72 } : null,
+            !entryReady ? { opacity: 0.5 } : null,
+          ]}
+        >
+          <Icon name="MessageSquare" size={11} color={skin.colors.ink2} />
+          <Text style={[styles.entryButtonText, { color: skin.colors.ink2 }]} numberOfLines={1}>
+            {copy.discussRequirement}
+          </Text>
+          <Icon name="ChevronDown" size={9} color={skin.colors.ink2} />
         </Pressable>
         <Pressable
           accessibilityRole="button"
@@ -517,6 +538,22 @@ export function DeckPanel({ theme, layout, workspaceId, tab, navigation }: Plugi
         onOpenChange={setEntryOpen}
         onPick={openEntry}
       />
+      {/* 「新建需求」落点：建票表单，类型预选探索需求。仓库清单与 /deck new 同一份 RPC。 */}
+      {directory ? (
+        <NewIssueModal
+          theme={theme}
+          workspaceDir={directory}
+          repos={(targets.data?.ok ? targets.data.repos : []).map((repo) => ({
+            key: repo.key,
+            name: repo.name,
+            readOnly: repo.readOnly,
+          }))}
+          defaultRepoKey={targets.data?.ok ? targets.data.defaultKey : null}
+          defaultMode="explore"
+          open={createOpen}
+          onClose={() => setCreateOpen(false)}
+        />
+      ) : null}
       <SessionSheet
         open={entrySheet.open}
         onOpenChange={(open) => setEntrySheet((current) => ({ ...current, open }))}

@@ -150,6 +150,13 @@ export const workspaceProjectsRpc = defineRpc({
   input: z.object({ workspaceDir: z.string().min(1) }),
   output: z.object({
     ok: z.literal(true),
+    /**
+     * 当前 `.paseo-deck.json` 的指纹（sha256；文件不存在是 `missing`）。
+     *
+     * 保存时带回来比对：两个窗口各开一份编辑器、后保存的那个会覆盖前一个，
+     * 一次指纹不合就报「清单已被别处改过」，而不是悄悄盖掉。
+     */
+    fingerprint: z.string(),
     /** v1 是「选了一个仓库」，v2 是项目清单，none 是没配或读不出来。 */
     kind: z.enum(["v1", "v2", "none"]),
     /** 配置坏了才非 null；没配（missing）不算错。 */
@@ -162,6 +169,61 @@ export const workspaceProjectsRpc = defineRpc({
     /** 配置读出来了，但有些项被忽略 / 兜底，值得人看一眼。 */
     warnings: z.array(z.string()),
   }),
+});
+
+/**
+ * 清单里的一行，编辑器直接改的就这么三个字段。
+ *
+ * 只收人真正要决定的东西：叫什么、在哪个目录、技能怎么装。`repo` / `owner` / `areas`
+ * 由项目梳理与标签同步经手，编辑器不碰——但它们已经在文件里的，保存时必须原样留着，
+ * 所以服务端按下标里的键与旧文件逐行合并，而不是整份重建。
+ */
+const projectDraft = z.object({
+  key: z.string().min(1).max(64),
+  dir: z.string().min(1).max(200),
+  /** `null` = 跟随工作区设置。 */
+  skillsMode: z.enum(SKILL_MODES).nullable(),
+});
+
+export type ProjectDraft = z.infer<typeof projectDraft>;
+
+/**
+ * 把项目清单写回 `.paseo-deck.json`。
+ *
+ * 这是面板里唯一能改「工作区有哪些项目」的入口：写入前逐行校验（键名、相对路径、
+ * 模式取值、键与目录都不许重复），旧文件先备份，落盘走临时文件 + rename，
+ * 写完再按读路径解析一遍核对。校验不过就一个字节都不写。
+ */
+export const workspaceProjectsSaveRpc = defineRpc({
+  name: "deck.workspace.projects.save",
+  input: z.object({
+    workspaceDir: z.string().min(1),
+    projects: z.array(projectDraft).max(50),
+    /**
+     * 读到的指纹。给了就比对：对不上报 `stale`，不写。
+     * 省略表示「不比对」——只给明确知道自己在覆盖旧文件的调用方用。
+     */
+    expectedFingerprint: z.string().optional(),
+  }),
+  output: z.discriminatedUnion("ok", [
+    z.object({
+      ok: z.literal(true),
+      /** 写入的文件绝对路径。 */
+      path: z.string(),
+      /** 旧文件的备份路径；之前没有文件时为 null。 */
+      backup: z.string().nullable(),
+      /** 写完之后这份文件的指纹，界面上再保存时带回来。 */
+      fingerprint: z.string(),
+      projects: z.array(projectDraft),
+      /** 不阻断、但要说出来的事：目录不存在、旧文件本来就读不出来、清单是空的。 */
+      warnings: z.array(z.string()),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["invalid", "stale", "write-failed"]),
+      detail: z.string(),
+    }),
+  ]),
 });
 
 /**

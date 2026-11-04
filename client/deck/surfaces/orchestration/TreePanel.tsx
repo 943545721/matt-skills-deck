@@ -47,6 +47,7 @@ export function TreePanel({
           {node.status ? ` · ${node.status}` : ""}
           {node.difficulty ? ` · ${t(DIFFICULTY_KEY[node.difficulty] as PanelKey)}` : ""}
           {node.ticketKey ? ` · #${node.ticketKey}` : ""}
+          {node.crossWorkspace ? ` · ${t("orch.crossWorkspace")}` : ""}
         </Text>
       </View>
       {node.children.map((child) => render(child, depth + 1))}

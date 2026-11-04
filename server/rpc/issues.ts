@@ -12,7 +12,7 @@ import { countBoard, filterBoard, sortBoard } from "../tracker/readiness.ts";
 import { mapsDerivedFrom } from "../tracker/derived.ts";
 import { mergeScopedLabels, resolveIssueProjectScope } from "../mcp/project-scope.ts";
 import { assertLabelsReadable } from "../tracker/label-guard.ts";
-import { createIssue, postComment, replaceLabels, setIssueState, takeIssue } from "../tracker/write.ts";
+import { createIssue, patchIssue, postComment, replaceLabels, setIssueState, takeIssue } from "../tracker/write.ts";
 import {
   closeGitLabIssue,
   createGitLabIssue,
@@ -27,10 +27,16 @@ import { readBoard, readIssue } from "../tracker/read.ts";
 import {
   createLocalIssue,
   localAssignUnsupported,
+  patchLocalIssue,
   postLocalComment,
   replaceLocalLabels,
   setLocalIssueState,
 } from "../tracker/local.ts";
+import { updateGitLabIssue } from "../tracker/gitlab.ts";
+import { labelNames } from "../../shared/issue-kind.ts";
+import { REQUIREMENT_LABEL, normalizeRequirementKey } from "../../shared/impact.ts";
+import { acceptanceRecordForClose, judgeCreateChainGate, requirementNumberOfBody } from "../chain-gates.ts";
+import type { TicketReader } from "../contract-chain.ts";
 import { record } from "../logs.ts";
 
 type ListInput = RpcInput<typeof issuesListRpc>;
@@ -42,6 +48,63 @@ type AssignInput = RpcInput<typeof issuesAssignRpc>;
 type StateInput = RpcInput<typeof issuesStateRpc>;
 
 const MAP_LABEL = "wayfinder:map";
+
+/** 测试注入点：读票器与时钟；生产不传，走真实后端与 `new Date()`。 */
+export interface IssueHandlerOptions {
+  readonly reader?: TicketReader;
+  readonly now?: () => Date;
+}
+
+/**
+ * RPC 注册层会把 `PluginHandlerContext` 作为第二个实参传进来；它不提供注入点。
+ * 这里只认显式带 `reader` / `now` 的调用（测试直接调 handler），其余一律当没传。
+ */
+function handlerOptions(context: unknown): IssueHandlerOptions {
+  if (!context || typeof context !== "object") return {};
+  const candidate = context as { readonly reader?: unknown; readonly now?: unknown };
+  return {
+    ...(typeof candidate.reader === "function" ? { reader: candidate.reader as TicketReader } : {}),
+    ...(typeof candidate.now === "function" ? { now: candidate.now as () => Date } : {}),
+  };
+}
+
+interface RequirementSource {
+  readonly number: number;
+  readonly repoKey: string;
+  readonly body: string;
+  readonly labels: readonly string[];
+}
+
+/**
+ * 读需求票正文 / 标签，供链条闸与验收票闸判定。
+ * 读不到就返回可读原因——建票调用方据此拒绝，不拿空正文冒充「没有链条」。
+ */
+async function readRequirementSource(
+  workspaceDir: string,
+  number: number,
+  repoKey: string,
+): Promise<{ ok: true; requirement: RequirementSource } | { ok: false; reason: string }> {
+  const read = await readIssue(workspaceDir, number, { repoKey });
+  if (!read.ok) return { ok: false, reason: `读不到需求票 #${number}：${read.detail}` };
+  if (!read.result.ok) return { ok: false, reason: `读不到需求票 #${number}：${read.result.detail}` };
+  const issue = read.result.issue;
+  return {
+    ok: true,
+    requirement: {
+      number,
+      repoKey: read.repoKey,
+      body: typeof issue.body === "string" ? issue.body : "",
+      labels: labelNames(issue.labels),
+    },
+  };
+}
+
+/** 关票日期只写日期，不带时区：`acceptanceRecordLine` 的既有写法就是 `YYYY-MM-DD`。 */
+function formatDay(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
 
 export async function listIssuesHandler(input: ListInput): Promise<RpcOutput<typeof issuesListRpc>> {
   const view = input.view ?? (input.includeClosed ? "all" : "open");
@@ -65,12 +128,21 @@ export async function listIssuesHandler(input: ListInput): Promise<RpcOutput<typ
   const counts = countBoard(afterLabel);
   const visible = filterBoard(read.issues, { view, kind: input.kind, label: input.label });
 
+  // 板子上把「地图来自哪条需求」当父子边用：需求行展开就是它建出的地图，
+  // 地图行展开是它自己的子票。不另做反查、不额外读板子——正文那一行已经在手上。
+  // 只在票面仍按引用讲（「来自需求 #19」），两边说的不是同一件事：一个管分组，一个管出处。
+  const rows = visible.map((issue) =>
+    issue.isMap && !issue.parentKey && typeof issue.derivedFrom === "number"
+      ? { ...issue, parentKey: String(issue.derivedFrom) }
+      : issue,
+  );
+
   return {
     ok: true,
     repo: read.repo,
     repos: read.repos,
     failures: read.failures,
-    issues: sortBoard(visible, input.sort ?? "updated"),
+    issues: sortBoard(rows, input.sort ?? "updated"),
     totalCount: read.totalCount,
     fetchedAt: read.fetchedAt,
     hasMore: read.hasMore,
@@ -105,8 +177,15 @@ export async function getIssueHandler(input: DetailInput): Promise<RpcOutput<typ
     commentCount: result.meta.commentCount,
     ...(result.parent === undefined ? {} : { parent: result.parent }),
     ...(result.children === undefined
-      ? {}
-      : { children: result.children, childrenTotal: result.childrenTotal ?? result.children.length }),
+      ? result.childrenProblem
+        ? { children: [], childrenTotal: 0, childrenTruncated: true, childrenProblem: result.childrenProblem }
+        : {}
+      : {
+          children: result.children,
+          childrenTotal: result.childrenTotal ?? result.children.length,
+          ...(result.childrenTruncated === true ? { childrenTruncated: true } : {}),
+          ...(result.childrenProblem ? { childrenProblem: result.childrenProblem } : {}),
+        }),
     ...(result.blocking === undefined ? {} : { blocking: result.blocking, blockingTruncated: result.blockingTruncated }),
     ...(reversed === null
       ? {}
@@ -138,7 +217,11 @@ export async function commentIssueHandler(input: CommentInput): Promise<RpcOutpu
   return { ok: true, comment: result.comment };
 }
 
-export async function createIssueHandler(input: CreateInput): Promise<RpcOutput<typeof issuesCreateRpc>> {
+export async function createIssueHandler(
+  input: CreateInput,
+  context?: unknown,
+): Promise<RpcOutput<typeof issuesCreateRpc>> {
+  const options = handlerOptions(context);
   const backend = await resolveWritableBackend(input.workspaceDir, "新建票", input.repoKey);
   if (!backend.ok) return backend;
 
@@ -171,6 +254,45 @@ export async function createIssueHandler(input: CreateInput): Promise<RpcOutput<
   const labels = [...(input.labels ?? [])];
   if ((input.isMap === true || input.kind === "map") && !labels.includes(MAP_LABEL)) labels.push(MAP_LABEL);
   const scopedLabels = mergeScopedLabels(labels, scope.scope.labels);
+
+  // 链条闸：需求里声明了链条就逐行判定；工作票挂在有链条的区域时还要求已认领的验收票。
+  // 只在这张票真的挂在某条需求下时才跑——历史上没有 requirementKey 的普通建票不因此被拦。
+  let chainWarnings: string[] = [];
+  const explicitRequirement = input.requirementKey === undefined
+    ? null
+    : normalizeRequirementKey(input.requirementKey);
+  if (input.requirementKey !== undefined && explicitRequirement === null) {
+    return {
+      ok: false,
+      reason: "invalid",
+      detail: `requirementKey「${String(input.requirementKey)}」不是有效票号；这张票没建。`,
+      repo: backend.repo,
+    };
+  }
+  const requirementNumber = explicitRequirement ?? requirementNumberOfBody(input.body);
+  if (requirementNumber !== null) {
+    const requirementRepoKey = input.requirementRepoKey ?? backend.key;
+    const loaded = await readRequirementSource(input.workspaceDir, requirementNumber, requirementRepoKey);
+    if (!loaded.ok) {
+      record("warn", "issues.create", loaded.reason);
+      return { ok: false, reason: "invalid", detail: `${loaded.reason}这张票没建。`, repo: backend.repo };
+    }
+    const chainGate = await judgeCreateChainGate({
+      workspaceDir: input.workspaceDir,
+      requirementBody: loaded.requirement.body,
+      requirementRepoKey: loaded.requirement.repoKey,
+      targetRepoKey: backend.key,
+      targetArea: input.area ?? backend.key,
+      position: input.kind ?? null,
+      ...(options.reader ? { reader: options.reader } : {}),
+    });
+    if (!chainGate.ok) {
+      record("warn", "issues.create", `链条闸拒绝：${chainGate.reason.slice(0, 200)}`);
+      return { ok: false, reason: "invalid", detail: `${chainGate.reason}这张票没建。`, repo: backend.repo };
+    }
+    chainWarnings = [...chainGate.warnings];
+    for (const warning of chainWarnings) record("warn", "issues.create", warning);
+  }
 
   const remoteInput = { title: input.title, body: input.body ?? "", labels: scopedLabels };
   // 本地后端的 bug 就是普通 issue；map/spec 及其子票才决定容器与子目录。
@@ -207,6 +329,7 @@ export async function createIssueHandler(input: CreateInput): Promise<RpcOutput<
     labelsFailed: result.labelsFailed,
     ...(localPath === undefined ? {} : { path: localPath }),
     ...(localReused === undefined ? {} : { reused: localReused }),
+    ...(chainWarnings.length ? { warnings: chainWarnings } : {}),
   };
 }
 
@@ -277,9 +400,43 @@ export async function assignIssueHandler(input: AssignInput): Promise<RpcOutput<
   return result;
 }
 
-export async function setIssueStateHandler(input: StateInput): Promise<RpcOutput<typeof issuesStateRpc>> {
+export async function setIssueStateHandler(
+  input: StateInput,
+  context?: unknown,
+): Promise<RpcOutput<typeof issuesStateRpc>> {
+  const options = handlerOptions(context);
   const backend = await resolveWritableBackend(input.workspaceDir, "关票", input.repoKey);
   if (!backend.ok) return backend;
+
+  // 关需求前先把正文与「挂着的验收票」读一遍：关票后票面仍要留下未验收痕迹。
+  // 读失败不挡关票——但必须变成 warning，不能当成「没有需求这回事」。
+  const warnings: string[] = [];
+  let pendingRecord: { readonly body: string; readonly append: string } | null = null;
+  if (input.state === "closed") {
+    const read = await readIssue(input.workspaceDir, input.number, {
+      ...(input.repoKey ? { repoKey: input.repoKey } : {}),
+    });
+    if (!read.ok) {
+      warnings.push(`关票前读不到这张票（${read.detail}），没有追加验收痕迹。`);
+    } else if (!read.result.ok) {
+      warnings.push(`关票前读不到这张票（${read.result.detail}），没有追加验收痕迹。`);
+    } else {
+      const issue = read.result.issue;
+      const isRequirement = labelNames(issue.labels).some((name) => name.toLowerCase() === REQUIREMENT_LABEL);
+      if (isRequirement) {
+        const body = typeof issue.body === "string" ? issue.body : "";
+        const judged = await acceptanceRecordForClose({
+          workspaceDir: input.workspaceDir,
+          requirementBody: body,
+          requirementRepoKey: read.repoKey,
+          closedOn: formatDay((options.now ?? (() => new Date()))()),
+          ...(options.reader ? { reader: options.reader } : {}),
+        });
+        warnings.push(...judged.warnings);
+        if (judged.append) pendingRecord = { body, append: judged.append };
+      }
+    }
+  }
 
   const result =
     backend.kind === "local"
@@ -293,6 +450,29 @@ export async function setIssueStateHandler(input: StateInput): Promise<RpcOutput
     record("error", "issues.state", `#${input.number} 状态改为 ${input.state} 失败：${result.detail.slice(0, 200)}`);
     return result;
   }
+
+  // 关票已经成功：痕迹写不进去只提示，不回滚、不把「已关」说成失败。
+  if (pendingRecord) {
+    const body = `${pendingRecord.body.replace(/\s+$/, "")}\n\n${pendingRecord.append}\n`;
+    const patched =
+      backend.kind === "local"
+        ? await patchLocalIssue(backend.workspaceDir, input.number, { body })
+        : backend.kind === "gitlab"
+          ? await updateGitLabIssue(backend.ref.owner, backend.ref.name, input.number, { body })
+          : await patchIssue(backend.ref.owner, backend.ref.name, input.number, { body });
+    if (!patched.ok) {
+      const warning = `票已关闭，但验收痕迹没写成：${patched.detail.slice(0, 200)}`;
+      warnings.push(warning);
+      record("warn", "issues.state", `#${input.number} ${warning}`);
+    } else {
+      record("info", "issues.state", `#${input.number} 已在正文追加「${pendingRecord.append}」`);
+    }
+  }
+
   record("info", "issues.state", `#${input.number} 已${input.state === "closed" ? "关闭" : "重开"}`);
-  return result;
+  return {
+    ok: true,
+    state: result.state,
+    ...(warnings.length ? { warnings } : {}),
+  };
 }

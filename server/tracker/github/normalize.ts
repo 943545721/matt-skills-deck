@@ -1,3 +1,4 @@
+import { parseDerivedFrom } from "../../../shared/derived.ts";
 import type { BlockerRef, ItemKind, Readiness } from "../../../shared/issues.ts";
 import { readinessOf } from "../readiness.ts";
 
@@ -178,7 +179,9 @@ export function normalizeIssue(raw: unknown, options: NormalizeOptions = {}): No
     number,
     title: asString(node.title, `#${number}`),
     state,
-    url: asString(node.url) || asString(node.html_url),
+    // `html_url` 优先：REST 回包里的 `url` 是 `api.github.com/...` 的接口地址，
+    // 拿它当「打开远端」的链接会把人带到一段 JSON。GraphQL 只有 `url`，那边本身就是网页地址。
+    url: asString(node.html_url) || asString(node.url),
     createdAt: asString(node.createdAt) || asString(node.created_at) || asString(node.updatedAt),
     updatedAt: asString(node.updatedAt) || asString(node.updated_at),
     labels,
@@ -204,6 +207,8 @@ export function normalizeIssue(raw: unknown, options: NormalizeOptions = {}): No
     // PR 三字段与 DSH 同口径：来源没有内容时也给空值，不省略（界面不必区分「没有」与「没查」）。
     ...(kind === "pull-request" ? { mergedAt, reviews: normalizeReviews(node) } : {}),
     ...(options.withBody ? { body: asString(node.body) } : {}),
+    // 引用边只从正文里读：没读正文就不给这一位，别把「没读」写成「没有」。
+    ...(options.withBody ? { derivedFrom: parseDerivedFrom(asString(node.body)) } : {}),
   };
 }
 

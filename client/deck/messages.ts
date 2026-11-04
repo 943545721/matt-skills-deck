@@ -27,6 +27,7 @@ export const en = {
     loading: "Loading…",
     cancel: "Cancel",
     save: "Save",
+    saving: "Saving…",
     copy: "Copy",
     close: "Close",
     unknownWorkspace: "Workspace directory unknown",
@@ -145,6 +146,7 @@ export const en = {
     empty: "No issues yet — hit New issue to write one.",
     emptyAfterFailure: "Fix the cause above and refresh; no need to reopen the panel",
     map: "Map",
+    spec: "Spec",
     closed: "Closed",
     current: "Current",
     assignees: "Assigned to {{names}}",
@@ -314,6 +316,11 @@ export const en = {
     debugSection: "Diagnostics",
     debugLabel: "Keep debug logs",
     debugHint: "Turning this off stops new log entries; existing entries stay readable.",
+    permissionsSection: "Permissions",
+    autoAllowLabel: "Auto-approve tool permission requests",
+    autoAllowHint: "When on, tool requests from sessions in workspaces that have deck tools are approved by the plugin instead of waiting for you.",
+    autoAllowWarning: "Careful: clients like Cursor do not tell the host which tool a request is for, so approval covers the whole session — file edits and shell commands included. Plans, questions and mode switches are never auto-approved.",
+    autoAllowOn: "Auto-approve is on: tool requests in these workspaces no longer prompt — file edits and shell commands included.",
     updateSection: "Updates",
     updateInfo: "The check looks at release tags; installing is still your command to run.",
     updateLabel: "Version check",
@@ -350,6 +357,7 @@ export const en = {
 
   new: {
     title: "New issue",
+    noWorkspace: "This page needs a workspace: open one, then run /deck new there.",
     titleField: "Title",
     bodyField: "Body (Markdown)",
     notesField: "Notes (appended after the six-part skeleton)",
@@ -359,7 +367,9 @@ export const en = {
     repoLabel: "Repository",
     noWritable: "Every repository here is read-only, so a new issue cannot be created from the board.",
     modeIssue: "Plain issue",
-    modeHint: "A requirement starts with a six-part skeleton; your notes go under it.",
+    modeExplore: "Explore requirement",
+    modeImplement: "Implementation requirement",
+    modeHint: "A requirement starts with a six-part skeleton and an impact table, and carries the requirement label; your notes go under it.",
     kindLabel: "Kind",
     kindBug: "+ Bug",
     needExploreBrow: "Explore map",
@@ -488,6 +498,29 @@ export const en = {
     projectProblem: "Project folder: {{problem}}",
     updateSummary: "{{written}} written, {{skipped}} skipped, {{conflicts}} conflicts, {{backups}} backups",
     updateNothing: "Nothing to write",
+  },
+
+  /** 项目清单编辑器：面板里唯一能改「工作区有哪些项目」的地方。 */
+  projectsEditor: {
+    open: "Edit project list",
+    openHint: "Add or remove projects and set each one's skill mode; press Update all afterwards to write into those folders.",
+    title: "Project list",
+    intro: "One line per project. The key is lowercase letters, digits and hyphens; the folder is a path inside the workspace root. Skills install per project row.",
+    colKey: "Key",
+    colDir: "Folder",
+    modeFollow: "Follow setting",
+    modeUnified: "Unified",
+    modePerProject: "Per project",
+    addRow: "Add project",
+    removeRow: "Remove",
+    fillFromScan: "Add {{n}} scanned repo(s)",
+    empty: "No projects yet. Add a row, or pull in the repos scanned under the workspace root.",
+    v1Note: "This file is v1 (a single repoDir). Saving turns it into a v2 project list; the old file is backed up first.",
+    noneNote: "No .paseo-deck.json yet: the workspace is read as a single repo. Saving creates one.",
+    brokenNote: "The current file cannot be read ({{detail}}). Saving replaces it as a whole; the old file stays in the backup.",
+    target: "Writes to: {{dir}}/.paseo-deck.json (the old file is backed up next to it)",
+    saved: "Project list saved",
+    savedWithBackup: "Project list saved. Backup: {{dir}}",
   },
 
   labels: {
@@ -769,6 +802,7 @@ export const zh: SameShape<typeof en> = {
     loading: "读取中…",
     cancel: "取消",
     save: "保存",
+    saving: "保存中…",
     copy: "复制",
     close: "关闭",
     unknownWorkspace: "工作区目录未知",
@@ -888,6 +922,7 @@ export const zh: SameShape<typeof en> = {
     empty: "这个仓库还没有票，点「新建工单」写一张。",
     emptyAfterFailure: "修好后点刷新即可，不需要重开面板",
     map: "地图",
+    spec: "规格",
     closed: "已关闭",
     current: "当前票",
     assignees: "指派给 {{names}}",
@@ -1057,6 +1092,11 @@ export const zh: SameShape<typeof en> = {
     debugSection: "诊断",
     debugLabel: "保留调试日志",
     debugHint: "关掉后不再累积新日志；已有日志仍可读。",
+    permissionsSection: "权限",
+    autoAllowLabel: "自动放行工具权限请求",
+    autoAllowHint: "打开后，装过 deck 工具的工作区里，会话发出的工具请求由插件直接同意，不再等你点。",
+    autoAllowWarning: "注意：Cursor 这类客户端的权限请求在宿主里分不出是哪个工具，所以放行的是整个会话——改文件、跑命令也一样自动同意。方案、提问、切换模式不会被自动同意。",
+    autoAllowOn: "自动放行已开启：这些工作区里的工具请求不再弹窗，改文件、跑命令也一样。",
     updateSection: "更新",
     updateInfo: "检查只看发布 tag；安装仍是你自己执行的命令。",
     updateLabel: "版本检查",
@@ -1093,6 +1133,7 @@ export const zh: SameShape<typeof en> = {
 
   new: {
     title: "新建票",
+    noWorkspace: "这一页要先有工作区：打开一个工作区，再在那里运行 /deck new。",
     titleField: "标题",
     bodyField: "正文（支持 Markdown）",
     notesField: "备注（附在六节骨架后面）",
@@ -1102,7 +1143,9 @@ export const zh: SameShape<typeof en> = {
     repoLabel: "仓库",
     noWritable: "这个工作区里的仓库都是只读的，没法从任务板新建票。",
     modeIssue: "普通票",
-    modeHint: "需求会先铺好六步骨架，你写的备注附在下面。",
+    modeExplore: "探索需求",
+    modeImplement: "实施需求",
+    modeHint: "需求型会先铺好六节骨架和影响面表，并带上 requirement 标签；你写的备注附在下面。",
     kindLabel: "类型",
     kindBug: "+ 缺陷",
     needExploreBrow: "探索地图",
@@ -1231,6 +1274,29 @@ export const zh: SameShape<typeof en> = {
     projectProblem: "项目目录：{{problem}}",
     updateSummary: "已装 {{written}}，跳过 {{skipped}}，冲突 {{conflicts}}，备份 {{backups}}",
     updateNothing: "没有需要写入的技能",
+  },
+
+  /** 项目清单编辑器：面板里唯一能改「工作区有哪些项目」的地方。 */
+  projectsEditor: {
+    open: "编辑项目清单",
+    openHint: "增删项目、改每个项目的技能模式；加完行要按「全部更新」才会写进对应目录。",
+    title: "项目清单",
+    intro: "一行一个项目。项目键用小写字母、数字与连字符；目录写工作区内的相对路径。技能按项目行分别安装。",
+    colKey: "项目键",
+    colDir: "目录",
+    modeFollow: "跟随设置",
+    modeUnified: "统一",
+    modePerProject: "各自",
+    addRow: "加一行",
+    removeRow: "删除",
+    fillFromScan: "补入 {{n}} 个扫到的仓库",
+    empty: "还没有项目。加一行，或把工作区根目录下扫到的仓库直接补进来。",
+    v1Note: "这份文件是 v1（只有一个 repoDir）。保存会把它升成 v2 项目清单，旧文件先备份。",
+    noneNote: "这里还没有 .paseo-deck.json：整个工作区按单个仓库读。保存会新建一份。",
+    brokenNote: "当前文件读不出来（{{detail}}）。保存会整份替换，旧文件留在备份里。",
+    target: "写入：{{dir}}/.paseo-deck.json（旧文件备份在同一个目录）",
+    saved: "项目清单已保存",
+    savedWithBackup: "项目清单已保存。备份：{{dir}}",
   },
 
   labels: {
@@ -1487,3 +1553,32 @@ export const zh: SameShape<typeof en> = {
     staleBlocker: "被 {{refs}} 阻塞，但对方仓库的这张票读不到：仍按阻塞算，不算已解除。",
   },
 };
+
+/**
+ * 标签徽标的显示写法（中文）。
+ *
+ * 标签真名是仓库里的数据，不改写；这里只给插件与技能约定过的固定标签一个显示名。
+ * 英文界面直接用真名（标签名本身就是英文），所以不另存一份英文副本。
+ * 认不出的标签由 `client/deck/labelText.ts` 原样返回，不猜意思。
+ */
+export const LABEL_TEXT_ZH: Readonly<Record<string, string>> = Object.freeze({
+  requirement: "需求",
+  bug: "缺陷",
+  enhancement: "增强",
+  "needs-triage": "待分诊",
+  "needs-info": "待补充",
+  "ready-for-agent": "可交给代理",
+  "ready-for-human": "需人工",
+  wontfix: "不修",
+  "wayfinder:map": "地图",
+  "wayfinder:research": "研究",
+  "wayfinder:prototype": "原型",
+  "wayfinder:grilling": "讨论",
+  "wayfinder:task": "任务",
+  "difficulty:trivial": "难度：简单",
+  "difficulty:normal": "难度：常规",
+  "difficulty:hard": "难度：困难",
+  "difficulty:critical": "难度：关键",
+  difficulty: "难度",
+  client: "客户端",
+});

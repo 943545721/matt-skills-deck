@@ -153,8 +153,15 @@ test("地图写法大小写不敏感：配置写大写，派单写小写也认",
 /** 假宿主：建会话必成，会话清单由 `agents` 给。 */
 function fakePaseo({ agents = [] } = {}) {
   const created = [];
+  /** 每条会话落进哪条工作区；`null` 表示走了裸 create。 */
+  const createdIn = [];
+  const create = async (options) => {
+    created.push(options);
+    return { id: `child-${created.length}` };
+  };
   return {
     created,
+    createdIn,
     config: {
       get: async () => ({ config: {} }),
       patch: async () => ({ config: {} }),
@@ -162,9 +169,21 @@ function fakePaseo({ agents = [] } = {}) {
     agents: {
       list: async () => ({ entries: agents.map((agent) => ({ agent })) }),
       create: async (options) => {
-        created.push(options);
-        return { id: `child-${created.length}` };
+        createdIn.push(null);
+        return create(options);
       },
+    },
+    // 派单按工作区句柄建会话（裸 cwd 会让宿主再登记一条同名工作区），假宿主也得有这条路径。
+    workspaces: {
+      ref: (workspaceId) => ({
+        id: workspaceId,
+        agents: {
+          create: async (options) => {
+            createdIn.push(workspaceId);
+            return create(options);
+          },
+        },
+      }),
     },
   };
 }
@@ -230,6 +249,8 @@ test("执行层：已关闭的子会话不占名额；开着的不带地图标�
   assert.equal(paseo.created.length, 1);
   // 新建的子会话必须带上地图标，否则下一次派单照样数不到。
   assert.equal(paseo.created[0].labels[DECK_MAP_LABEL], "#2");
+  // 落进这条工作区，否则宿主会为同一目录再登记一条同名工作区。
+  assert.deepEqual(paseo.createdIn, ["ws-1"]);
 });
 
 test("执行层：读不到会话清单时明说「这次只按本批算」，不装作拦住了", async () => {

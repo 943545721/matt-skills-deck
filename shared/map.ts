@@ -137,6 +137,12 @@ export const mapRpc = defineRpc({
         state: z.enum(["OPEN", "CLOSED"]),
       }),
       map: mapBody,
+      /**
+       * 这张地图是从哪条需求长出来的（正文 `Derived from: #19` 那一行）。
+       *
+       * null 表示正文里没有这一行，不代表「没有需求」；地图页只在有值时多画一行。
+       */
+      derivedFrom: z.number().int().nullable(),
       containerKind: z.enum(["map", "spec"]),
       spec: specBody.nullable(),
       route: z.array(routeItem),

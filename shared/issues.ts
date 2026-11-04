@@ -274,6 +274,10 @@ export const issuesDetailRpc = defineRpc({
       children: z.array(relatedIssue).optional(),
       /** 子票总数：大于 children.length 时界面要如实说「只显示了前 N 张」。 */
       childrenTotal: z.number().int().optional(),
+      /** 后端明说子票清单被截断（总数可能不可得）：界面不能把列出的张数当成全集。 */
+      childrenTruncated: z.boolean().optional(),
+      /** 子票清单读不回来的原因：界面要显示「读取失败」，不能显示成「没有子票」。 */
+      childrenProblem: z.string().optional(),
       /**
        * 反查：哪些地图票的正文写着 `Derived from: #这张票`。
        *
@@ -347,6 +351,13 @@ export const issuesCreateRpc = defineRpc({
      */
     project: z.string().min(1).max(64).optional(),
     area: z.string().min(1).max(32).optional(),
+    /**
+     * 工作票挂在哪条需求下。面板建票历史上不传这一位；给了才跑链条闸与验收票闸，
+     * 不给时仍从正文 `Refs: #N` 反推（兼容既有调用）。
+     */
+    requirementKey: z.union([z.number().int().min(0), z.string().min(1).max(32)]).optional(),
+    /** 需求票所在仓库；跨仓库时不能拿子票仓库冒充。 */
+    requirementRepoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
     z.object({
@@ -362,6 +373,8 @@ export const issuesCreateRpc = defineRpc({
       path: z.string().optional(),
       /** 幂等回查命中了已有的票，这次没有新建。 */
       reused: z.boolean().optional(),
+      /** 链条闸的非阻断提示（跨仓库未声明链条等）。 */
+      warnings: z.array(z.string()).optional(),
     }),
     failure,
   ]),
@@ -408,7 +421,12 @@ export const issuesStateRpc = defineRpc({
     repoKey: z.string().min(1).max(200).optional(),
   }),
   output: z.discriminatedUnion("ok", [
-    z.object({ ok: z.literal(true), state: itemState }),
+    z.object({
+      ok: z.literal(true),
+      state: itemState,
+      /** 关票照常放行，但验收痕迹没写成 / 读不到验收票时的提示。 */
+      warnings: z.array(z.string()).optional(),
+    }),
     failure,
   ]),
 });

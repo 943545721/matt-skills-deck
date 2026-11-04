@@ -16,9 +16,12 @@ import {
 import { repoTargetsRpc } from "../../../shared/repo";
 import { sessionLedgerRpc } from "../../../shared/session-rpc";
 import { clockText, readableText } from "../format";
+import { labelDisplayName } from "../labelText";
 import type { IssueEventKind } from "./issueTimeline";
 import { buildIssueTimeline, firstLine, isTicketOf } from "./issueTimeline";
 import type { WorkRouteStatus } from "../../../shared/work-route.ts";
+import { DECK_FINALIZE_LABEL, finalizeProblem, REQUIREMENT_LABEL } from "../../../shared/impact.ts";
+import { acceptanceTicketNumberOf, hasPendingAcceptanceRecord } from "../../../shared/contract-chain.ts";
 import type { PanelKey } from "./panelText";
 
 /** 时间线里的事件类别 → 文案键。 */
@@ -40,6 +43,7 @@ const TIMELINE_STATUS_KEY: Record<WorkRouteStatus, PanelKey> = {
 import { FAILURE_KEYS, staticText, useDeckText } from "../i18n";
 import { PixelBanner, PixelButton, PixelCard, PixelHead, PixelStatusLine, usePixel } from "../pixel";
 import { buildIssuePrompt } from "./issuePrompt";
+import { RequirementDispatchButton } from "./RequirementDispatchButton.tsx";
 import { usePanelText } from "./panelText";
 import { SessionSheet } from "../session/SessionSheet.tsx";
 import type { SessionNavigation } from "../session/SessionSheet.tsx";
@@ -147,9 +151,26 @@ export function IssueDetailView({
   };
   const issue = detail.data?.ok ? detail.data.issue : null;
   const isPullRequest = kind === "pull-request";
+  /**
+   * 验收痕迹：正文里持久写着「验收：未验收」，或需求票挂着的验收票还开着。
+   * 前者关票后仍然在正文里，所以标记关票后照样可见；后者只在验收票开着时出现。
+   * 只读、不改票：读不到验收票就不标（不把「不知道」说成「未验收」）。
+   */
+  const pendingAcceptanceLine = issue ? hasPendingAcceptanceRecord(issue.body) : false;
+  const acceptanceNumber = issue ? acceptanceTicketNumberOf(issue.body) : null;
+  const acceptance = useQuery({
+    queryKey: ["deck", "issue-acceptance", workspaceDir, repoKey, acceptanceNumber],
+    queryFn: () => readDetail({ workspaceDir, repoKey, number: acceptanceNumber as number, kind: "issue" }),
+    enabled: Boolean(issue && acceptanceNumber !== null && !pendingAcceptanceLine && !isPullRequest),
+  });
   const readOnly = isPullRequest || Boolean(target?.readOnly);
   const canWrite = allowWrite && !readOnly;
   const labelsTruncated = issue ? issue.labelCount > issue.labels.length : false;
+  /** 定稿按钮只长在需求票上，而且只在没定稿时露出。 */
+  const isRequirement = Boolean(issue?.labels.some((label) => label.name.toLowerCase() === REQUIREMENT_LABEL));
+  const finalized = Boolean(
+    issue?.labels.some((label) => label.name.toLowerCase() === DECK_FINALIZE_LABEL.toLowerCase()),
+  );
   const commentsTruncated = detail.data?.ok ? detail.data.commentCount > detail.data.comments.length : false;
 
   const sessions = issue && ledger.data?.ok
@@ -209,6 +230,22 @@ export function IssueDetailView({
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
   });
 
+  /**
+   * 定稿：给需求票补一枚 `deck:定稿`。
+   *
+   * 这是**唯一**该标签的合法来源——MCP 工具会拒绝 `deck:` 前缀，模型不能给自己发许可证。
+   * 点之前先核影响面：表坏了 / 依据空着 / 「要动」没写核的人，都在这里挡下并说清哪一行。
+   */
+  const finalizeRequirement = (): void => {
+    if (!issue) return;
+    const problem = finalizeProblem(issue.body, targets.data?.ok ? targets.data.repos.map((repo) => repo.key) : []);
+    if (problem) {
+      toast.show(`${t("issue.finalizeBlocked")}：${problem}`, { variant: "error" });
+      return;
+    }
+    labelsMutation.mutate([...issue.labels.map((label) => label.name), DECK_FINALIZE_LABEL]);
+  };
+
   const assignMutation = useMutation({
     mutationFn: (take: boolean) => assign({ workspaceDir, repoKey, number, take }),
     onSuccess: (result) => {
@@ -240,7 +277,7 @@ export function IssueDetailView({
           detail: `${failText(closed.reason, closed.detail)}${reason ? `；${t("issue.closeHint")}` : ""}`,
         };
       }
-      return { step: "done" as const, detail: "" };
+      return { step: "done" as const, detail: "", warnings: closed.warnings ?? [] };
     },
     onSuccess: (result) => {
       if (result.step !== "done") {
@@ -249,7 +286,12 @@ export function IssueDetailView({
         return;
       }
       setComment("");
-      toast.show(t("issue.closeDone"), { variant: "success" });
+      // 关票成功但验收痕迹没写成（或验收票读不到）：不能只说「关闭完成」，否则用户以为正文已留痕。
+      if (result.warnings.length) {
+        toast.show(`${t("issue.closeDone")}；${result.warnings.join("；")}`, { variant: "warning" });
+      } else {
+        toast.show(t("issue.closeDone"), { variant: "success" });
+      }
       invalidate();
     },
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
@@ -314,6 +356,17 @@ export function IssueDetailView({
       spacer: { marginLeft: "auto" as const },
       title: { color: skin.colors.ink, fontSize: 15, fontWeight: "700" as const, lineHeight: 21 },
       meta: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily, lineHeight: 16 },
+      acceptance: {
+        fontSize: 10,
+        lineHeight: 16,
+        paddingHorizontal: 6,
+        overflow: "hidden" as const,
+        borderWidth: 1,
+        borderColor: skin.colors.line,
+        color: skin.colors.warn,
+        fontFamily: skin.mono.fontFamily,
+        fontWeight: "700" as const,
+      },
       hint: skin.hint,
       error: skin.error,
       onScreen: skin.hintOnChecker,
@@ -369,6 +422,14 @@ export function IssueDetailView({
   if (!issue) return <Text style={styles.onScreen}>{t("common.empty")}</Text>;
 
   const isClosed = issue.state === "CLOSED";
+  const acceptancePending =
+    pendingAcceptanceLine
+    || (acceptance.data?.ok === true && acceptance.data.issue.state === "OPEN");
+  /** 「不知道」不能标成「未验收」，但也不能静默：读失败单独说一句。 */
+  const acceptanceUnreadable =
+    acceptanceNumber !== null
+    && !pendingAcceptanceLine
+    && (acceptance.isError || (acceptance.data !== undefined && !acceptance.data.ok));
   const parent = detail.data.parent;
   /** 地图票正文里的 `Derived from: #N`：它来自哪条需求。 */
   const derivedFrom = issue?.derivedFrom ?? null;
@@ -377,6 +438,8 @@ export function IssueDetailView({
   const derivedMapsFailed = detail.data.derivedMapsFailed === true;
   const children = detail.data.children ?? [];
   const childrenTotal = detail.data.childrenTotal ?? children.length;
+  const childrenCut = detail.data.childrenTruncated === true;
+  const childrenProblem = detail.data.childrenProblem ?? "";
   const blocking = detail.data.blocking ?? [];
   const blockingTruncated = detail.data.blockingTruncated === true;
   // 原生边（本仓库、远端认得的）与正文固定行里的跨仓库引用分列：
@@ -393,6 +456,7 @@ export function IssueDetailView({
           #{issue.number} {issue.title}
         </Text>
         <View style={styles.spacer} />
+        {acceptancePending ? <Text style={styles.acceptance}>{t("issue.acceptancePending")}</Text> : null}
         <Text style={[styles.label, { backgroundColor: isClosed ? skin.colors.stripe : skin.colors.okBg, color: isClosed ? skin.colors.ink2 : skin.colors.ok }]}>
           {issue.merged ? text.t("issue.merged") : isClosed ? t("issue.stateClosed") : t("issue.stateOpen")}
         </Text>
@@ -406,6 +470,9 @@ export function IssueDetailView({
         {t("issue.updated", { date: clockText(issue.updatedAt) })}
         {issue.assignees.length ? ` · ${t("issue.assigned", { names: issue.assignees.join(", ") })}` : ""}
       </Text>
+      {acceptanceUnreadable ? (
+        <Text style={styles.hint}>{t("issue.acceptanceUnreadable", { number: acceptanceNumber ?? 0 })}</Text>
+      ) : null}
 
       {!allowWrite && !readOnly ? <PixelBanner skin={skin} tone="warning"><Text style={styles.hint}>{t("issue.writePaused")}</Text></PixelBanner> : null}
       {readOnly ? (
@@ -417,9 +484,10 @@ export function IssueDetailView({
           {issue.labels.map((label) => (
             <Text
               key={label.name}
+              accessibilityLabel={label.name}
               style={[styles.label, { backgroundColor: `#${label.color}`, color: readableText(label.color) }]}
             >
-              {label.name}
+              {labelDisplayName(label.name, text.locale)}
             </Text>
           ))}
         </View>
@@ -620,6 +688,14 @@ export function IssueDetailView({
           </View>
         </PixelCard>
       ) : null}
+      {/* 清单被截断 / 读失败时即使一张都没列出来也要说，不能显示成「没有子票」。 */}
+      {childrenCut && childrenTotal <= children.length ? (
+        <Text style={styles.hint}>
+          {childrenProblem
+            ? t("issue.childrenUnreadable", { reason: childrenProblem })
+            : t("issue.childrenCut", { shown: children.length })}
+        </Text>
+      ) : null}
 
       <View style={styles.actions}>
         <PixelButton
@@ -697,7 +773,33 @@ export function IssueDetailView({
             disabled={!canWrite || labelsTruncated}
             onPress={() => setLabelDraft(issue.labels.map((label) => label.name).join(", "))}
           />
+          {isRequirement && !finalized ? (
+            <PixelButton
+              skin={skin}
+              active
+              label={t("issue.finalize")}
+              disabled={!canWrite || busy || labelsMutation.isPending}
+              onPress={finalizeRequirement}
+            />
+          ) : null}
         </View>
+      ) : null}
+
+      {/* 定稿之后才出现：没定稿就拆票，等于按一份还在改的图纸开工。 */}
+      {isRequirement && !isPullRequest ? (
+        <RequirementDispatchButton
+          theme={theme}
+          workspaceId={workspaceId}
+          workspaceDir={workspaceDir}
+          requirementNumber={number}
+          requirementRepoKey={repoKey}
+          finalized={finalized}
+          disabled={!canWrite}
+          onDispatched={() => {
+            void queryClient.invalidateQueries({ queryKey: ["deck", "issues", workspaceDir] });
+            void queryClient.invalidateQueries({ queryKey: ["deck", "issue", workspaceDir, repoKey, kind, number] });
+          }}
+        />
       ) : null}
 
       {labelsTruncated ? (
