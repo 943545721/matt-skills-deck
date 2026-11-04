@@ -2,6 +2,56 @@
 
 日期：2026-11-03　分支：`feat/multi-project-workspace`
 
+> **落地状态：2026-11-04** —— 代码全部写完；能自动跑的验收全绿；要人点的五条**还没做**。详见下一节。
+
+## 落地状态（2026-11-04）
+
+**六批 + 派单台 + 阀门四全部落地。验收分两档，别把两档混着说。**
+
+- **提交**：`584940b`，本地提交，**未推送**。它与本分支的多项目工作区、群视图合成一个检查点——
+  跨块文件（`panelText.tsx`、`OrchestrationView.tsx`、`register.ts`、`server/orchestration.ts`）
+  三块都碰，拆开提中间状态单独编不过。
+- **自动档（已做，全绿）**：`npm run typecheck` 通过；`npm test` **1582 条通过 / 0 失败**
+  （本批落地时是 1533 条 / 124 个测试文件；之后「名册与群记录按目录 + 一个项目一个群」又加到
+  **128 个测试文件**，2026-11-04 重跑全绿）。其中本计划相关：`staff-*` 8 个、`group-*` 8 个、
+  `contract-*` 3 个、`requirement*` 3 个，另有 `dispatch-form`、`split-guard`、`impact`、`ticket-label` 等。
+- **实机档（已做，只到服务端）**：本机 daemon 0.13.2，`paseo plugin reload` 后 `running`、日志无错误行；
+  `deck_probe` / `deck_context` 实跑 `ok:true`（GitHub 后端可达，读到 3 张打开的票）；
+  用假上下文冷启动真入口 `index.server.ts` 的 `contribute()` → **79 个 RPC 全部挂上、无重名**，
+  钩子顺序 `before:agent.create` → `on:agent.permission_requested` ×2（自动放行在前、领地闸在后）
+  → `on:agent.created` → `on:agent.turn_ended`；返回的卸载函数为 `function`。
+- **未验**：客户端 bundle 能否被 App 加载（本机没有桌面端，`plugin list` 显示 `running` 不算证据）；
+  以及**任何 UI 点击**——所以下面那张表里的界面行为都只是「代码与单测层面成立」。
+
+| 批次 | 状态 | 落点 | 证据 |
+|---|---|---|---|
+| 0 探针 | 已完成（11-03） | 一次性脚本 | 结论已写进第四节开头 |
+| 1 数据模型 + 派单带岗位 | 已落地 | `shared/staff.ts`、`shared/orchestration.ts`、`server/orchestration.ts`、`server/mcp/tools.ts` | `tests/staff-cards.test.mjs`、`tests/orchestration-dispatch.test.mjs` |
+| 2 名册界面 + 阀门二 + 阀门四 | 已落地 | `StaffPanel.tsx`、`RolesPanel.tsx`、`StopSection.tsx`、`server/hooks.ts` | `tests/staff-gates.test.mjs`（14 条；原计划叫 `agent-created-gate.test.mjs`，落地时并进了这个文件）、`tests/staff-stop.test.mjs`（阀门四此前 0 条测试） |
+| 2b 需求票入口 + 影响面 + 定稿 | 已落地 | `shared/requirement.ts`、`shared/impact.ts`、`shared/split-guard.ts`、`server/mcp/tools.ts`、`IssueDetailView.tsx` | `tests/split-guard.test.mjs`、`tests/impact.test.mjs`、`tests/ticket-label.test.mjs` |
+| 可选 派单台 | **已做**（原标「可选」，用户要求全面落地） | `shared/dispatch-form.ts`、`DispatchPanel.tsx`、`OrchestrationView.tsx`（新增 `dispatch` 页签） | `tests/dispatch-form.test.mjs` 8 条 |
+| 3 归属 + 按区铺票 + 谁能让派 | 已落地 | `shared/staff-guard.ts`、`shared/requirement-split.ts`、`server/requirement-dispatch.ts`、`shared/staff-request.ts` | `tests/staff-guard.test.mjs`、`tests/requirement-split.test.mjs` |
+| 4 阀门三 + 协调收件箱 | 已落地 | `server/staff-territory.ts`、`InboxPanel.tsx`、`server/rpc/orchestration.ts`、`register.ts` | `tests/staff-territory.test.mjs`（24 条）、`tests/staff-territory-gate.test.mjs` |
+| 4b 跨区代码链条 | 已落地 | `shared/contract-chain.ts`、`server/contract-chain.ts`、`server/chain-gates.ts` | `tests/contract-chain.test.mjs`（26 条）、`tests/contract-chain-server.test.mjs` |
+| 5 岗位履历（记忆） | 已落地 | `server/staff-history.ts`、`server/orchestration.ts` 抬头拼装 | `tests/staff-history.test.mjs`（23 条） |
+| 6 群视图 + `@全部` | 已落地（客户端落点改叫 `GroupPanel.tsx`） | `shared/group-rpc.ts`、`server/rpc/group.ts`、`GroupPanel.tsx`、`GroupProgress.tsx` | `tests/group-*.test.mjs`（8 个文件） |
+
+**额外落地（计划里是散条目）**：阀门四的按钮放在「编排 → 岗位」底部（`StopSection.tsx`，两道确认 + 可选归档），
+第九节第 7 条那两句归档/不转发文案就写在这个按钮旁边；血缘（`kind:"lineage"`）加了保留策略
+（500 条 / 90 天，只裁最后一次可动作记录之后的血缘行，不碰别的 kind）。
+
+### 手工验收（待做，只有人点得出来）
+
+按本工作区现在的实况（名册为空、`coordination.jsonl` 不存在）预期如下：
+
+- [ ] **名册存取**：加一张卡 → 存 → 重开还在；中文名不填 id 应自动生成 `staff-xxxxxx`；两张同名卡互不覆盖。
+- [ ] **派单台**：名册空时显示「0 张卡 / 名册还没有卡」且**不要求选卡**；建卡后没选卡必须当场拒；
+      多仓库工作区没选仓库也要当场拒；按「派出去」后表应变灰锁住。
+- [ ] **全停**：本区目前没有带 `deck.staff` 的会话，预期是「0 个会话」，不是报错。
+- [ ] **收件箱**：现在应为空列表 + 一句说明（`coordination.jsonl` 还不存在）；之后真出一行请求才算 RPC 三处都通了。
+- [ ] **群视图**：`@某张卡` 发一句，看消息里工具调用是否折成一行；`@全部` 应先出清单再铺票。
+- [ ] **「至少同时几个」**：调到 3 后派五条活，要真的铺到 3 张卡上（`minConcurrentStaff` 现在未设置）。
+
 用户原话：
 
 > 对就是这样 但是我们要配置很多员工的 应为 方案到执行 需要多分工的
@@ -542,6 +592,11 @@ MCP 面同步：`shared/tool-contract.ts:493` + `server/mcp/tools.ts:1602` 的 `
 - 派单台（面板表单、完全不经过模型）只在「你不想打开任何会话也能派活」时才需要，
   列为**可选批次**，你说了再做。
 
+> **2026-11-04 已做**：用户要求全面落地，派单台已建（`shared/dispatch-form.ts` + `DispatchPanel.tsx`，
+> 编排页 `dispatch` 页签）。它省掉的是「先开会话让模型调工具」那一跳，**没有省掉确认与建票**：
+> 服务端仍是先建票再建会话，面板上要多点一次「确认派出」。表单层只提前拒四种必拒的情况
+> （空提示词 / 名册非空没选卡 / 多仓库没选仓库 / 需求票号不是正整数），其余判定仍在服务端。
+
 经理这边的三条：
 
 - **看得到名册**：`deck.orchestration.state` 本来就把整份设置给出去，名册加进去以后
@@ -1006,24 +1061,53 @@ state: "pending" | "approved-once" | "consumed" | "reassigned" | "denied" | "sta
 文件里还写着所属 `workspaceId`（`server/orchestration-store.ts:16-22,58-81`）。
 所以「名册按工作区一份」是多开工作区之后的两份独立名册，天然不共享。
 
-协调方案（v1 只做到这三条）：
+协调方案（2026-11-04 按用户指令改过一版：**一个项目一个群**）：
 
-1. **群能同时看多个工作区**：群视图的成员表按**工作区**分组显示，一个工作区下面列出它名册里的所有人。
-   发话时**从名册里选人**（点选成员，不是解析我写死的文本格式）；
+1. **群按目录分**：一个目录一个群。群页只读**当前目录**的名册、群记录与会话，成员栏只列本目录
+   名册上的人。原 v1 第 1 条「群能同时看多个工作区、成员表按工作区分组列人」**作废**——
+   那样做等于把几个项目的群并成一个，用户 2026-11-04 明确否掉了
+   （「我们每一个项目 都要有独立的群」「你不能把插件 只能一个群啊」）。
+   群标签 `deck.group` 的值写**目录**（`path.resolve(workspaceDir)`），不写 `workspaceId`：
+   同一目录在宿主里每次重开都换一个 id，标签写 id 会让成员在换 id 之后集体从群里消失。
+2. **发话时从名册里选人**（点选成员，不是解析写死的文本格式）；
    想用文字 `@` 也行：先按你给的名字匹配，重名时弹出候选让你点，**不自动加后缀**——
    后缀怎么写、叫什么名字，是你的事，不是插件的约定。
-2. **派活不跨区建会话**：`createAgent` 必须带 `workspaceId`，不带时宿主会为同一目录另登记一条工作区
+3. **派活不跨区建会话**：`createAgent` 必须带 `workspaceId`，不带时宿主会为同一目录另登记一条工作区
    （`server/orchestration.ts:1174` 已因此固定传 id）。所以一条任务始终落在一个工作区里。
    跨区协作 = 同一张地图下**两张票、两批派单**，各自回传到各自的派单窗口。
-3. **共同的记账**：地图引用本来就支持跨仓库（`normalizeMapRef` 接受 `owner/repo#N`，
+4. **共同的记账**：地图引用本来就支持跨仓库（`normalizeMapRef` 接受 `owner/repo#N`，
    `shared/orchestration.ts:193`）。「一个需求两边都改」就是一张地图 + 两张票，
-   群视图把它们并排显示，进度在群里汇总。
+   进度按**需求票号**汇总（群页填需求票号就能看，`GroupProgress` 按仓库分列并排显示）。
 
-**跨工作区就是「跨区」本身**，走的还是同一个门铃。一个会话的 `cwd` 是 A 工作区，
-它要改 B 工作区的文件，就是越界 → 生成协调请求，`toStaff` = **B 那个工作区名册里
+### 先选形状：父目录一个工作区，还是一个仓库一个工作区
+
+用户 2026-11-04 问的是 `kexin/` 这种「一个目录里两个仓库」
+（`kxhyapp.com` + `kxhyapp.com-saas`，用户原话：「他们是一个整体项目 怎么协调开发的呢」）。
+两种形状都成立，但只有一种和「一个项目一个群」对得上：
+
+- **A、父目录一个工作区（整体项目用这个）**：`kexin/` 一个目录 = 一个群、一张名册、一个派单窗口。
+  两个仓库的活按岗位卡上的 `paths` 分（`kxhyapp.com/apps/...` 给客户端的人，
+  `kxhyapp.com-saas/apps/...` 给 saas 的人）。一个需求碰到两个仓库 = **一批派单、两张票**，
+  票面各自标 `repoKey`——批次是按**工作区**分的，不是按仓库分的
+  （`server/requirement-batch-plan.ts`）。越界照样走门铃：同一张名册里按路径找那段归谁。
+  **这条路上用不到跨区父链**：全在一个 `workspaceId` 里，父子链天生同区。
+  前提是父目录有 `.paseo-deck.json` 的 v2 `projects` 清单，把两个仓库都列进去。没有它，
+  插件把父目录当成一个本地单仓库（`server/tracker/targets.ts:152-211` 的回退），
+  票落不到那两块 GitHub 板，多仓库校验也会整段跳过（`repoKeys` 是空数组）。
+- **B、一个仓库一个工作区**：父目录、子目录各开一个工作区、各一份名册。这时才需要下面的
+  跨区父链、跨区批次、门铃找隔壁区；一个需求跨两区 = **两批派单、两张票**。
+
+B 的机制不能因为选了 A 就拆掉：仓库随时可能被拆成两个工作区打开，B 是兜底形状。
+A 的代价也写清：所有人在一张名册上（成员栏会比一栏长），两个仓库共用一个派单窗口。
+
+以下都是形状 B 的机制（形状 A 用不到，但留着兜底）。
+
+**跨工作区就是「跨区」本身**，走的还是同一个门铃。一个会话的 `cwd` 是甲区，
+它要改乙区的文件，就是越界 → 生成协调请求，`toStaff` = **乙区名册里
 领地覆盖这条路径的那张卡**（卡上不写工作区，见第一节：名册本身属于一个工作区，
-所以「B 的那张卡」就是「去读 B 的名册，按归属算法找」）。
-转派到 B 时新建会话必须显式带 B 的 `workspaceId`，**并且不设跨区父节点**——见下。
+所以「乙区那张卡」就是「去读乙区的名册，按归属算法找」）。
+转派到乙区时新建会话必须显式带乙区的 `workspaceId`，**并且设跨区父链**（回传落到派它的
+那个窗口；取证结论见下，同 daemon 内一律设，跨 daemon 才退回「不设父节点 + 票状态可见」）。
 
 **跨区父链：做（上一版写「不做」，是被「没验证过」吓住了；这一版去验了，能做）。**
 
@@ -1404,7 +1488,8 @@ kind: "territory" | "staffing" | "contract"
 - `tests/staff-cards.test.mjs`（新）：归一化（超长截断 / 上限 24 / 旧文件无 staff / 手填非法 id 拒绝）、
   **中文名不填 id 也能存住**（`newStaffId` 生成 `staff-xxxxxx`，与名字无关）、**两张同名卡各自独立互不覆盖**、
   `staffCardOf` 大小写、`withWorkspaceRoles` 不丢名册（含「只有名册没绑窗口」那条）。
-- `tests/agent-created-gate.test.mjs`（新）：`agent.created` 里同 `deck.staff` 超额 → 归档新会话；
+- `tests/staff-gates.test.mjs`（新；原计划名 `agent-created-gate.test.mjs`，落地时并入了这个文件，14 条）：
+  `agent.created` 里同 `deck.staff` 超额 → 归档新会话；
   员工卡派出的子会话 → 归档；滚动额度超了 → 归档并记一条；
   **读不到标签 / 列表报错 / 没有 `parentAgentId` → 一律不归档，只 warn**（失败方向是放行）；
   **另一个工作区里同样 `deck.staff=frontend` 的会话不计入本区配额**（证明内存里那一步 workspaceId 过滤真的做了）。
@@ -1422,7 +1507,7 @@ kind: "territory" | "staffing" | "contract"
   经理领地内的活即使有更深的员工卡也**不跳过经理层**；经理层命中而领地内没有员工 → 归该经理的会话；
   名册只有一张卡时直接归它；没人声明这片路径时走确认；
   `edit`/`write` 越界拒、界内放、`read`/`search` 放、`shell` 放、`detail` 缺失时不自动放行。
-  （**单例锁不在这里**——它落在 `agent.created`，见 `tests/agent-created-gate.test.mjs`。）
+  （**单例锁不在这里**——它落在 `agent.created`，见 `tests/staff-gates.test.mjs`。）
 - `tests/staff-territory.test.mjs`（新）：协调请求落盘与三种处置的 state 迁移，
   以及「同一路径重复越界不重复刷请求」（→ `superseded`）；`kind: "territory"` 与 `kind: "staffing"`
   混在一个文件里互不干扰，`staffing` 走 `pending → staffed | declined`；
@@ -1524,3 +1609,35 @@ kind: "territory" | "staffing" | "contract"
 | 一批活至少同时几个员工干 | 你（`minConcurrentStaff`） | 1（不强制铺开） |
 | 每张卡同时能跑几个 | 你（`maxConcurrent`） | 1 |
 | 群里怎么被点到 | 你（名字）＋点选 | 点选优先，文字 @ 按名字匹配、重名弹候选 |
+
+## 状态：名册与群记录都按**目录**归属（2026-11-04）
+
+两个「换个工作区打开就串台」的真故障，同一条口径修完：
+
+- **名册**（`.deck/orchestration.json` 里的 `staff`）属于目录，不属于 workspaceId。
+  同一个目录在宿主里会攒出好几个 id（每次重开一个），卡若跟着 id 分桶，换一个 id 打开
+  岗位页就是空的，删掉的卡还会从旧 id 里复活。读走 `rosterOf()`（合并 + 按 id 去重），
+  写走 `withDirectoryRoster()`（整份落到当前 id，并清掉其它条目里的卡）。
+  槽位（主窗口 / 派单窗口 / 进度窗口）仍按 id：会话本来就属于具体工作区。
+- **群记录**（`.deck/group/<workspaceId>.jsonl`）属于目录。读走 `readGroupDirectory()`
+  （这个目录下所有 id 的记录，按时间排）；别的目录的对话不再出现在本项目的群里。
+- **一个项目一个群**（2026-11-04 用户口径：「我们每一个项目 都要有独立的群」）。所以群读
+  只给**本目录**一份名册（`readGroupRoster(workspaceDir)` → `roster: { staff, detail? }`），
+  不再列宿主里别的目录的人；`deck.group.send` 也只在本群名册里找人，正文 `@` 或点选
+  对不上就是 `unknown-staff`，不转派、不在别的目录建票建会话。
+  早先那版「名册跨目录并排 + 点别人转派 + 在本群留一行索引」已经拆掉：
+  那个入口让人在本项目的群里点到别的项目的员工，等于把话派错了地方。
+- **群标签写目录**：`deck.group` 的值由 `workspaceId` 改成 `path.resolve(workspaceDir)`。
+  同一个目录每次重开都换一个 id，标签写 id 的话换一个 id 打开，名册上 12 个人、右栏却说
+  「都还没起过会话」。读会话时同时查目录 key 与当前 id（后者兜住改格式之前建的老会话），
+  按 agent id 去重。更早的 id 下建的会话查不到——宿主的列表只能按标签值精确过滤，
+  历史 id 没法枚举；这比改格式之前不差（那时换 id 打开也看不见），新会话一律写目录 key。
+- 记录文件仍按 `workspaceId` 存（`.deck/group/<id>.jsonl`），读的时候按目录合并。
+
+**文档同步（2026-11-04）：** 第九节「协调方案（v1）」第 1 条「群能同时看多个工作区、
+成员表按工作区分组」与上面这条口径冲突，已按代码改写成「群按目录分」，并补了一节
+「先选形状：父目录一个工作区，还是一个仓库一个工作区」——用户 2026-11-04 问
+`kexin/`（`kxhyapp.com` + `kxhyapp.com-saas` 一个整体项目）怎么协调，答案是父目录一个
+工作区即一个群、一批派单、两张票；那种形状用不到跨区父链，跨区父链只服务于
+「一个仓库一个工作区」的兜底形状。查过磁盘：`kexin/`、两个子目录都没有 `.deck`，
+父目录也没有 `.paseo-deck.json`——所以它现在既没有群名册，也会被当成本地单仓库。

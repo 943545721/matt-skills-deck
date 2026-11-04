@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   injectDeckTools,
+  registerHooks,
+  routeCodexSiteProvider,
   injectionProblem,
   mcpEntryPath,
   runtimeFeatures,
@@ -20,8 +22,142 @@ const request = (provider = "claude/sonnet") => ({
   },
 });
 
+test("Codex 站点路由：创建请求明确选择派生 provider 并保留模型", () => {
+  const input = request("codex/gpt-5-codex");
+  const out = routeCodexSiteProvider(input, {
+    "deck-codex": { extends: "codex", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } },
+  });
+  assert.equal(out.config.provider, "deck-codex/gpt-5-codex");
+  assert.equal(input.config.provider, "codex/gpt-5-codex", "不能原地改宿主请求");
+});
+
+test("Codex 站点路由：站点未启用时拒绝，不静默回到 ~/.codex 配置", () => {
+  assert.equal(
+    routeCodexSiteProvider(request("codex/gpt-5-codex"), {}).config.provider,
+    "codex/gpt-5-codex",
+    "没有自定义站点时保留普通 Codex 会话",
+  );
+  assert.throws(
+    () => routeCodexSiteProvider(request("codex/gpt-5-codex"), {
+      codex: { env: { OPENAI_BASE_URL: "https://legacy.example.test/v1" } },
+    }),
+    (error) => {
+      assert.match(error.message, /尚未绑定到会话 provider/);
+      // 报错要能直接照着做：把那条地址带出来，用户照抄进站点即可。
+      assert.match(error.message, /https:\/\/legacy\.example\.test\/v1/);
+      assert.match(error.message, /凭证可以留空/);
+      return true;
+    },
+  );
+  // 派生条目被停用、内建条目却还配着旧地址：放行就会退回那个地址，拦下。
+  assert.throws(
+    () =>
+      routeCodexSiteProvider(request("codex/gpt-5-codex"), {
+        codex: { env: { OPENAI_BASE_URL: "https://legacy.example.test/v1" } },
+        "deck-codex": { extends: "codex", enabled: false, env: { OPENAI_BASE_URL: "https://api.example.test/v1" } },
+      }),
+    /尚未绑定到会话 provider/,
+  );
+});
+
+test("Codex 站点路由：派生条目没继承 codex 才算配置不完整；缺地址的残条目按普通 Codex 放行", () => {
+  // 没继承 codex：不是插件写出来的形状，别拿它开会话。
+  assert.throws(
+    () =>
+      routeCodexSiteProvider(request("codex/gpt-5-codex"), {
+        "deck-codex": { extends: "claude", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } },
+      }),
+    /派生 provider 配置不完整/,
+  );
+  // 缺地址 / 地址不是字符串 / 被停用：都拿不出可用地址，当没配站点，普通 Codex 照常建。
+  for (const leftover of [
+    { "deck-codex": { extends: "codex", env: {} } },
+    { "deck-codex": { extends: "codex", env: { OPENAI_BASE_URL: 42 } } },
+    { "deck-codex": { extends: "codex", enabled: false, env: { OPENAI_BASE_URL: "https://api.example.test/v1" } } },
+  ]) {
+    assert.equal(
+      routeCodexSiteProvider(request("codex/gpt-5-codex"), leftover).config.provider,
+      "codex/gpt-5-codex",
+      "残条目不该拦住普通 Codex 会话",
+    );
+  }
+});
+
+test("Codex 站点路由：只有客户端、没有模型段时也要改写", () => {
+  const out = routeCodexSiteProvider(request("codex"), {
+    "deck-codex": { extends: "codex", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } },
+  });
+  assert.equal(out.config.provider, "deck-codex");
+});
+
+test("Codex 站点路由：大小写与空白按同一条归一规则认出来", () => {
+  const out = routeCodexSiteProvider(request(" Codex /gpt-5-codex"), {
+    "deck-codex": { extends: "codex", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } },
+  });
+  assert.equal(out.config.provider, "deck-codex/gpt-5-codex");
+});
+
+/* --------------------------------------------- agent.create 钩子：两段接起来 */
+
+/** 只收 before/on 注册的假宿主，够把钩子拿出来直接调。 */
+function fakeServer() {
+  const handlers = {};
+  return {
+    handlers,
+    before: (name, fn) => {
+      handlers[name] = fn;
+      return () => {};
+    },
+    on: () => () => {},
+  };
+}
+
+const hookContext = (get) => ({ paseo: { config: { get } }, signal: new AbortController().signal });
+
+test("agent.create 钩子：启用过 Codex 站点，真实创建请求改走派生 provider", async () => {
+  const server = fakeServer();
+  registerHooks(server);
+  const out = await server.handlers["agent.create"](
+    { request: { config: { provider: "codex/gpt-5-codex", cwd: "/work/deck" } } },
+    hookContext(async () => ({
+      config: {
+        providers: {
+          "deck-codex": { extends: "codex", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } },
+        },
+      },
+    })),
+  );
+  assert.equal(out.config.provider, "deck-codex/gpt-5-codex", "钩子读到的配置要真的把 provider 换掉");
+});
+
+test("agent.create 钩子：读不到配置时拒绝创建 Codex 会话，不静默退回 ~/.codex 的地址", async () => {
+  const server = fakeServer();
+  registerHooks(server);
+  await assert.rejects(
+    server.handlers["agent.create"](
+      { request: { config: { provider: "codex/gpt-5-codex", cwd: "/work/deck" } } },
+      hookContext(async () => {
+        throw new Error("read timeout");
+      }),
+    ),
+    /读不到宿主配置，没法确认 Codex 该走哪条接入地址/,
+  );
+});
+
+test("agent.create 钩子：非 Codex 客户端读不到配置也照常创建", async () => {
+  const server = fakeServer();
+  registerHooks(server);
+  const out = await server.handlers["agent.create"](
+    { request: { config: { provider: "claude/sonnet", cwd: "/work/elsewhere" } } },
+    hookContext(async () => {
+      throw new Error("read timeout");
+    }),
+  );
+  assert.equal(out.config.provider, "claude/sonnet");
+});
+
 test("预授权能力：只有宿主实现 applyToolPolicy 的三家能带 toolPolicy", () => {
-  for (const provider of ["claude/sonnet", "codex", "opencode/gpt-5"]) {
+  for (const provider of ["claude/sonnet", "codex", "opencode/gpt-5", "deck-codex/gpt-5-codex", "Deck-Codex"]) {
     assert.equal(supportsExactMcpPreapproval(provider), true, `${provider} 应该支持精确预授权`);
   }
   // cursor 这类客户端带 toolPolicy 会被宿主整条拒绝（tool_policy_unsupported），必须按不支持处理。

@@ -77,10 +77,9 @@ function fakePaseo({ config = {}, entries = [], workspaceDir = null } = {}) {
               }
             }
             // 建会话这一刻群记录里已经有什么：用来证明 user 那条不是事后补的。
+            // 记录文件按 workspaceId 存（群标签存的是目录），所以这里按 id 读。
             const groupAtCreate = workspaceDir
-              ? (await readGroup(workspaceDir, options.labels?.["deck.group"] ?? "")).records.map(
-                  (record) => record.kind,
-                )
+              ? (await readGroup(workspaceDir, WORKSPACE_ID)).records.map((record) => record.kind)
               : null;
             created.push({ workspaceId, options, ticketExisted, groupAtCreate });
             return { id: `agent-${created.length}` };
@@ -188,7 +187,8 @@ test("@岗位：先建票再建会话，群记录先 user 后 staff，票面带 
   assert.deepEqual(groupAtCreate, ["user"], "user 那条群记录必须在建会话之前就落盘");
   assert.equal(options.config.provider, "claude/sonnet");
   assert.equal(options.labels["deck.staff"], FRONTEND.id);
-  assert.equal(options.labels["deck.group"], WORKSPACE_ID);
+  // 群标签写**目录**：换个 workspaceId 打开还是同一个群，会话不会从成员表里消失。
+  assert.equal(options.labels["deck.group"], path.resolve(dir));
   assert.equal(options.labels["deck.ticket"], `#${delivery.ticketNumber}`);
   assert.equal(options.labels["paseo.parent-agent-id"], "dispatch-1");
   assert.equal(options.parent, "dispatch-1");
@@ -398,19 +398,13 @@ test("点了名册上的人：正文没有 @ 也先建票再建会话", async (t
   assert.equal(paseo.created[0].options.labels["deck.staff"], FRONTEND.id);
 });
 
-/* ------------------------------------------ 别的工作区的人：会话建在他的区 */
+/* -------------------------------------- 一个项目一个群：别的目录的人不在本群名册上 */
 
-test("@ 只在另一个工作区对得上：会话和票都落在那个工作区", async (t) => {
-  const dirA = await workspace(t, { staff: [], workspaceId: "ws-a" });
+test("@ 只在别的目录对得上：本群名册上没有这个人，整句拒绝，不建票不建会话", async (t) => {
+  const dirA = await workspace(t, { staff: [BACKEND], workspaceId: "ws-a" });
   const dirB = await workspace(t, { staff: [FRONTEND], workspaceId: "ws-b" });
-  const requirement = await requirementTicket(dirB);
-  const paseo = fakePaseo({ workspaceDir: dirB });
-  paseo.workspaces.list = async () => ({
-    entries: [
-      { id: "ws-a", workspaceDirectory: dirA, name: "甲" },
-      { id: "ws-b", workspaceDirectory: dirB, name: "乙" },
-    ],
-  });
+  const requirement = await requirementTicket(dirA);
+  const paseo = fakePaseo({ workspaceDir: dirA });
 
   const result = await groupSendHandler(
     {
@@ -422,14 +416,36 @@ test("@ 只在另一个工作区对得上：会话和票都落在那个工作区
     { paseo },
   );
 
-  assert.equal(result.ok, true, JSON.stringify(result));
-  assert.equal(result.status, "sent");
-  assert.equal(result.deliveries[0].staffId, FRONTEND.id);
-  assert.equal(paseo.created.length, 1);
-  assert.equal(paseo.created[0].workspaceId, "ws-b");
-  // 有工作区 id 时目录由句柄决定。再传 cwd，宿主会按目录另登记一条工作区。
-  assert.equal(paseo.created[0].options.cwd, undefined);
-  const ticket = await getIssueHandler({ workspaceDir: dirB, number: result.deliveries[0].ticketNumber });
-  assert.equal(ticket.ok, true);
-  assert.equal(await ticketFileCount(dirA), 0);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "unknown-staff");
+  assert.match(result.detail, /后端/, "拒绝时要把本群名册上的人列出来");
+  assert.equal(paseo.created.length, 0);
+  assert.equal(await ticketFileCount(dirA), 1, "只剩那张需求票");
+  assert.deepEqual(await groupRecords(dirA), [], "拒绝的句子不落群记录");
+  // 别的目录那边一个字都没写：这个群属于 dirA，不往别人的目录里落东西。
+  assert.equal(await ticketFileCount(dirB), 0);
+  assert.deepEqual(await groupRecords(dirB), []);
+});
+
+test("点了别的目录的岗位 id：同样按本群名册拒绝，不去别人的目录建会话", async (t) => {
+  const dirA = await workspace(t, { staff: [BACKEND], workspaceId: "ws-a" });
+  const dirB = await workspace(t, { staff: [FRONTEND], workspaceId: "ws-b" });
+  const requirement = await requirementTicket(dirA);
+  const paseo = fakePaseo({ workspaceDir: dirA });
+
+  const result = await groupSendHandler(
+    {
+      workspaceId: "ws-a",
+      workspaceDir: dirA,
+      text: "把登录页的间距改一下",
+      requirementNumber: requirement,
+      staffId: FRONTEND.id,
+    },
+    { paseo },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "unknown-staff");
+  assert.equal(paseo.created.length, 0);
+  assert.deepEqual(await groupRecords(dirB), []);
 });

@@ -18,12 +18,13 @@ import {
   providerSpec,
   resolveRoute,
   resolveRouteTarget,
+  workspaceRolesOf,
 } from "../shared/orchestration.ts";
 import { matchesWorkspaceScope, truncateTitle } from "../shared/session.ts";
-import { isValidStaffId, staffCardOf, type StaffCard } from "../shared/staff.ts";
+import { isValidStaffId, rosterOf, type StaffCard } from "../shared/staff.ts";
 import { resolveOwner } from "../shared/staff-guard.ts";
 import { buildGroupContext } from "./group-context.ts";
-import { readGroup } from "./group-store.ts";
+import { readGroupDirectory } from "./group-store.ts";
 import { profilesOf, readDaemonConfig } from "./orchestration.ts";
 import { readOrchestration } from "./orchestration-store.ts";
 import { createAgent, sessionErrorDetail } from "./session.ts";
@@ -133,9 +134,11 @@ export async function resolveReassignTarget(input: {
       detail: read.detail ?? (read.corrupt ? "编排文件损坏，读不出名册" : "编排文件读不出来"),
     };
   }
-  const role = read.settings.roles.find((item) => item.workspaceId === input.workspaceId) ?? null;
-  const roster = role?.staff ?? [];
-  const card = staffCardOf(role, staffId);
+  // 名册按目录取：同一目录会有好几个 workspaceId，按 id 取会读成一个空名册。
+  // 派单窗口仍是槽位，按 id 取。
+  const binding = workspaceRolesOf(read.settings, input.workspaceId);
+  const roster = rosterOf(read.settings);
+  const card = roster.find((item) => item.id === staffId) ?? null;
   if (!card) {
     return {
       ok: false,
@@ -151,7 +154,7 @@ export async function resolveReassignTarget(input: {
     card,
     roster,
     routing: read.settings.routing,
-    dispatcherAgentId: role?.dispatcherAgentId?.trim() || null,
+    dispatcherAgentId: binding?.dispatcherAgentId?.trim() || null,
   };
 }
 
@@ -223,7 +226,8 @@ function clientTargetOf(
 }
 
 async function systemPromptOf(input: ReassignInput, warnings: string[]): Promise<string> {
-  const group = await readGroup(input.workspaceDir, input.workspaceId);
+  // 群属于目录：改派过去的会话要看到本群最近的对话，不能只读当前 id 那个记录文件。
+  const group = await readGroupDirectory(input.workspaceDir);
   if (group.failed) warnings.push(group.failed);
   const history = await collectStaffHistory(input.paseo, {
     workspaceId: input.workspaceId,

@@ -14,7 +14,7 @@
 import { DEFAULT_ROLE_PROMPTS, FIXED_ROLES, MAX_ROLE_PROMPT_CHARS } from "./role-prompts.ts";
 import type { FixedRole, RoleLang } from "./role-prompts.ts";
 import { asRecord, clampInt, optionalText, text } from "./coerce.ts";
-import { DECK_STAFF_LABEL, MAX_STAFF_CARDS, normalizeStaffCards, normalizeStaffId, normalizeStaffPath, staffCardOf } from "./staff.ts";
+import { DECK_STAFF_LABEL, MAX_STAFF_CARDS, normalizeStaffCards, normalizeStaffId, normalizeStaffPath, roleCarriesFields, rosterOf, staffCardOf } from "./staff.ts";
 import type { StaffCard } from "./staff.ts";
 import { resolveOwner } from "./staff-guard.ts";
 
@@ -97,6 +97,7 @@ export {
   normalizeStaffCards,
   normalizeStaffId,
   normalizeStaffPath,
+  roleCarriesFields,
   staffCardOf,
   withStaffCards,
   type StaffCard,
@@ -131,6 +132,25 @@ export function agentIdOf(roles: WorkspaceRoles | null | undefined, role: FixedR
   const value = roles?.[ROLE_AGENT_FIELD[role]];
   const trimmed = typeof value === "string" ? value.trim() : "";
   return trimmed ? trimmed : null;
+}
+
+/**
+ * 一个工作区的角色绑定，名册已经按目录合并过。
+ *
+ * 两半的归属不同，必须分开取：
+ * - 会话槽位（主窗口 / 派单窗口 / 进度窗口）按 `workspaceId`——会话本来就属于具体工作区；
+ * - 名册按**目录**——同一个目录在宿主里会攒出好几个 workspaceId（每次重开一个），
+ *   卡若跟着 id 分开，「换个工作区打开」就等于人全没了。见 `rosterOf`。
+ */
+export function workspaceRolesOf(
+  settings: OrchestrationSettings,
+  workspaceId: string,
+): WorkspaceRoles | null {
+  const id = workspaceId.trim();
+  const entry = settings.roles.find((role) => role.workspaceId === id) ?? null;
+  const staff = rosterOf(settings);
+  if (!entry) return staff.length ? { workspaceId: id, staff } : null;
+  return { ...entry, ...(staff.length ? { staff } : {}) };
 }
 
 /**
@@ -277,6 +297,51 @@ export function parseProviderSpec(spec: string): { provider: string; model?: str
  */
 export function providerId(spec: string | undefined): string {
   return parseProviderSpec(spec ?? "").provider.trim().toLowerCase();
+}
+
+/**
+ * Codex 站点使用的派生 provider id（`extends: "codex"`）。
+ *
+ * 为什么非要派生一条：宿主的 Codex 适配器只在「请求的 provider 是派生条目且
+ * `env.OPENAI_BASE_URL` 非空」时才生成 `model_providers`；写在内建 `codex` 上的
+ * 地址它根本不读，会话会退回 `~/.codex/config.toml`。名字由插件自己写定，
+ * 所以写配置、读配置、建会话路由这三处共用这一个常量，别各写一遍字符串。
+ */
+export const CODEX_SITE_PROVIDER = "deck-codex";
+
+/**
+ * 插件真能为它配接入地址的客户端：Claude / Codex。
+ *
+ * 其余家（OpenCode、Copilot、Cursor、Pi、Oh My Pi、Antigravity、Muse Code……）在宿主里
+ * 没有读 `*_BASE_URL` 的路径，插件写进去的地址与凭证不会被任何会话用上（OpenCode
+ * 只有前缀约定，没有实证）。界面上把它们列出来，只会让人以为「配好了」，其实一句
+ * 也没生效——所以客户端列表与模型选择器都只留这两家。被隐藏的家不逐条告警（宿主
+ * 动辄报出七八家，会变成页面顶部常驻噪音），口径写在客户端页的说明行里
+ * （`orch.clientsScope`）。
+ *
+ * 别和另外两份名单合并——判的是别的事：`server/hooks.ts` 的
+ * `EXACT_MCP_PREAPPROVAL_PROVIDERS`（宿主能不能精确预授权，含 OpenCode）与
+ * `shared/session.ts` 的 `SLASH_PROVIDERS`（提示词方言）。宿主改契约时三份会分头变。
+ */
+export const SUPPORTED_CLIENTS = ["claude", "codex"] as const;
+
+/** 上面那两家的显示名，拼成告警里那一句：印裸 id 会和客户端页的写法不一致。 */
+export const SUPPORTED_CLIENTS_LABEL = "Claude / Codex";
+
+/** 客户端 id 归一（小写、去空白）后是否在支持范围内。 */
+export function isSupportedClient(id: string | undefined): boolean {
+  return (SUPPORTED_CLIENTS as readonly string[]).includes((id ?? "").trim().toLowerCase());
+}
+
+/**
+ * 该不该出现在客户端列表与模型选择器里：支持的两家，且不是插件自己造的派生 provider。
+ *
+ * `deck-codex` 的地址与模型已经并到 `codex` 那一行显示，单列只会让人以为多了一家。
+ * 列表与选择器两处共用这一个判断，别各写一遍（新加派生 provider 时只改这里）。
+ */
+export function isListedClient(id: string | undefined): boolean {
+  const normalized = (id ?? "").trim().toLowerCase();
+  return isSupportedClient(normalized) && normalized !== CODEX_SITE_PROVIDER;
 }
 
 /** 反向：宿主 `config.provider` 收的是 `provider/model` 一段字符串。 */
@@ -706,8 +771,8 @@ function stableKey(parts: readonly (string | number | undefined)[]): string {
  * 拒绝项逐条保留，不因为一条不可用就把整批停掉。
  */
 export function planDispatch(input: DispatchPlanInput): DispatchPlan {
-  const roles = input.roles.find((role) => role.workspaceId === input.workspaceId);
-  const configuredDispatcher = roles?.dispatcherAgentId?.trim() || null;
+  const entry = input.roles.find((role) => role.workspaceId === input.workspaceId);
+  const configuredDispatcher = entry?.dispatcherAgentId?.trim() || null;
   const rejected: DispatchRejected[] = [];
   const tasks: DispatchTask[] = [];
 
@@ -715,7 +780,7 @@ export function planDispatch(input: DispatchPlanInput): DispatchPlan {
     rejected.push({ key: task.key, ...(task.title ? { title: task.title } : {}), reason, detail });
   };
 
-  if (!roles) {
+  if (!entry) {
     // 「这个工作区没绑定」和「绑定了但没选派单窗口」是两回事，提示不同：
     // 前者要去补一条角色，后者只要在已有的那条里填个会话。
     for (const task of input.tasks) {
@@ -738,8 +803,11 @@ export function planDispatch(input: DispatchPlanInput): DispatchPlan {
     return { dispatchId: input.dispatchId, dispatcherAgentId, tasks, rejected };
   }
 
+  // 名册按目录合并：同一目录在宿主里可能有好几个 workspaceId，卡不该跟着 id 分开。
+  // 槽位（派单窗口）仍按 id 取——会话本来就属于具体工作区。
+  const roster = rosterOf({ roles: input.roles });
+  const roles: WorkspaceRoles = { ...entry, ...(roster.length ? { staff: roster } : {}) };
   // 名册为空 = 今天的行为（按难度路由、不写 `deck.staff` 标），一个字都不该变。
-  const roster = roles.staff ?? [];
   const minStaff = Math.max(1, Math.round(input.minConcurrentStaff ?? DEFAULT_MIN_CONCURRENT_STAFF));
   // 「至少铺开几张」是速度旋钮，不是硬塞：任务比人少时按任务数算。
   const wanted = Math.min(minStaff, input.tasks.length);
@@ -1445,8 +1513,7 @@ export function withWorkspaceRoles(
   const staff = role.staff === undefined ? existing?.staff : normalizeStaffCards(role.staff);
   if (staff) next.staff = staff;
   // 这一条必须把新字段一起抄进去：只重抄会话 id 的话，保存一次就把用户改过的提示词抹掉。
-  const keep = next.mainAgentId || next.dispatcherAgentId || next.progressAgentId || next.prompts || next.staff;
-  const roles = keep ? [...rest, next] : rest;
+  const roles = roleCarriesFields(next) ? [...rest, next] : rest;
   return { ...settings, roles };
 }
 

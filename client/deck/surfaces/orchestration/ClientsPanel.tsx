@@ -332,6 +332,9 @@ export function ClientsPanel({
     <ScrollView style={styles.screen} contentContainerStyle={{ paddingBottom: 16 }}>
       <HostCatalogBar skin={skin} t={t} disabled={busy || siteBusy} onRefresh={onRefreshCatalog} />
 
+      {/* 只列两家是刻意收窄的：其余客户端插件注不进去，列出来只会配出一份没人读的配置。 */}
+      <Text style={styles.dim}>{t("orch.clientsScope")}</Text>
+
       {providers.length === 0 ? <Text style={styles.note}>{t("orch.noProviders")}</Text> : null}
 
       {providers.map((provider) => {

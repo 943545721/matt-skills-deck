@@ -2,16 +2,18 @@ import type { PluginBeforeRequests, PluginHookAgent, PluginHookContext, PluginSe
 import type { AgentPermissionRequest, AgentPermissionRequestKind } from "@getpaseo/protocol/agent-types";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { providerId } from "../shared/orchestration.ts";
+import { CODEX_SITE_PROVIDER, providerId } from "../shared/orchestration.ts";
+import { codexSiteUsable } from "./orchestration.ts";
 import { resolveOwner } from "../shared/staff-guard.ts";
 import { record } from "./logs.ts";
 import { MCP_SERVER_NAME, PREAPPROVED_TOOL_NAMES } from "./mcp/tools.ts";
 import { pluginRoot } from "./paths.ts";
 import { TurnReporter, reportEnabledFor } from "./report.ts";
 import { getSettings } from "./settings.ts";
+import { providersRawOf, readDaemonConfig } from "./orchestration.ts";
 import { readOrchestration } from "./orchestration-store.ts";
 import { decideStaffGate, decideWorkerDispatch, staffGateApplies } from "./staff-gates.ts";
-import { DECK_STAFF_LABEL } from "../shared/staff.ts";
+import { DECK_STAFF_LABEL, rosterOf } from "../shared/staff.ts";
 import type { StaffCard } from "../shared/staff.ts";
 import {
   appendLineageRecord,
@@ -56,8 +58,9 @@ const SCOPE = "mcp";
  * `Provider 'cursor' cannot preapprove exact MCP tools for unattended execution; select Claude, Codex, or OpenCode`
  *
  * 已知的不对称：宿主那边另有两类也算支持——插件注册的 provider，以及 `extends: claude/codex`
- * 派生的自定义 provider。插件侧认不出它们，统一按「不支持」处理，代价是这些客户端下只读的
- * `deck_*` 工具每次要用户点一次确认（降级，不是失败，日志里有记录）。
+ * 派生的自定义 provider。前者插件侧认不出来，统一按「不支持」处理，代价是这些客户端下只读的
+ * `deck_*` 工具每次要用户点一次确认（降级，不是失败，日志里有记录）。后者只有本插件自己造的
+ * `deck-codex` 能认（见下），别家的派生 provider 同样按不支持处理。
  * 反过来的方向才危险：宿主将来若把某家从表里划掉，我们仍会给它带 `toolPolicy`，
  * 那条会话就会被整条拒绝——升级宿主后若出现该报错，先对这张表。
  *
@@ -65,12 +68,84 @@ const SCOPE = "mcp";
  */
 const EXACT_MCP_PREAPPROVAL_PROVIDERS: ReadonlySet<string> = new Set(["claude", "codex", "opencode"]);
 
+/*
+ * 站点启用后 Codex 会话走的派生 provider（`providers.deck-codex`，`extends: "codex"`）。
+ * 常量在 `shared/orchestration.ts`：写配置、读配置、这里路由三处必须同一个名字。
+ * 它继承 codex 的契约，精确预授权同样可用。
+ */
+
 export function supportsExactMcpPreapproval(providerSpec: string): boolean {
   const provider = providerId(providerSpec);
-  return provider !== "" && EXACT_MCP_PREAPPROVAL_PROVIDERS.has(provider);
+  return provider === CODEX_SITE_PROVIDER || (provider !== "" && EXACT_MCP_PREAPPROVAL_PROVIDERS.has(provider));
+}
+
+/**
+ * 路由失败必须让创建停下：这时继续放行就等于用 `~/.codex/config.toml` 里的旧地址
+ * 悄悄开会话，正是这次要堵的那条路。
+ */
+export class CodexSiteRouteError extends Error {}
+
+function envText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /** 注入器本体是纯函数：给定配置就回新配置，便于单测，也保证不原地改请求。 */
+export function routeCodexSiteProvider(
+  request: AgentCreateRequest,
+  providers: Record<string, { extends?: string; enabled?: boolean; env?: Record<string, string> }>,
+): AgentCreateRequest {
+  const [rawProvider, ...modelParts] = request.config.provider.split("/");
+  // 与调用方同一条归一规则（`providerId`）：`Codex/x` 这类写法也要认出来。
+  if (providerId(rawProvider) !== "codex") return request;
+  const codex = providers[CODEX_SITE_PROVIDER];
+  // 派生条目「能用」= 继承 codex、没被停用、还有地址（与面板读路径同一条判据）。
+  if (codexSiteUsable(codex)) {
+    return {
+      ...request,
+      config: { ...request.config, provider: [CODEX_SITE_PROVIDER, ...modelParts].join("/") },
+    };
+  }
+  // 走到这里说明没有可用的站点。内建 codex 上仍配着自定义地址 = 旧式注入留下的状态：
+  // 那个地址宿主根本不读（它只认派生条目），会话会照旧走 `~/.codex/config.toml`。
+  // 这时放行等于把用户的抱怨原样送回给他，只能拦下并说清怎么修。
+  const stale = envText(providers.codex?.env?.OPENAI_BASE_URL);
+  if (stale) {
+    throw new CodexSiteRouteError(
+      `Codex 接入地址（${stale}）尚未绑定到会话 provider，继续建会话会退回 ~/.codex/config.toml 里的地址。` +
+        "请在编排面板的 Codex 行把这条地址存成站点并启用——凭证可以留空，会沿用现有配置里的那一把——然后再建会话",
+    );
+  }
+  // 派生条目在、但没继承 codex：这不是插件写出来的形状，别拿它开会话。
+  if (codex && codex.extends !== "codex") {
+    throw new CodexSiteRouteError("Codex 站点派生 provider 配置不完整；请在编排面板重新启用站点后再建会话");
+  }
+  // 其余两种情况都按普通 Codex 放行：
+  // - `enabled: false`（在 Paseo 自己的 provider 设置里停用这条派生 provider）→ 站点没生效，回到原生 Codex；
+  // - 派生条目没有地址（历史残留 / 手改过 config.json）→ 拿不出地址，当没配。
+  // 两种都要求内建 codex 也没有旧地址，否则上面那条已经拦下了。
+  return request;
+}
+
+/**
+ * 该给这条创建请求算一次 provider 路由吗——要，且只有 Codex 走这条路。
+ *
+ * 读不到宿主配置时**拒绝**而不是放行：读不到就等于不知道该用哪条地址，放行会退回
+ * `~/.codex/config.toml` 里的旧地址（正是这次要堵的那条路）。宁可让用户重试一次。
+ */
+async function routeProviderIfCodex(
+  request: AgentCreateRequest,
+  paseo: PluginHookContext["paseo"],
+): Promise<AgentCreateRequest> {
+  if (providerId(request.config.provider) !== "codex") return request;
+  const config = await readDaemonConfig(paseo);
+  if (!config) {
+    throw new CodexSiteRouteError(
+      "读不到宿主配置，没法确认 Codex 该走哪条接入地址（daemon 可能刚重启）：请重试一次；若一直如此，先到编排面板看 Codex 站点是否还在",
+    );
+  }
+  return routeCodexSiteProvider(request, providersRawOf(config));
+}
+
 export function injectDeckTools(
   request: AgentCreateRequest,
   input: { entry: string; workspaceDir: string },
@@ -356,8 +431,8 @@ async function rosterForPermission(agent: PluginHookAgent): Promise<RosterLookup
         why: `读不出工作区名册（${read.detail ?? (read.corrupt ? "文件损坏" : "IO 失败")}）`,
       };
     }
-    const role = read.settings.roles.find((item) => item.workspaceId === agent.workspaceId);
-    return { ok: true, roster: role?.staff ?? [] };
+    // 名册按目录取：同一目录会有好几个 workspaceId，按 id 取会读成一个空名册。
+    return { ok: true, roster: rosterOf(read.settings) };
   } catch (error) {
     return { ok: false, why: `读工作区名册失败（${error instanceof Error ? error.message : String(error)}）` };
   }
@@ -556,15 +631,20 @@ async function gateStaffPermission(
 }
 
 export function registerHooks(server: PluginServerContext): void {
-  server.before("agent.create", async ({ request }) => {
+  server.before("agent.create", async ({ request }, context) => {
+    // 路由是 try 里的第一句，结果存在 `routed`（初值是原请求）：后面任何一步抛错都
+    // 不能把已经算好的 provider 换回原样——那等于退回 `~/.codex/config.toml` 里的旧地址开会话。
+    // 路由自己失败（`CodexSiteRouteError`）则整条创建中止，见下面的 catch。
+    let routed = request;
     try {
-      const { targets, deck } = await deckWorkspaceState(request.config.cwd);
+      routed = await routeProviderIfCodex(request, context.paseo);
+      const { targets, deck } = await deckWorkspaceState(routed.config.cwd);
       if (!deck) {
         // 不是「出错」，是「这个工作区没有票可读」，所以不注入也不报错，只留一行日志便于排查。
         // 日志带上实际原因（没有远端 / 不是仓库 / 没有 git），别一律写成「没有远端」。
         const why = targets.ok ? "本地后端尚未启用，工作区里也没有 .deck/ 或 .scratch/" : targets.detail;
-        record("info", SCOPE, `未注入 deck 工具（${why}）：${request.config.cwd}`);
-        return request;
+        record("info", SCOPE, `未注入 deck 工具（${why}）：${routed.config.cwd}`);
+        return routed;
       }
       const entry = mcpEntryPath(pluginRoot());
       const problem = injectionProblem({
@@ -574,17 +654,20 @@ export function registerHooks(server: PluginServerContext): void {
       });
       if (problem) {
         record("warn", SCOPE, problem);
-        return request;
+        // 注入不了工具，但已经算好的 provider 路由要留下：丢掉它等于回到旧地址开会话。
+        return routed;
       }
-      if (!supportsExactMcpPreapproval(request.config.provider)) {
+      if (!supportsExactMcpPreapproval(routed.config.provider)) {
         // 降级不是失败：工具照挂，只是每次调用要用户点确认。留一行日志，用户问「怎么老要确认」时有据可查。
-        record("info", SCOPE, `客户端 ${request.config.provider} 不支持精确预授权，deck 工具每次调用都要确认`);
+        record("info", SCOPE, `客户端 ${routed.config.provider} 不支持精确预授权，deck 工具每次调用都要确认`);
       }
-      return injectDeckTools(request, { entry, workspaceDir: request.config.cwd });
+      return injectDeckTools(routed, { entry, workspaceDir: routed.config.cwd });
     } catch (error) {
-      // 注入失败不该拦住用户开会话：原样放行，日志里留下原因。
+      // 只有「Codex 站点没接上」这一类要拦：放行就等于用它本来要替换掉的旧地址开会话。
+      if (error instanceof CodexSiteRouteError) throw error;
+      // 其余（注入失败等）不该拦住用户开会话，日志里留下原因；已经算好的路由要留下。
       record("warn", SCOPE, `注入 deck 工具失败：${error instanceof Error ? error.message : String(error)}`);
-      return request;
+      return routed;
     }
   });
 
@@ -685,10 +768,8 @@ export function registerHooks(server: PluginServerContext): void {
         );
         return;
       }
-      const role =
-        read.settings.roles.find((item) => item.workspaceId === agent.workspaceId) ??
-        (read.settings.roles.length === 1 ? read.settings.roles[0] : undefined);
-      const roster = role?.staff ?? [];
+      // 名册按目录取：同一目录会有好几个 workspaceId，按 id 取会读成一个空名册。
+      const roster = rosterOf(read.settings);
       if (!staffGateApplies(roster)) return;
 
       // 事件载荷上**没有** labels：先 refresh，再把清单拉一遍按 id 找回自己。

@@ -21,14 +21,16 @@ import {
   orchestrationWindowRpc,
 } from "../../../shared/orchestration-rpc.ts";
 import type { FixedRole } from "../../../shared/orchestration.ts";
-import { MAX_STAFF_CARDS } from "../../../shared/staff.ts";
+import { MAX_STAFF_CARDS, rosterOf, withDirectoryRoster } from "../../../shared/staff.ts";
 import type { DeckLang } from "../../../shared/requirement.ts";
-import { usePanelText, type PanelKey } from "../panel/panelText.tsx";
+import { usePanelText } from "../panel/panelText.tsx";
 import { PixelBanner, PixelButton, PixelScreen, usePixel } from "../pixel.tsx";
 import type { SessionNavigation } from "../session/SessionSheet.tsx";
 import { useDeckWorkspaceAgents } from "./host.tsx";
 import type { AgentInfo } from "./registry.ts";
 import { ArchivedPanel } from "./orchestration/ArchivedPanel.tsx";
+import { OrchNav } from "./orchestration/OrchNav.tsx";
+import { DEFAULT_SECTION, sectionLabel, type OrchestrationSection } from "./orchestration/nav.ts";
 import { GroupPanel } from "./orchestration/GroupPanel.tsx";
 import { InboxPanel } from "./orchestration/InboxPanel.tsx";
 import { mergeArchivedRows } from "./orchestration/archivedFilter.ts";
@@ -41,11 +43,9 @@ import { RoutingPanel } from "./orchestration/RoutingPanel.tsx";
 import { StaffPanel } from "./orchestration/StaffPanel.tsx";
 import { TreePanel } from "./orchestration/TreePanel.tsx";
 import {
-  staffOf,
   withMapBudget,
   withRoles,
   withRoute,
-  withStaff,
   type ClientProfile,
   type ClientTarget,
   type Difficulty,
@@ -66,33 +66,11 @@ import {
  * 每个改动都是「读当前设置 → 不可变地换一项 → 整份写回」，不做局部补丁。
  */
 
-type Section =
-  | "roles"
-  | "group"
-  | "inbox"
-  | "staff"
-  | "dispatch"
-  | "clients"
-  | "profiles"
-  | "routing"
-  | "tree"
-  | "archived";
+/** 页签与分组在 `nav.ts`：那里是纯数据，能单测「每一页都恰好出现一次」。 */
+type Section = OrchestrationSection;
 
 /** 编排页两份查询共用的新鲜期：宿主配置与归档清单都不值得每条都重读。 */
 const STALE_MS = 15_000;
-
-const SECTIONS: { key: Section; label: PanelKey }[] = [
-  { key: "roles", label: "orch.section.roles" },
-  { key: "group", label: "orch.section.group" },
-  { key: "inbox", label: "orch.section.inbox" },
-  { key: "staff", label: "orch.section.staff" },
-  { key: "dispatch", label: "orch.section.dispatch" },
-  { key: "clients", label: "orch.section.clients" },
-  { key: "profiles", label: "orch.section.profiles" },
-  { key: "routing", label: "orch.section.routing" },
-  { key: "tree", label: "orch.section.tree" },
-  { key: "archived", label: "orch.section.archived" },
-];
 
 export function OrchestrationView({
   theme,
@@ -112,7 +90,7 @@ export function OrchestrationView({
   const lang: DeckLang = zh ? "zh" : "en";
   const skin = usePixel(theme);
   const toast = useToast();
-  const [section, setSection] = useState<Section>("roles");
+  const [section, setSection] = useState<Section>(DEFAULT_SECTION);
   /** 这三页读的是自己的 RPC，不依赖编排设置：顶栏的刷新与状态报错都不该出现在它们上面。 */
   const ownsItsQuery = section === "archived" || section === "group" || section === "inbox";
 
@@ -401,13 +379,13 @@ export function OrchestrationView({
   const roles = (patch: RolesPatch) => applySettings((current) => withRoles(current, workspaceId, patch));
   const staff = (mutate: StaffMutation) =>
     applySettings((current) => {
-      const next = mutate(staffOf(current, workspaceId));
+      const next = mutate(rosterOf(current));
       if (next.length > MAX_STAFF_CARDS) {
         // 另一个窗口刚把名册加满：归一化会把多出来的卡悄悄截掉，所以在这里明确拒绝，
         // 让 `applySettings` 返回 false、表单草稿留着。
         throw new Error(t("orch.staffFull", { max: MAX_STAFF_CARDS }));
       }
-      return withStaff(current, workspaceId, next);
+      return withDirectoryRoster(current, workspaceId, next);
     });
   const route = (difficulty: Difficulty, rule: { profileId?: string; target?: ClientTarget } | null) =>
     applySettings((current) => withRoute(current, difficulty, rule));
@@ -418,6 +396,23 @@ export function OrchestrationView({
     () => ({
       screen: { padding: layout.compact ? 8 : 10, gap: 8 },
       toolbar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 4, flexWrap: "wrap" as const },
+      title: {
+        color: skin.colors.ink,
+        fontSize: 13,
+        fontWeight: "700" as const,
+        fontFamily: skin.mono.fontFamily,
+      },
+      /** 左栏 + 正文：宽屏并排，窄屏上下（左栏在 `OrchNav` 里自己折成一行页签）。 */
+      body: {
+        flex: 1,
+        flexDirection: layout.compact ? ("column" as const) : ("row" as const),
+        gap: layout.compact ? 6 : 10,
+      },
+      pane: { flex: 1, gap: 8, minHeight: 0 },
+      /** 正文与左栏之间只画一条线：两块同属一页，不需要各套一个框。 */
+      paneEdge: layout.compact
+        ? { borderTopWidth: 1, borderTopColor: skin.colors.line, paddingTop: 6 }
+        : { borderLeftWidth: 1, borderLeftColor: skin.colors.line, paddingLeft: 10 },
       notice: skin.hint,
       /** 提醒不各占一行散在顶上：一道竖线把它们收成一块，正文让位给真正要操作的东西。 */
       noticeBlock: { borderLeftWidth: 1, borderLeftColor: skin.colors.warn, paddingLeft: 8, gap: 2 },
@@ -440,17 +435,11 @@ export function OrchestrationView({
 
   return (
     <PixelScreen skin={skin} style={styles.screen}>
+      {/* 顶栏只留「现在在哪一页」与刷新：页签本身在左栏，顶栏再排一遍等于两份导航。 */}
       <View style={styles.toolbar}>
-        {SECTIONS.map((item) => (
-          <PixelButton
-            key={item.key}
-            skin={skin}
-            variant="tab"
-            label={t(item.label)}
-            active={section === item.key}
-            onPress={() => setSection(item.key)}
-          />
-        ))}
+        <Text style={styles.title} numberOfLines={1}>
+          {t(sectionLabel(section))}
+        </Text>
         <View style={{ flex: 1 }} />
         {/* 已归档、群、收件箱各自读另一份数据、各自带刷新，顶栏这颗在那几页会变成第二颗空按钮。 */}
         {ownsItsQuery ? null : (
@@ -464,183 +453,199 @@ export function OrchestrationView({
         )}
       </View>
 
-      {/* 群读的是自己的 RPC：编排状态读不到时，不该在群页顶上来一条无关的报错。 */}
-      {!ownsItsQuery && state.error ? (
-        <PixelBanner skin={skin}>
-          <Text style={styles.error}>{state.error.message}</Text>
-        </PixelBanner>
-      ) : null}
-      {!ownsItsQuery && state.data && !state.data.ok ? (
-        <PixelBanner skin={skin}>
-          <Text style={styles.error}>
-            {state.data.reason}：{state.data.detail}
-          </Text>
-        </PixelBanner>
-      ) : null}
-      {!ownsItsQuery && data?.warnings.length ? (
-        <View style={styles.noticeBlock}>
-          {data.warnings.map((warning) => (
-            <Text key={warning} style={styles.noticeLine}>
-              {warning}
-            </Text>
-          ))}
-        </View>
-      ) : null}
+      <View style={styles.body}>
+        <OrchNav skin={skin} t={t} section={section} compact={layout.compact} onPick={setSection} />
+        <View style={[styles.pane, styles.paneEdge]}>
+          {/* 群读的是自己的 RPC：编排状态读不到时，不该在群页顶上来一条无关的报错。 */}
+          {!ownsItsQuery && state.error ? (
+            <PixelBanner skin={skin}>
+              <Text style={styles.error}>{state.error.message}</Text>
+            </PixelBanner>
+          ) : null}
+          {!ownsItsQuery && state.data && !state.data.ok ? (
+            <PixelBanner skin={skin}>
+              <Text style={styles.error}>
+                {state.data.reason}：{state.data.detail}
+              </Text>
+            </PixelBanner>
+          ) : null}
+          {!ownsItsQuery && data?.warnings.length ? (
+            <View style={styles.noticeBlock}>
+              {data.warnings.map((warning) => (
+                <Text key={warning} style={styles.noticeLine}>
+                  {warning}
+                </Text>
+              ))}
+            </View>
+          ) : null}
 
-      <View style={styles.content}>
-        {section === "archived" ? (
-          <ArchivedPanel
-            skin={skin}
-            t={t}
-            rows={archivedRows}
-            // 往后读过了就以最后一趟为准：首屏那句「可以继续往前」在读到末批后已经过期。
-            truncated={older ? older.truncated : (archivedView?.truncated ?? false)}
-            warnings={older ? older.warnings : (archivedView?.warnings ?? [])}
-            loading={archived.isFetching}
-            error={archivedError}
-            hasOlder={archivedCursor !== null}
-            loadingOlder={loadingOlder}
-            onLoadOlder={() => void loadOlder()}
-            onReload={reloadArchived}
-            onCopy={copyArchived}
-          />
-        ) : section === "group" ? (
-          // 群读的是自己的 RPC，不依赖编排设置：编排数据读不到时也能进群。
-          <GroupPanel skin={skin} t={t} lang={lang} workspaceId={workspaceId} workspaceDir={workspaceDir} />
-        ) : section === "inbox" ? (
-          // 收件箱同样读自己的 RPC：越界请求与编排设置无关。
-          <InboxPanel theme={theme} workspaceId={workspaceId} workspaceDir={workspaceDir} />
-        ) : !data || !settings ? (
-          <Text style={styles.notice}>{state.isPending ? t("common.loading") : t("orch.empty")}</Text>
-        ) : section === "roles" ? (
-          <RolesPanel
-            skin={skin}
-            t={t}
-            lang={lang}
-            workspaceId={workspaceId}
-            settings={settings}
-            agents={agents}
-            knownAgentIds={data.agents.map((agent) => agent.agentId)}
-            busy={busy}
-            onPatch={roles}
-            onBuildWindow={buildWindow}
-            onLimits={limits}
-            onMapBudget={mapBudget}
-            onStop={stopStaff}
-            {...(navigation ? { onOpen: openAgent } : {})}
-          />
-        ) : section === "staff" ? (
-          <StaffPanel
-            skin={skin}
-            t={t}
-            cards={staffOf(settings, workspaceId)}
-            profiles={data.profiles}
-            busy={busy}
-            onSave={staff}
-          />
-        ) : section === "dispatch" ? (
-          <DispatchPanel
-            skin={skin}
-            t={t}
-            lang={lang}
-            workspaceId={workspaceId}
-            workspaceDir={workspaceDir}
-            cards={staffOf(settings, workspaceId)}
-          />
-        ) : section === "clients" ? (
-          <ClientsPanel
-            skin={skin}
-            t={t}
-            providers={data.providers}
-            busy={patchProvider.isPending}
-            onSaveEnv={(input) => patchProvider.mutate(input)}
-            onSaveModel={(input) => patchProvider.mutate(input)}
-            onSaveLabel={(input) => patchProvider.mutate(input)}
-            onDiagnose={async (provider) => {
-              try {
-                const result = await diagnosticRpc({ provider });
-                return result;
-              } catch (error) {
-                return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
-              }
-            }}
-            onReveal={async (provider, key) => {
-              try {
-                const result = await revealRpc({ provider, key });
-                return result.ok ? { ok: true as const, value: result.value } : { ok: false as const, detail: result.detail };
-              } catch (error) {
-                return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
-              }
-            }}
-            onInstall={async (provider) => {
-              try {
-                const result = await installRpc({ provider });
-                // 装完之后宿主要重新解析命令：只有重取状态，界面上的「未安装」才会变成「可用」。
-                if (result.ok) void state.refetch();
-                return result;
-              } catch (error) {
-                return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
-              }
-            }}
-            onSaveSite={async (input) => {
-              try {
-                const result = await siteRpc(input);
-                if (!result.ok) return { ok: false as const, detail: result.detail };
-                for (const warning of result.warnings) toast.show(warning, { variant: "warning" });
-                // 站点表与「现在生效的是哪条」都是服务端读盘 + 读宿主配置算出来的：重取一次。
-                await state.refetch();
-                return { ok: true as const };
-              } catch (error) {
-                return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
-              }
-            }}
-            onFetchModels={async (provider) => {
-              try {
-                const result = await modelsRpc({ provider });
-                return result.ok
-                  ? { ok: true as const, endpoint: result.endpoint, models: result.models }
-                  : { ok: false as const, detail: result.detail };
-              } catch (error) {
-                return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
-              }
-            }}
-            onRefreshCatalog={async () => {
-              try {
-                const result = await refreshCatalogRpc({ workspaceDir });
-                if (!result.ok) return { ok: false as const, detail: result.detail };
-                // 刷新后宿主的快照变了：本页的模型计数也重取一次，两处说的是同一份目录。
-                // 不 await：重取失败是「本页数字旧了」，不能把已经成功的刷新报成失败。
-                // 警告由客户端面板就地显示（带警告色），不再另弹一层 toast。
-                void state.refetch();
-                return result;
-              } catch (error) {
-                return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
-              }
-            }}
-          />
-        ) : section === "profiles" ? (
-          <ProfilesPanel
-            skin={skin}
-            t={t}
-            profiles={data.profiles}
-            providers={data.providers}
-            busy={patchProfile.isPending}
-            onSave={(profile) => patchProfile.mutate({ profile })}
-            onRemove={(removeId) => patchProfile.mutate({ removeId })}
-          />
-        ) : section === "routing" ? (
-          <RoutingPanel
-            skin={skin}
-            t={t}
-            routing={data.routing}
-            profiles={data.profiles}
-            providers={data.providers}
-            busy={busy}
-            onPatch={route}
-          />
-        ) : (
-          <TreePanel skin={skin} t={t} tree={data.tree} />
-        )}
+          <View style={styles.content}>
+            {section === "archived" ? (
+              <ArchivedPanel
+                skin={skin}
+                t={t}
+                rows={archivedRows}
+                // 往后读过了就以最后一趟为准：首屏那句「可以继续往前」在读到末批后已经过期。
+                truncated={older ? older.truncated : (archivedView?.truncated ?? false)}
+                warnings={older ? older.warnings : (archivedView?.warnings ?? [])}
+                loading={archived.isFetching}
+                error={archivedError}
+                hasOlder={archivedCursor !== null}
+                loadingOlder={loadingOlder}
+                onLoadOlder={() => void loadOlder()}
+                onReload={reloadArchived}
+                onCopy={copyArchived}
+              />
+            ) : section === "group" ? (
+              // 群读的是自己的 RPC，不依赖编排设置：编排数据读不到时也能进群。
+              <GroupPanel
+                skin={skin}
+                t={t}
+                lang={lang}
+                workspaceId={workspaceId}
+                workspaceDir={workspaceDir}
+                large={!layout.compact}
+                onOpenStaff={() => setSection("staff")}
+              />
+            ) : section === "inbox" ? (
+              // 收件箱同样读自己的 RPC：越界请求与编排设置无关。
+              <InboxPanel theme={theme} workspaceId={workspaceId} workspaceDir={workspaceDir} />
+            ) : !data || !settings ? (
+              <Text style={styles.notice}>{state.isPending ? t("common.loading") : t("orch.empty")}</Text>
+            ) : section === "roles" ? (
+              <RolesPanel
+                skin={skin}
+                t={t}
+                lang={lang}
+                workspaceId={workspaceId}
+                settings={settings}
+                agents={agents}
+                knownAgentIds={data.agents.map((agent) => agent.agentId)}
+                busy={busy}
+                onPatch={roles}
+                onBuildWindow={buildWindow}
+                onLimits={limits}
+                onMapBudget={mapBudget}
+                onStop={stopStaff}
+                {...(navigation ? { onOpen: openAgent } : {})}
+              />
+            ) : section === "staff" ? (
+              <StaffPanel
+                skin={skin}
+                t={t}
+                workspaceId={workspaceId}
+                workspaceDir={workspaceDir}
+                lang={lang}
+                cards={rosterOf(settings)}
+                profiles={data.profiles}
+                busy={busy}
+                onSave={staff}
+              />
+            ) : section === "dispatch" ? (
+              <DispatchPanel
+                skin={skin}
+                t={t}
+                lang={lang}
+                workspaceId={workspaceId}
+                workspaceDir={workspaceDir}
+                cards={rosterOf(settings)}
+              />
+            ) : section === "clients" ? (
+              <ClientsPanel
+                skin={skin}
+                t={t}
+                providers={data.providers}
+                busy={patchProvider.isPending}
+                onSaveEnv={(input) => patchProvider.mutate(input)}
+                onSaveModel={(input) => patchProvider.mutate(input)}
+                onSaveLabel={(input) => patchProvider.mutate(input)}
+                onDiagnose={async (provider) => {
+                  try {
+                    const result = await diagnosticRpc({ provider });
+                    return result;
+                  } catch (error) {
+                    return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
+                  }
+                }}
+                onReveal={async (provider, key) => {
+                  try {
+                    const result = await revealRpc({ provider, key });
+                    return result.ok ? { ok: true as const, value: result.value } : { ok: false as const, detail: result.detail };
+                  } catch (error) {
+                    return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
+                  }
+                }}
+                onInstall={async (provider) => {
+                  try {
+                    const result = await installRpc({ provider });
+                    // 装完之后宿主要重新解析命令：只有重取状态，界面上的「未安装」才会变成「可用」。
+                    if (result.ok) void state.refetch();
+                    return result;
+                  } catch (error) {
+                    return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
+                  }
+                }}
+                onSaveSite={async (input) => {
+                  try {
+                    const result = await siteRpc(input);
+                    if (!result.ok) return { ok: false as const, detail: result.detail };
+                    for (const warning of result.warnings) toast.show(warning, { variant: "warning" });
+                    // 站点表与「现在生效的是哪条」都是服务端读盘 + 读宿主配置算出来的：重取一次。
+                    await state.refetch();
+                    return { ok: true as const };
+                  } catch (error) {
+                    return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
+                  }
+                }}
+                onFetchModels={async (provider) => {
+                  try {
+                    const result = await modelsRpc({ provider });
+                    return result.ok
+                      ? { ok: true as const, endpoint: result.endpoint, models: result.models }
+                      : { ok: false as const, detail: result.detail };
+                  } catch (error) {
+                    return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
+                  }
+                }}
+                onRefreshCatalog={async () => {
+                  try {
+                    const result = await refreshCatalogRpc({ workspaceDir });
+                    if (!result.ok) return { ok: false as const, detail: result.detail };
+                    // 刷新后宿主的快照变了：本页的模型计数也重取一次，两处说的是同一份目录。
+                    // 不 await：重取失败是「本页数字旧了」，不能把已经成功的刷新报成失败。
+                    // 警告由客户端面板就地显示（带警告色），不再另弹一层 toast。
+                    void state.refetch();
+                    return result;
+                  } catch (error) {
+                    return { ok: false as const, detail: error instanceof Error ? error.message : String(error) };
+                  }
+                }}
+              />
+            ) : section === "profiles" ? (
+              <ProfilesPanel
+                skin={skin}
+                t={t}
+                profiles={data.profiles}
+                providers={data.providers}
+                busy={patchProfile.isPending}
+                onSave={(profile) => patchProfile.mutate({ profile })}
+                onRemove={(removeId) => patchProfile.mutate({ removeId })}
+              />
+            ) : section === "routing" ? (
+              <RoutingPanel
+                skin={skin}
+                t={t}
+                routing={data.routing}
+                profiles={data.profiles}
+                providers={data.providers}
+                busy={busy}
+                onPatch={route}
+              />
+            ) : (
+              <TreePanel skin={skin} t={t} tree={data.tree} />
+            )}
+          </View>
+        </View>
       </View>
 
       {/* 角色页的计数器已经在说明层数与单次上限，底栏再写一遍只是噪音；已归档与群与派单无关。 */}

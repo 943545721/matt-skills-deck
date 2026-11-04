@@ -69,6 +69,8 @@ import {
   resolveReassignTarget,
   type ResolvedReassignTarget,
 } from "../staff-reassign.ts";
+import { readStaffScan, startStaffScan } from "../staff-scan.ts";
+import { staffScanReadRpc, staffScanStartRpc } from "../../shared/staff-scan-rpc.ts";
 import {
   approveCoordination,
   contractChangedCoordination,
@@ -327,6 +329,50 @@ export async function orchestrationStaffStopHandler(
     workspaceDir: input.workspaceDir,
     ...(input.archive === undefined ? {} : { archive: input.archive }),
   });
+}
+
+/* ---------------------------------------------------------------- 扫岗 */
+
+/**
+ * 起一次扫岗。
+ *
+ * 设置与路由复用「建窗口」那两步：读不出设置、normal 档没客户端，扫岗和建窗口
+ * 是同一个死法，就该给同一句原因。
+ */
+export async function staffScanStartHandler(
+  input: RpcInput<typeof staffScanStartRpc>,
+  context: PluginHandlerContext,
+): Promise<RpcOutput<typeof staffScanStartRpc>> {
+  const workspaceDir = input.workspaceDir.trim();
+  const workspaceId = input.workspaceId.trim();
+  if (!workspaceDir || !workspaceId) {
+    return { ok: false, reason: "invalid-workspace", detail: "需要 workspaceId 与工作区目录" };
+  }
+
+  const read = await readWindowSettings(workspaceDir);
+  if (!read.ok) return read;
+  const route = await resolveWindowTarget(context.paseo, read.settings);
+  if (!route.ok) return route;
+
+  return startStaffScan({
+    paseo: context.paseo,
+    workspaceDir,
+    workspaceId,
+    settings: read.settings,
+    target: route.target,
+    ...(input.lang ? { lang: input.lang } : {}),
+  });
+}
+
+/** 读这次扫描写下的候选。只读文件，不建会话、不改名册。 */
+export async function staffScanReadHandler(
+  input: RpcInput<typeof staffScanReadRpc>,
+): Promise<RpcOutput<typeof staffScanReadRpc>> {
+  const workspaceDir = input.workspaceDir.trim();
+  if (!workspaceDir) {
+    return { ok: false, reason: "invalid-workspace", detail: "需要工作区目录" };
+  }
+  return readStaffScan(workspaceDir);
 }
 
 export async function orchestrationSaveHandler(

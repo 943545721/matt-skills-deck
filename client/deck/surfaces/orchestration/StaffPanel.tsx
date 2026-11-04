@@ -15,6 +15,10 @@ import {
 import type { PanelKey } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelButton } from "../../pixel.tsx";
+import { adoptScanCandidates } from "./scan-model.ts";
+import { StaffScan } from "./StaffScan.tsx";
+import type { DeckLang } from "../../../../shared/requirement.ts";
+import type { StaffScanCandidate } from "../../../../shared/staff-scan.ts";
 import type { ClientProfile, StaffMutation } from "./types.ts";
 import { OrchSection, OrchStepper, rowDivider } from "./parts.tsx";
 
@@ -326,6 +330,9 @@ function StaffEditor({
 export function StaffPanel({
   skin,
   t,
+  workspaceId,
+  workspaceDir,
+  lang,
   cards,
   profiles,
   busy,
@@ -333,6 +340,11 @@ export function StaffPanel({
 }: {
   skin: PixelSkin;
   t(key: PanelKey, vars?: Record<string, string | number>): string;
+  /** 扫岗要在这个工作区里起会话、读它的名册。 */
+  workspaceId: string;
+  workspaceDir: string;
+  /** 扫岗简报用哪种语言写。 */
+  lang: DeckLang;
   cards: StaffCard[];
   profiles: ClientProfile[];
   busy?: boolean;
@@ -345,6 +357,8 @@ export function StaffPanel({
   const styles = useStaffStyles(skin);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editingExisting, setEditingExisting] = useState(false);
+  /** 上一次采纳的结果（加了几张、跳过几条）：扫岗面板里就地写一行，不再弹 toast。 */
+  const [adoptNote, setAdoptNote] = useState<string | null>(null);
   const settingsBusy = Boolean(busy);
   const full = cards.length >= MAX_STAFF_CARDS;
 
@@ -391,6 +405,35 @@ export function StaffPanel({
   const profileOf = (card: StaffCard): string => {
     if (!card.profileId) return t("orch.staffProfileNone");
     return profiles.find((profile) => profile.id === card.profileId)?.name ?? card.profileId;
+  };
+
+  /**
+   * 采纳扫岗候选。
+   *
+   * 合并发生在 `onSave` 的回调里，因为那里拿到的才是落盘前最后读到的名册——
+   * 用界面上这份 `cards` 去算，会把这一小段时间里别人（另一个窗口）改的卡覆盖掉。
+   * 回调按保存流程只跑一次，所以在这里记一句结果给界面是安全的。
+   */
+  const adopt = async (picked: readonly StaffScanCandidate[]): Promise<boolean> => {
+    if (settingsBusy || !picked.length) return false;
+    let said: string | null = null;
+    try {
+      const saved = await onSave((current) => {
+        const result = adoptScanCandidates(current, picked);
+        const parts = [
+          result.added ? t("orch.scanAdded", { n: result.added }) : "",
+          result.skipped ? t("orch.scanSkipped", { n: result.skipped }) : "",
+          result.overLimit ? t("orch.scanOverLimit", { n: result.overLimit, max: MAX_STAFF_CARDS }) : "",
+        ].filter(Boolean);
+        said = parts.join(" ") || null;
+        return result.cards;
+      });
+      setAdoptNote(saved ? said : null);
+      return saved;
+    } catch {
+      // 失败原因已由 `applySettings` 弹过 toast；这里只保证候选不会被标成「已采纳」。
+      return false;
+    }
   };
 
   return (
@@ -493,6 +536,18 @@ export function StaffPanel({
           />
         ) : null}
       </OrchSection>
+
+      {/* 扫岗放在名册下面：先看到现有的人，再看「扫出来的人」，顺序与心里的顺序一致。 */}
+      <StaffScan
+        skin={skin}
+        t={t}
+        workspaceId={workspaceId}
+        workspaceDir={workspaceDir}
+        lang={lang}
+        disabled={settingsBusy}
+        note={adoptNote}
+        onAdopt={adopt}
+      />
     </ScrollView>
   );
 }

@@ -11,6 +11,7 @@ import {
   type CoordinationActionWire,
   type CoordinationInboxRowWire,
 } from "../../../../shared/orchestration-rpc.ts";
+import { rosterOf } from "../../../../shared/staff.ts";
 import { clockText } from "../../format.ts";
 import { usePanelText } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
@@ -212,9 +213,8 @@ export function InboxPanel({
     staleTime: 15_000,
     retry: false,
   });
-  const roster = state.data?.ok
-    ? (state.data.settings.roles.find((role) => role.workspaceId === workspaceId)?.staff ?? [])
-    : [];
+  // 名册按目录取：同一目录会有好几个 workspaceId，按 id 取会读成空名册。
+  const roster = state.data?.ok ? rosterOf(state.data.settings) : [];
 
   const [targets, setTargets] = useState<Record<number, string>>({});
   const [problem, setProblem] = useState<string | null>(null);

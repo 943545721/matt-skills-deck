@@ -48,6 +48,7 @@ import {
   planDispatch,
   staffCardOf,
   ticketSpecOf,
+  workspaceRolesOf,
   type WorkspaceRoles,
 } from "../../shared/orchestration.ts";
 import {
@@ -73,7 +74,7 @@ import {
   requireTicketGates,
 } from "../../shared/impact.ts";
 import { guardCreateTicket } from "../../shared/split-guard.ts";
-import { DECK_STAFF_LABEL } from "../../shared/staff.ts";
+import { DECK_STAFF_LABEL, rosterOf } from "../../shared/staff.ts";
 import { planStaffRequest, STAFF_REQUEST_TOOL_NAME } from "../../shared/staff-request.ts";
 import { acceptanceRecordForClose, judgeCreateChainGate, judgeDispatchTaskChain } from "../chain-gates.ts";
 import type { TicketReader } from "../contract-chain.ts";
@@ -508,7 +509,7 @@ async function runIssueCreate(args: unknown, context: ToolContext): Promise<Tool
     // 名册非空时只认名册里的卡；写一张不存在的卡会让履历、群视图和单例锁全部对不上。
     const plan = await readPlanContext(context.workspaceDir);
     if (!plan.readFailed && !plan.corrupt) {
-      const cards = plan.settings.roles.flatMap((role) => role.staff ?? []);
+      const cards = rosterOf(plan.settings);
       if (cards.length && !cards.some((card) => card.id === staffId)) {
         return fail(
           "unknown-staff",
@@ -1883,7 +1884,8 @@ async function runDispatchPlan(args: unknown, context: ToolContext): Promise<Too
   // 谁在派单：优先信 `PASEO_AGENT_ID`（真实调用者）。配置里的派单窗口只是默认值，
   // 任何会话都能调这个工具，标签写错窗口会让会话树与真实回传链指向两个不同会话。
   const callerAgentId = process.env.PASEO_AGENT_ID?.trim() ?? "";
-  const workspaceRoles = read.settings.roles.find((role) => role.workspaceId === workspaceId) ?? null;
+  // 名册按目录合并；槽位仍按 workspaceId（会话属于具体工作区）。
+  const workspaceRoles = workspaceRolesOf(read.settings, workspaceId);
   // 员工卡只能干活，不能派活：先在计划阶段拒掉，别花一次建会话再去 `agent.created` 归档。
   const callerWorker = await callerWorkerOf(workspaceRoles, callerAgentId, context.workspaceDir);
   if (callerWorker) {
@@ -2139,10 +2141,9 @@ async function runRequirementDispatchTool(args: unknown, context: ToolContext): 
   const workspaceId =
     read.workspaceId || (roleIds.length === 1 ? roleIds[0] ?? "" : "");
   const callerAgentId = process.env.PASEO_AGENT_ID?.trim() ?? "";
-  const role = workspaceId
-    ? read.settings.roles.find((item) => item.workspaceId === workspaceId) ?? null
-    : null;
-  const callerWorker = await callerWorkerOf(role, callerAgentId, context.workspaceDir);
+  // 名册按目录合并：按 id 取会把别处（同一目录的旧 id）的名册读成空的，员工就漏拦了。
+  const workspaceRoles = workspaceId ? workspaceRolesOf(read.settings, workspaceId) : null;
+  const callerWorker = await callerWorkerOf(workspaceRoles, callerAgentId, context.workspaceDir);
   if (callerWorker) {
     return fail(
       "staff-cannot-dispatch",
@@ -2236,10 +2237,7 @@ async function runStaffRequest(args: unknown, context: ToolContext): Promise<Too
   }
   const roleIds = [...new Set(read.settings.roles.map((role) => role.workspaceId.trim()).filter(Boolean))];
   const workspaceId = read.workspaceId || (roleIds.length === 1 ? roleIds[0] ?? "" : "");
-  const role = workspaceId
-    ? read.settings.roles.find((item) => item.workspaceId === workspaceId) ?? null
-    : null;
-  const staffIds = (role?.staff ?? []).map((card) => card.id);
+  const staffIds = rosterOf(read.settings).map((card) => card.id);
 
   const build = planStaffRequest(inputResult.data, {
     workspaceId,

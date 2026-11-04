@@ -144,13 +144,7 @@ test("群标签常量固定", () => {
   assert.equal(DECK_GROUP_LABEL, "deck.group");
 });
 
-const here = { workspaceId: "ws-a", workspaceDir: "/a", name: "甲", staff: [] };
-const other = {
-  workspaceId: "ws-b",
-  workspaceDir: "/b",
-  name: "乙",
-  staff: [{ id: "staff-bbbbbb", name: "前端" }],
-};
+/* ---------------------------- 点名册选人：一个群只有一份名册，不存在「哪个区的那张」 */
 
 test("点了 staffId：正文没有 @ 也派给这张卡，名字保持原样", () => {
   const plan = planGroupSend({
@@ -159,79 +153,67 @@ test("点了 staffId：正文没有 @ 也派给这张卡，名字保持原样", 
     staffId: "staff-aaaaaa",
     mainAgentId: null,
     requirement: final,
-    workspace: { ...here, staff: cards },
   });
   assert.equal(plan.ok, true);
   assert.equal(plan.phase, "send");
-  assert.equal(plan.targets[0].staffId, "staff-aaaaaa");
-  assert.equal(plan.targets[0].name, "前端");
-  assert.equal(plan.scope.workspaceId, "ws-a");
+  assert.deepEqual(plan.targets.map((target) => [target.staffId, target.name]), [["staff-aaaaaa", "前端"]]);
 });
 
-test("点了别的工作区的卡：scope 指到那个工作区，不改名字", () => {
+test("点的 id 不在本群名册上：拒绝并列出本群的人，不猜是别处那张卡", () => {
   const plan = planGroupSend({
-    text: "@前端 改一下",
-    staff: [],
-    staffId: "staff-bbbbbb",
-    mainAgentId: "main-1",
-    requirement: final,
-    workspace: here,
-    otherRosters: [other],
-  });
-  assert.equal(plan.ok, true);
-  assert.equal(plan.targets[0].name, "前端");
-  assert.equal(plan.scope.workspaceId, "ws-b");
-  assert.equal(plan.scope.workspaceDir, "/b");
-});
-
-test("两个工作区同名：列出原名让人点，不自动加后缀", () => {
-  const plan = planGroupSend({
-    text: "@前端 改一下",
+    text: "把间距改一下",
     staff: cards,
+    staffId: "staff-cccccc",
     mainAgentId: "main-1",
     requirement: final,
-    workspace: { ...here, staff: cards },
-    otherRosters: [other],
+  });
+  assert.equal(plan.ok, false);
+  assert.equal(plan.reason, "unknown-staff");
+  assert.match(plan.detail, /前端/);
+});
+
+test("本群名册上重名：列出候选让人点，不自动加后缀", () => {
+  const plan = planGroupSend({
+    text: "@前端 改一下",
+    staff: [
+      { id: "staff-aaaaaa", name: "前端" },
+      { id: "staff-bbbbbb", name: "前端" },
+    ],
+    mainAgentId: "main-1",
+    requirement: final,
   });
   assert.equal(plan.ok, false);
   assert.equal(plan.reason, "ambiguous-staff");
   assert.deepEqual(
-    plan.candidates.map((item) => item.name),
-    ["前端", "前端"],
-  );
-  assert.deepEqual(
-    plan.candidates.map((item) => item.workspaceName),
-    ["甲", "乙"],
+    plan.candidates.map((item) => item.staffId),
+    ["staff-aaaaaa", "staff-bbbbbb"],
   );
   assert.equal(plan.candidates.some((item) => item.name.includes("-")), false);
 });
 
-test("当前工作区已经有这张卡：别的工作区撞了同一个 id，仍派给点中的这张", () => {
+test("点名和正文的 @ 撞在一起：点选优先，正文的 @ 只是那句话", () => {
   const plan = planGroupSend({
-    text: "把间距改一下",
-    staff: [{ id: "staff-aaaaaa", name: "前端甲" }],
+    text: "@后端 顺手看一下",
+    staff: cards,
     staffId: "staff-aaaaaa",
     mainAgentId: null,
     requirement: final,
-    workspace: { ...here, staff: [] },
-    otherRosters: [{ ...other, staff: [{ id: "staff-aaaaaa", name: "前端乙" }] }],
   });
   assert.equal(plan.ok, true);
-  assert.equal(plan.phase, "send");
-  assert.equal(plan.targets[0].name, "前端甲");
-  assert.equal(plan.scope.workspaceId, "ws-a");
+  assert.deepEqual(plan.targets.map((target) => target.staffId), ["staff-aaaaaa"]);
 });
 
-test("一句话点到两个工作区：拒绝，并让人点其中一个", () => {
+test("@全部 只铺本群名册，不带上别的项目的人", () => {
   const plan = planGroupSend({
-    text: "@前端 改界面 @后端 改接口",
-    staff: [{ id: "staff-aaaaaa", name: "前端" }],
+    text: "@全部 今天先修登录页",
+    staff: cards,
     mainAgentId: "main-1",
     requirement: final,
-    workspace: { ...here, staff: [{ id: "staff-aaaaaa", name: "前端" }] },
-    otherRosters: [{ workspaceId: "ws-b", workspaceDir: "/b", name: "乙", staff: [{ id: "staff-bbbbbb", name: "后端" }] }],
+    confirmAll: true,
   });
-  assert.equal(plan.ok, false);
-  assert.equal(plan.reason, "cross-workspace");
-  assert.deepEqual(plan.candidates.map((item) => item.workspaceId), ["ws-a", "ws-b"]);
+  assert.equal(plan.ok, true);
+  assert.deepEqual(
+    plan.targets.map((target) => target.staffId),
+    ["staff-aaaaaa", "staff-bbbbbb"],
+  );
 });

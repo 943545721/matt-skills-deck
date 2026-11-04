@@ -178,6 +178,41 @@ test("写盘是原子的且 0600：并发两次点击都留在文件里", async 
 // 加 / 启用 / 删
 // ---------------------------------------------------------------------------
 
+test("站点：插件不支持的客户端不给建站/启用，早先留下的记录仍可删", async () => {
+  const home = await tempHome();
+  const paseo = fakePaseo(baseConfig());
+  const added = await saveClientSite(paseo, {
+    provider: "cursor",
+    site: { id: "legacy", baseUrl: "https://cursor.example.test/v1" },
+  });
+  assert.equal(added.ok, false);
+  assert.equal(added.reason, "invalid");
+  assert.match(added.detail, /只支持 Claude \/ Codex/);
+  assert.equal(paseo.patches.length, 0, "拒绝就一笔都不写，宿主配置不动");
+
+  // 早先存下的记录要清得掉：删除不拦。
+  await mkdir(path.join(home, "matt-skills-deck"), { recursive: true });
+  await writeFile(
+    sitesFile(home),
+    JSON.stringify({ version: 1, providers: { cursor: [{ id: "legacy", baseUrl: "https://cursor.example.test/v1" }] } }),
+    "utf8",
+  );
+  const removed = await saveClientSite(paseo, { provider: "cursor", removeId: "legacy" });
+  assert.equal(removed.ok, true);
+  assert.deepEqual(removed.sites, []);
+
+  // 一次带好几个动作也不行：建站那一笔照样被拦，站点表里不能多出一条。
+  const mixed = await saveClientSite(paseo, {
+    provider: "cursor",
+    removeId: "whatever",
+    site: { id: "sneaky", baseUrl: "https://cursor.example.test/v1" },
+  });
+  assert.equal(mixed.ok, false);
+  const after = await readSiteBook(home);
+  assert.deepEqual(after.ok ? (after.book.providers.cursor ?? []) : [], [], "不能借删除那一笔蒙混建站");
+  assert.equal(paseo.patches.length, 0);
+});
+
 test("加站点：只落盘，不动宿主配置", async () => {
   await tempHome();
   const paseo = fakePaseo(baseConfig());
@@ -208,6 +243,90 @@ test("启用：把地址与凭证写进客户端自己的 env，其它键原样�
     ANTHROPIC_MODEL: "deepseek-v4.1-flash",
   });
   assert.equal(enabled.enabledSiteId, "backup");
+});
+
+test("启用 Codex 站点：配置派生 provider 并使用 Codex 适配器读取的 env 键", async () => {
+  await tempHome();
+  const paseo = fakePaseo({
+    providers: {
+      codex: { models: [{ id: "gpt-5-codex", label: "GPT-5 Codex", isDefault: true }] },
+    },
+  });
+  await saveClientSite(paseo, {
+    provider: "codex",
+    site: { id: "main", baseUrl: "https://api.example.test/v1", credential: "codex-test-credential" },
+  });
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+
+  assert.equal(enabled.ok, true);
+  assert.equal(enabled.enabledSiteId, "main");
+  assert.deepEqual(paseo.disk().providers["deck-codex"], {
+    extends: "codex",
+    label: "Deck Codex",
+    enabled: true,
+    models: [{ id: "gpt-5-codex", label: "GPT-5 Codex", isDefault: true }],
+    env: {
+      OPENAI_BASE_URL: "https://api.example.test/v1",
+      OPENAI_API_KEY: "codex-test-credential",
+    },
+  });
+  assert.equal(paseo.disk().providers.codex.env, undefined, "不能让 builtin codex 的旧配置与派生 provider 混淆");
+});
+
+test("启用 Codex 站点：站点没填凭证时沿用它原本那把键上的凭证，不要求再贴一遍", async () => {
+  await tempHome();
+  const paseo = fakePaseo({
+    providers: {
+      codex: { env: { OPENAI_BASE_URL: "https://old.example.test/v1", SUB2API_API_KEY: "legacy-credential-1234" } },
+    },
+  });
+  await saveClientSite(paseo, { provider: "codex", site: { id: "main", baseUrl: "https://new.example.test/v1" } });
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+
+  assert.equal(enabled.ok, true);
+  const derived = paseo.disk().providers["deck-codex"];
+  assert.equal(derived.env.OPENAI_BASE_URL, "https://new.example.test/v1");
+  assert.equal(derived.env.OPENAI_API_KEY, "legacy-credential-1234", "换成 Codex 适配器认的键名");
+  // 内建条目一个字都不动：用户自己的 Codex 配置不许被插件改写。
+  assert.deepEqual(paseo.disk().providers.codex.env, {
+    OPENAI_BASE_URL: "https://old.example.test/v1",
+    SUB2API_API_KEY: "legacy-credential-1234",
+  });
+});
+
+test("启用 Codex 站点：写进去了但读回没有这一条，就报失败，不谎报已生效", async () => {
+  await tempHome();
+  // 宿主收下补丁、什么都没存下来（不认这个字段时的样子）。
+  const paseo = {
+    config: {
+      get: async () => ({ config: { providers: {} } }),
+      patch: async () => ({ config: { providers: {} } }),
+    },
+  };
+  await saveClientSite(paseo, {
+    provider: "codex",
+    site: { id: "main", baseUrl: "https://api.example.test/v1", credential: "cred-x" },
+  });
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+  assert.equal(enabled.ok, false);
+  assert.equal(enabled.reason, "config-failed");
+  assert.match(enabled.detail, /读回看不到 deck-codex/);
+});
+
+test("启用 Codex 站点：宿主收下 env 却没建成派生 provider，启用这一步就报失败", async () => {
+  await tempHome();
+  const stored = { env: { OPENAI_BASE_URL: "https://api.example.test/v1", OPENAI_API_KEY: "cred-x" } };
+  const paseo = {
+    config: {
+      // 只有 env 留下来，`extends` / `label` 没被接受：派生 provider 等于没建。
+      get: async () => ({ config: { providers: { "deck-codex": stored } } }),
+      patch: async () => ({ config: { providers: { "deck-codex": stored } } }),
+    },
+  };
+  await saveClientSite(paseo, { provider: "codex", site: { id: "main", baseUrl: "https://api.example.test/v1" } });
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+  assert.equal(enabled.ok, false);
+  assert.match(enabled.detail, /没有作为派生 Codex provider 生效/);
 });
 
 test("换一条启用：宿主里永远只有一份地址", async () => {
@@ -289,4 +408,53 @@ test("客户端在配置里还没有条目：第一次启用就该把它建出�
     ANTHROPIC_API_KEY: "tok-a",
   });
   assert.equal(enabled.enabledSiteId, "main");
+});
+
+test("启用 Codex 站点：多把钥匙时按 OPENAI_API_KEY → *_API_KEY → *_TOKEN 的顺序挑，不按 env 插入顺序", async () => {
+  await tempHome();
+  const paseo = fakePaseo({
+    providers: {
+      codex: {
+        env: {
+          ZZZ_TOKEN: "token-first-in-env",
+          SOME_API_KEY: "api-key-second",
+          OPENAI_API_KEY: "the-one-codex-reads",
+        },
+      },
+    },
+  });
+  await saveClientSite(paseo, { provider: "codex", site: { id: "main", baseUrl: "https://api.example.test/v1" } });
+  await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+  assert.equal(paseo.disk().providers["deck-codex"].env.OPENAI_API_KEY, "the-one-codex-reads");
+
+  // 没有 OPENAI_API_KEY 时退到 *_API_KEY，再退到 *_TOKEN——不按插入顺序取第一条。
+  await tempHome();
+  const second = fakePaseo({
+    providers: { codex: { env: { AAA_TOKEN: "token-value", ZZ_API_KEY: "api-key-value" } } },
+  });
+  await saveClientSite(second, { provider: "codex", site: { id: "main", baseUrl: "https://b.example.test/v1" } });
+  await saveClientSite(second, { provider: "codex", enableId: "main" });
+  assert.equal(second.disk().providers["deck-codex"].env.OPENAI_API_KEY, "api-key-value");
+});
+
+test("启用 Codex 站点：派生条目停用期间改过模型，启用时以最新那份为准，不拿停用条目的旧清单盖掉", async () => {
+  await tempHome();
+  const paseo = fakePaseo({
+    providers: {
+      // 内建条目是用户刚改过的那份；派生条目还停用着，留着旧清单。
+      codex: { models: [{ id: "gpt-new", label: "GPT New" }] },
+      "deck-codex": {
+        extends: "codex",
+        label: "Deck Codex",
+        enabled: false,
+        models: [{ id: "gpt-old", label: "GPT Old" }],
+        env: { OPENAI_BASE_URL: "https://old.example.test/v1" },
+      },
+    },
+  });
+  await saveClientSite(paseo, { provider: "codex", site: { id: "main", baseUrl: "https://api.example.test/v1" } });
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+  assert.equal(enabled.ok, true);
+  assert.deepEqual(paseo.disk().providers["deck-codex"].models, [{ id: "gpt-new", label: "GPT New" }]);
+  assert.equal(paseo.disk().providers["deck-codex"].env.OPENAI_BASE_URL, "https://api.example.test/v1");
 });

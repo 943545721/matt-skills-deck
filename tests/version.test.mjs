@@ -44,18 +44,26 @@ function insideRange(range, version) {
 }
 
 /**
- * 为什么是 0.13–0.14 这一段：0.14 的客户端 SDK 与 0.13 逐字节相同，
- * 服务端只是新增了 `defineAgentTool` 与几处只读字段，所以同一份插件代码在两条线上都能跑；
- * 0.15 之后没有比对过，等真的比对完再放宽——不能凭「大概没事」写进清单，
- * 写错了的表现就是面板整个不出现（宿主只报一行「requires Paseo …」）。
+ * 为什么是 0.13–0.15 这一段：0.14 与 0.13 的客户端 SDK 逐字节相同，服务端只是新增了
+ * `defineAgentTool` 与几处只读字段；0.15 于 2026-11-04 逐文件比对过（`@getpaseo/plugin`
+ * 0.13.0 对 0.15.0 的 `dist/**.d.ts`）：
+ *
+ * - **客户端契约逐字节相同**（`dist/client` 无一处差异）——面板不出现的那个风险点不在客户端；
+ * - 服务端只动 `lifecycle.d.ts` / `provider.d.ts` / `index.d.ts`：钩子事件改成
+ *   `agent.create.before` 这种两段写法，但我们用的四个旧名（`agent.create`、
+ *   `agent.created`、`agent.permission_requested`、`agent.turn_ended`）**全部留在
+ *   `legacyEvents` / `legacyRequests` 别名表里**，载荷字段逐个相同。
+ *
+ * 0.16 之后仍未比对，所以上限停在 0.16。写错这个范围的表现是面板整个不出现、
+ * 宿主只报一行「requires Paseo …」——2026-11-04 就这么踩过一次（App 0.15.0 被拦）。
  */
-test("manifest 的 paseo 版本约束覆盖 0.13 与 0.14 两条线，且不越过 0.15", () => {
+test("manifest 的 paseo 版本约束覆盖 0.13 / 0.14 / 0.15 三条线，且不越过 0.16", () => {
   const range = manifest.requirements?.paseo;
   assert.ok(typeof range === "string" && range.length > 0, "requirements.paseo 缺失时会被 0.8+ 拒绝安装");
-  for (const version of ["0.13.0", "0.13.2", "0.14.0"]) {
+  for (const version of ["0.13.0", "0.13.2", "0.14.0", "0.15.0"]) {
     assert.ok(insideRange(range, version), `当前约束 ${range} 装不上 Paseo ${version}`);
   }
-  for (const version of ["0.12.9", "0.15.0"]) {
+  for (const version of ["0.12.9", "0.16.0"]) {
     assert.ok(!insideRange(range, version), `当前约束 ${range} 不该接受 Paseo ${version}`);
   }
 });

@@ -36,12 +36,13 @@ import {
   type SplitWorkspace,
 } from "../shared/requirement-split.ts";
 import {
+  workspaceRolesOf,
   type ClientProfile,
   type DispatchRejected,
   type DispatchTask,
   type OrchestrationSettings,
 } from "../shared/orchestration.ts";
-import type { StaffCard } from "../shared/staff.ts";
+import { rosterOf, type StaffCard } from "../shared/staff.ts";
 import { guardCreateTicket } from "../shared/split-guard.ts";
 import { requirementLabelsOf } from "./requirement-read.ts";
 import { readOrchestration } from "./orchestration-store.ts";
@@ -260,8 +261,9 @@ async function resolveWorkspaces(
         detail: `工作区 ${input.workspaceId} 的编排文件解析失败：${stored.detail ?? "格式不对"}——先修好再拆需求。`,
       };
     }
-    const role = stored.settings.roles.find((item) => item.workspaceId === input.workspaceId);
-    const roster = input.roster ? [...input.roster] : (role?.staff ?? []);
+    // 槽位按 workspaceId 取（会话属于具体工作区），名册按目录取（同一目录会有好几个 id）。
+    const role = workspaceRolesOf(stored.settings, input.workspaceId);
+    const roster = input.roster ? [...input.roster] : rosterOf(stored.settings);
     const dispatcher =
       input.dispatcherAgentId !== undefined
         ? text(input.dispatcherAgentId)

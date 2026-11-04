@@ -1,6 +1,6 @@
 import type { PaseoApi } from "@getpaseo/client";
 import { endpointAuthOf, modelListUrls, parseModelList } from "../shared/provider-models.ts";
-import { providersRawOf, readDaemonConfig } from "./orchestration.ts";
+import { providerEntryOf, providersRawOf, readDaemonConfig } from "./orchestration.ts";
 import { record } from "./logs.ts";
 
 /**
@@ -70,7 +70,8 @@ export async function fetchProviderModels(
       detail: "读不到 daemon 配置：模型清单要用这里面的 base url 与凭据，读不到就没法问",
     };
   }
-  const configured = providersRawOf(config)[provider];
+  // Codex 启用过站点后地址与凭证在派生条目上：按面板上的 id 直接取会取到空条目。
+  const configured = providerEntryOf(providersRawOf(config), provider);
   const env: Record<string, string> = {};
   const rawEnv = configured?.env;
   if (rawEnv && typeof rawEnv === "object" && !Array.isArray(rawEnv)) {

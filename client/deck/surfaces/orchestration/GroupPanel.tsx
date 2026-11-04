@@ -1,14 +1,13 @@
-import { useRpc } from "@getpaseo/plugin/client";
+import { useRpc, useWorkspace } from "@getpaseo/plugin/client";
 import { ScrollView, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import {
   groupReadRpc,
   groupSendRpc,
   groupTextIsBroadcast,
   type GroupDelivery,
-  type GroupMember,
   type GroupRoster,
   type GroupTargetPlan,
 } from "../../../../shared/group-rpc.ts";
@@ -18,12 +17,16 @@ import type { PanelKey } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelBanner, PixelButton } from "../../pixel.tsx";
 import { GroupProgress } from "./GroupProgress.tsx";
-import { OrchSection, rowDivider } from "./parts.tsx";
+import { MemberRail } from "./MemberRail.tsx";
+import { railRowsOf, type GroupPick } from "./rail-model.ts";
 
 /**
  * 群：派活的入口，不是聊天窗口。
  *
- * 一屏四件事：按工作区分组的名册、这张需求的进度、说过什么、下一句发给谁。
+ * 左边是说过什么 + 下一句发给谁，右边是这屋里坐着谁。两块并排，是因为派活时
+ * 「说给谁听」和「说什么」是同一件事：把人名塞进消息区上面，点人就得先滚回去找人。
+ * 点右栏一个人：下一句发给他，并就地展开他的进度与交接（见 `MemberDetail`）。
+ *
  * 发送的判定全在 `shared/group-rpc.ts` 的路由里。点名册是选人，不是另写一套
  * 文本格式；正文里的 `@` 仍然可用。`@全部` 不确认就绝不发送。
  *
@@ -35,19 +38,14 @@ import { OrchSection, rowDivider } from "./parts.tsx";
 const READ_LIMIT = 200;
 /** 群成员的读新鲜期：派活会改状态，但没必要每条都重读。 */
 const READ_STALE_MS = 10_000;
+/** 需求进度只占一段高度：它是参考，不该把消息区挤没。 */
+const PROGRESS_MAX_HEIGHT = 168;
+/** 右栏宽度：够放一行「头像 + 名字 + 状态」，再宽就只剩空白。 */
+const RAIL_WIDTH = 228;
 
 type Scope = { workspaceId: string; workspaceDir: string };
 
 type SendInput = { text: string; requirementNumber: number | null };
-
-/** 点名册选中的人。发送时带他的 `staffId` 和他所属的工作区，不改他的名字。 */
-type Picked = {
-  staffId: string;
-  name: string;
-  workspaceId: string;
-  workspaceDir: string;
-  workspaceName: string;
-};
 
 type Preview = {
   targets: GroupTargetPlan[];
@@ -65,37 +63,9 @@ function groupQueryKey(scope: Scope): readonly ["deck", "group", string, string]
 
 type Problem = {
   detail: string;
-  candidates?: {
-    staffId: string;
-    name: string;
-    workspaceId?: string;
-    workspaceDir?: string;
-    workspaceName?: string;
-  }[];
+  /** 重名时列出来的候选：都在本群名册上，点一张就把这句派给他。 */
+  candidates?: { staffId: string; name: string }[];
 };
-
-/**
- * 同一个 `staffId` 可能出现在多个会话里：优先保留未归档的那条。
- * `staffId` 为空的是没挂岗位标签的会话，不能互相合并——那是几个不同的人。
- */
-function dedupeMembers(members: readonly GroupMember[]): GroupMember[] {
-  const byId = new Map<string, number>();
-  const out: GroupMember[] = [];
-  for (const member of members) {
-    if (!member.staffId) {
-      out.push(member);
-      continue;
-    }
-    const at = byId.get(member.staffId);
-    if (at === undefined) {
-      byId.set(member.staffId, out.length);
-      out.push(member);
-    } else if (out[at]!.archived && !member.archived) {
-      out[at] = member;
-    }
-  }
-  return out;
-}
 
 /** 需求票号可选；填了就必须是正整数。 */
 function parseRequirement(value: string): { ok: true; number: number | null } | { ok: false } {
@@ -113,12 +83,18 @@ export function GroupPanel({
   lang,
   workspaceId,
   workspaceDir,
+  large,
+  onOpenStaff,
 }: {
   skin: PixelSkin;
   t(key: PanelKey, vars?: Record<string, string | number>): string;
   lang: DeckLang;
   workspaceId: string;
   workspaceDir: string;
+  /** 宽屏两栏（消息 + 成员）；窄屏上下叠，成员在上。 */
+  large: boolean;
+  /** 名册空时把人送去「岗位」：右栏空着没有出路，等于把人卡在这一页。 */
+  onOpenStaff?(): void;
 }) {
   const readRpc = useRpc(groupReadRpc);
   const sendRpc = useRpc(groupSendRpc);
@@ -127,7 +103,7 @@ export function GroupPanel({
 
   const [draft, setDraft] = useState("");
   const [requirement, setRequirement] = useState("");
-  const [picked, setPicked] = useState<Picked | null>(null);
+  const [picked, setPicked] = useState<GroupPick | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
   /** 上一次发送里失败的目标：逐条把 `detail` 摆出来，成功的那些不占地方。 */
@@ -196,22 +172,23 @@ export function GroupPanel({
     onError: (error: unknown) => toast.error(error instanceof Error ? error.message : String(error)),
   });
 
-  const members = useMemo(() => dedupeMembers(read.data?.ok ? read.data.members : []), [read.data]);
-  const rosters: GroupRoster[] = read.data?.ok ? read.data.rosters : [];
-  const rosterCount = rosters.reduce((sum, roster) => sum + roster.staff.length, 0);
+  // 一个项目一个群：本目录一份名册、本目录一份记录，没有第二份可以混进来。
+  const roster: GroupRoster = read.data?.ok ? read.data.roster : { staff: [] };
   const records = read.data?.ok ? read.data.records : [];
   const warnings = read.data?.ok ? read.data.warnings : [];
+  // 名册与会话合并成右栏的行：同一个人只出现一次，在跑的会话顶掉已归档的。
+  const rows = useMemo(
+    () => railRowsOf({ roster, members: read.data?.ok ? read.data.members : [] }),
+    // 只跟这份读回来的数据走：`roster` 是每次渲染新取的对象，放进依赖等于没缓存。
+    [read.data],
+  );
+  // 群属于哪个目录，页面顶上那行要说清楚：名字读宿主，读不到时退回目录，不留空。
+  const workspace = useWorkspace(workspaceId, (snapshot) => snapshot.name);
+  const workspaceLabel = workspace?.trim() || workspaceDir;
+  // 名册读失败时 `staff` 是空的：空的不能说成「这个群没有人」，原因要摆出来。
+  const rosterProblems = roster.detail ? [roster.detail] : [];
   const requirementParsed = parseRequirement(requirement);
   const requirementNumber = requirementParsed.ok ? requirementParsed.number : null;
-  /** 当前工作区里还在跑的会话：名册行上补一句状态。别的工作区这次没列会话。 */
-  const liveStatus = useMemo(() => {
-    const status = new Map<string, string>();
-    for (const member of members) {
-      if (!member.staffId || member.archived || status.has(member.staffId)) continue;
-      status.set(member.staffId, member.status);
-    }
-    return status;
-  }, [members]);
 
   let readError: string | null = null;
   if (read.data && !read.data.ok) readError = read.data.detail;
@@ -236,10 +213,11 @@ export function GroupPanel({
     // `@全部` 让路：广播打开群的这个工作区，不跟着上次点的人跑到别的区。
     const broadcast = groupTextIsBroadcast(text);
     const target = picked && !broadcast ? picked : null;
+    // 一律按**这个页面**的工作区发：群属于一个目录，换 scope 就不是这个群了。
     send.mutate({
       input: { text, requirementNumber: parsed.number },
       confirmAll: false,
-      scope: target ?? scope,
+      scope,
       ...(target ? { staffId: target.staffId } : {}),
     });
   };
@@ -252,20 +230,56 @@ export function GroupPanel({
 
   const styles = useMemo(
     () => ({
+      shell: { flex: 1, gap: 8, minHeight: 0 },
+      page: { flex: 1, gap: 10, minHeight: 0, minWidth: 0 },
+      pageWide: { flexDirection: "row" as const },
+      /**
+       * `minWidth: 0` 不是多余的：弹性盒里 flex 子项的默认最小宽度是「内容宽度」，
+       * 消息区里一句长文案就能把右栏整条挤出屏幕（web 上表现为右栏消失）。
+       */
+      chat: { flex: 1, gap: 6, minHeight: 0, minWidth: 0 },
+      railWrap: {
+        width: RAIL_WIDTH,
+        flexShrink: 0,
+        borderLeftWidth: 1,
+        borderLeftColor: skin.colors.line,
+        paddingLeft: 10,
+      },
+      railWrapCompact: { borderBottomWidth: 1, borderBottomColor: skin.colors.line, paddingBottom: 6 },
+      /** 这个群属于哪个目录：名字 + 路径一行说完，进页面第一眼就该看到。 */
+      workspaceBar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, minWidth: 0 },
+      workspaceLabel: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
+      /**
+       * 名字是用户自己填的，可能是一整句话；路径也可能很长。两个都能让位
+       * （`minWidth: 0` 是让位的前提），并各自收成一行省略，谁也不把谁挤出屏幕。
+       */
+      workspaceName: {
+        color: skin.colors.ink,
+        fontSize: 11,
+        fontWeight: "700" as const,
+        fontFamily: skin.mono.fontFamily,
+        flexShrink: 1,
+        minWidth: 0,
+      },
+      workspaceDir: {
+        flexShrink: 1,
+        minWidth: 0,
+        color: skin.colors.ink2,
+        fontSize: 10,
+        fontFamily: skin.mono.fontFamily,
+      },
       hint: { color: skin.colors.ink2, fontSize: 11, lineHeight: 16, fontFamily: skin.mono.fontFamily },
-      toolbar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
-      row: { paddingVertical: 5, gap: 2 },
-      nameLine: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
-      name: { flexShrink: 1, color: skin.colors.ink, fontSize: 12, fontWeight: "700" as const, fontFamily: skin.mono.fontFamily },
-      archivedName: { color: skin.colors.ink2 },
-      archivedTag: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
-      status: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily },
-      recordHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 8 },
-      from: { color: skin.colors.ink, fontSize: 11, fontWeight: "700" as const, fontFamily: skin.mono.fontFamily },
-      time: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
+      chatHead: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
+      chatTitle: { color: skin.colors.ink, fontSize: 12, fontWeight: "700" as const, fontFamily: skin.mono.fontFamily },
+      count: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
+      log: { gap: 8 },
+      system: { color: skin.colors.ink2, fontSize: 10, textAlign: "center" as const, fontFamily: skin.mono.fontFamily },
+      bubbleRow: { flexDirection: "row" as const, gap: 6, alignItems: "flex-end" as const },
+      bubbleBody: { maxWidth: "84%" as const, gap: 2 },
+      bubble: { borderRadius: 8, paddingVertical: 6, paddingHorizontal: 8 },
+      from: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
       body: { color: skin.colors.ink, fontSize: 12, lineHeight: 17, fontFamily: skin.mono.fontFamily },
-      system: { color: skin.colors.ink2 },
-      composer: { gap: 6 },
+      composer: { gap: 6, borderTopWidth: 1, borderTopColor: skin.colors.line, paddingTop: 8 },
       input: { ...skin.input, minHeight: 54, textAlignVertical: "top" as const },
       requirementRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, flexWrap: "wrap" as const },
       requirementLabel: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily },
@@ -274,20 +288,17 @@ export function GroupPanel({
       preview: { borderLeftWidth: 1, borderLeftColor: skin.colors.acc, paddingLeft: 8, paddingVertical: 2, gap: 5 },
       previewTitle: { color: skin.colors.ink, fontSize: 12, fontWeight: "700" as const, fontFamily: skin.mono.fontFamily },
       target: { color: skin.colors.ink, fontSize: 11, fontFamily: skin.mono.fontFamily, paddingVertical: 3, paddingLeft: 6 },
-      candidate: { color: skin.colors.ink, fontSize: 11, fontFamily: skin.mono.fontFamily },
-      workspace: { color: skin.colors.ink, fontSize: 11, fontWeight: "700" as const, fontFamily: skin.mono.fontFamily, marginTop: 6 },
-      currentTag: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
-      selected: { borderLeftWidth: 2, borderLeftColor: skin.colors.acc, paddingLeft: 6 },
-      kind: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
     }),
     [skin],
   );
 
-  return (
-    <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 16, gap: 12 }}>
-      {/* 群读的是自己的 RPC：顶栏那颗刷编排状态，刷不到这里，所以自带一颗。 */}
-      <View style={styles.toolbar}>
+  const chat = (
+    <View style={styles.chat}>
+      <View style={styles.chatHead}>
+        <Text style={styles.chatTitle}>{t("group.messages")}</Text>
+        <Text style={styles.count}>{t("group.messageCount", { n: records.length })}</Text>
         <View style={{ flex: 1 }} />
+        {/* 群读的是自己的 RPC：顶栏那颗刷编排状态，刷不到这里，所以自带一颗。 */}
         <PixelButton
           skin={skin}
           mini
@@ -297,68 +308,39 @@ export function GroupPanel({
         />
       </View>
 
-      <OrchSection skin={skin} title={t("group.members")} aside={t("group.memberCount", { n: rosterCount })}>
-        {read.isPending && !read.data ? <Text style={styles.hint}>{t("common.loading")}</Text> : null}
-        {!read.isPending && rosters.length === 0 ? <Text style={styles.hint}>{t("group.membersEmpty")}</Text> : null}
-        {rosters.map((roster) => (
-          <View key={roster.workspaceId}>
-            <Text style={styles.workspace} numberOfLines={1}>
-              {roster.name}
-              {roster.current ? ` · ${t("group.currentWorkspace")}` : ""}
-            </Text>
-            {roster.detail ? <Text style={styles.hint}>{t("group.rosterFailed", { detail: roster.detail })}</Text> : null}
-            {!roster.detail && roster.staff.length === 0 ? <Text style={styles.hint}>{t("group.rosterEmpty")}</Text> : null}
-            {roster.staff.map((person, index) => {
-              const selected = picked?.staffId === person.staffId && picked.workspaceId === roster.workspaceId;
-              const status = roster.current ? liveStatus.get(person.staffId) : undefined;
-              return (
-                <Pressable
-                  key={`${roster.workspaceId}:${person.staffId}`}
-                  accessibilityRole="button"
-                  accessibilityLabel={t("group.pick", { name: person.name })}
-                  accessibilityState={{ selected }}
-                  onPress={() => setPicked({
-                    staffId: person.staffId,
-                    name: person.name,
-                    workspaceId: roster.workspaceId,
-                    workspaceDir: roster.workspaceDir,
-                    workspaceName: roster.name,
-                  })}
-                  style={[styles.row, rowDivider(skin, index === 0), selected ? styles.selected : null]}
-                >
-                  <View style={styles.nameLine}>
-                    <Text style={styles.name} numberOfLines={1}>{person.name}</Text>
-                    <Text style={styles.kind}>{t(person.kind === "manager" ? "group.kind.manager" : "group.kind.worker")}</Text>
-                  </View>
-                  {status ? <Text style={styles.status} numberOfLines={1}>{status}</Text> : null}
-                </Pressable>
-              );
-            })}
-          </View>
-        ))}
-        {warnings.map((warning) => <Text key={warning} style={styles.hint}>{warning}</Text>)}
-      </OrchSection>
+      {/* 填了需求票号才占地方：没填时这里是空的，正好把高度留给消息。 */}
+      {requirementNumber === null ? null : (
+        <ScrollView style={{ maxHeight: PROGRESS_MAX_HEIGHT }} contentContainerStyle={{ paddingBottom: 4 }}>
+          <GroupProgress skin={skin} t={t} workspaceDir={workspaceDir} number={requirementNumber} />
+        </ScrollView>
+      )}
 
-      <GroupProgress skin={skin} t={t} workspaceDir={workspaceDir} number={requirementNumber} />
-
-      <OrchSection skin={skin} title={t("group.messages")} aside={t("group.messageCount", { n: records.length })}>
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.log}>
         {read.isPending && !read.data ? <Text style={styles.hint}>{t("common.loading")}</Text> : null}
-        {readError ? (
-          <PixelBanner skin={skin}><Text style={skin.error}>{readError}</Text></PixelBanner>
-        ) : null}
         {!read.isPending && !readError && records.length === 0 ? <Text style={styles.hint}>{t("group.empty")}</Text> : null}
         {records.map((record, index) => {
-          const system = record.kind === "system";
+          if (record.kind === "system") {
+            return (
+              <Text key={`${record.at}-${index}`} style={styles.system}>
+                {`${record.text} · ${clockText(record.at)}`}
+              </Text>
+            );
+          }
+          // 自己发的靠右、底色偏强调；别人发的靠左、底色中性。一眼分出「我说的」与「他们说的」。
+          const mine = record.kind === "user";
           return (
-            <View key={`${record.at}-${index}`} style={[styles.row, rowDivider(skin, index === 0)]}>
-              <View style={styles.recordHead}>
-                <Text style={[styles.from, system ? styles.system : null]} numberOfLines={1}>
-                  {rosters.length > 1 && record.workspaceName ? `${record.from} · ${record.workspaceName}` : record.from}
+            <View
+              key={`${record.at}-${index}`}
+              style={[styles.bubbleRow, { justifyContent: mine ? "flex-end" : "flex-start" }]}
+            >
+              <View style={styles.bubbleBody}>
+                <Text style={[styles.from, { textAlign: mine ? "right" : "left" }]}>
+                  {`${record.from} · ${clockText(record.at)}`}
                 </Text>
-                <View style={{ flex: 1 }} />
-                <Text style={styles.time}>{clockText(record.at)}</Text>
+                <View style={[styles.bubble, { backgroundColor: mine ? skin.colors.hi : skin.colors.stripe }]}>
+                  <Text style={styles.body}>{record.text}</Text>
+                </View>
               </View>
-              <Text style={[styles.body, system ? styles.system : null]}>{record.text}</Text>
             </View>
           );
         })}
@@ -369,124 +351,176 @@ export function GroupPanel({
         {records.length >= READ_LIMIT ? (
           <Text style={styles.hint}>{t("group.truncated", { n: READ_LIMIT })}</Text>
         ) : null}
-      </OrchSection>
+      </ScrollView>
 
-      <OrchSection skin={skin} title={t("group.composer")}>
-        <View style={styles.composer}>
-          {/* 提示只在这一处：输入框上方一句，说清 @ 与不带 @ 各去哪。 */}
-          <Text style={styles.hint}>{t("group.hint")}</Text>
+      <View style={styles.composer}>
+        {/* 提示只在这一处：输入框上方一句，说清 @ 与不带 @ 各去哪。 */}
+        <Text style={styles.hint}>{t("group.hint")}</Text>
 
-          {problem ? (
-            <PixelBanner skin={skin}>
-              <Text style={skin.error}>{problem.detail}</Text>
-              {problem.candidates?.length ? (
-                <>
-                  <Text style={styles.hint}>{t("group.candidates")}</Text>
-                  {problem.candidates.map((candidate) => (
-                    <PixelButton
-                      key={`${candidate.workspaceId ?? ""}:${candidate.staffId}`}
-                      skin={skin}
-                      mini
-                      variant="ghost"
-                      label={candidate.workspaceName ? `${candidate.name} · ${candidate.workspaceName}` : candidate.name}
-                      onPress={() => {
-                        setPicked({
-                          staffId: candidate.staffId,
-                          name: candidate.name,
-                          workspaceId: candidate.workspaceId ?? workspaceId,
-                          workspaceDir: candidate.workspaceDir ?? workspaceDir,
-                          workspaceName: candidate.workspaceName ?? "",
-                        });
-                        setProblem(null);
-                      }}
-                    />
-                  ))}
-                </>
-              ) : null}
-            </PixelBanner>
-          ) : null}
+        {problem ? (
+          <PixelBanner skin={skin}>
+            <Text style={skin.error}>{problem.detail}</Text>
+            {problem.candidates?.length ? (
+              <>
+                <Text style={styles.hint}>{t("group.candidates")}</Text>
+                {problem.candidates.map((candidate) => (
+                  <PixelButton
+                    key={candidate.staffId}
+                    skin={skin}
+                    mini
+                    variant="ghost"
+                    // 重名才走到这里，按钮上只写名字会长得一模一样：带上 id 才点得定。
+                    label={`${candidate.name}（${candidate.staffId}）`}
+                    onPress={() => {
+                      setPicked({
+                        staffId: candidate.staffId,
+                        name: candidate.name,
+                        // 候选来自发送校验，没带会话 id：进度与记忆要等他被点开时再按名册找。
+                        agentId: null,
+                      });
+                      setProblem(null);
+                    }}
+                  />
+                ))}
+              </>
+            ) : null}
+          </PixelBanner>
+        ) : null}
 
-          {failed.length ? (
-            <PixelBanner skin={skin} tone="warning">
-              <Text style={styles.hint}>{t("group.failed")}</Text>
-              {failed.map((delivery, index) => (
-                <Text key={`${delivery.staffId ?? ""}#${index}`} style={styles.hint}>
-                  {t("group.failedLine", { name: delivery.name, detail: delivery.detail ?? "" })}
-                </Text>
-              ))}
-            </PixelBanner>
-          ) : null}
-
-          {preview ? (
-            <View style={styles.preview}>
-              <Text style={styles.previewTitle}>{t("group.previewTitle", { n: preview.targets.length })}</Text>
-              <Text style={styles.hint}>{t("group.previewHint")}</Text>
-              {preview.targets.map((target, index) => (
-                <Text key={`${target.staffId ?? ""}#${index}`} style={[styles.target, rowDivider(skin, index === 0)]} numberOfLines={1}>
-                  {target.name}
-                </Text>
-              ))}
-              {preview.warnings.map((warning) => <Text key={warning} style={styles.hint}>{warning}</Text>)}
-              <View style={styles.actions}>
-                <PixelButton
-                  skin={skin}
-                  variant="solid"
-                  label={send.isPending ? t("group.sending") : t("group.confirm")}
-                  disabled={send.isPending}
-                  onPress={confirm}
-                />
-                <PixelButton
-                  skin={skin}
-                  variant="ghost"
-                  label={t("orch.cancel")}
-                  disabled={send.isPending}
-                  onPress={() => setPreview(null)}
-                />
-              </View>
-            </View>
-          ) : null}
-
-          {picked ? (
-            <View style={styles.requirementRow}>
-              <Text style={styles.hint}>
-                {t("group.picked", { name: picked.name, workspace: picked.workspaceName || picked.workspaceId })}
+        {failed.length ? (
+          <PixelBanner skin={skin} tone="warning">
+            <Text style={styles.hint}>{t("group.failed")}</Text>
+            {failed.map((delivery, index) => (
+              <Text key={`${delivery.staffId ?? ""}#${index}`} style={styles.hint}>
+                {t("group.failedLine", { name: delivery.name, detail: delivery.detail ?? "" })}
               </Text>
-              <PixelButton skin={skin} mini variant="ghost" label={t("group.clearPick")} onPress={() => setPicked(null)} />
+            ))}
+          </PixelBanner>
+        ) : null}
+
+        {preview ? (
+          <View style={styles.preview}>
+            <Text style={styles.previewTitle}>{t("group.previewTitle", { n: preview.targets.length })}</Text>
+            <Text style={styles.hint}>{t("group.previewHint")}</Text>
+            {preview.targets.map((target, index) => (
+              <Text key={`${target.staffId ?? ""}#${index}`} style={styles.target} numberOfLines={1}>
+                {target.name}
+              </Text>
+            ))}
+            {preview.warnings.map((warning) => <Text key={warning} style={styles.hint}>{warning}</Text>)}
+            <View style={styles.actions}>
+              <PixelButton
+                skin={skin}
+                variant="solid"
+                label={send.isPending ? t("group.sending") : t("group.confirm")}
+                disabled={send.isPending}
+                onPress={confirm}
+              />
+              <PixelButton
+                skin={skin}
+                variant="ghost"
+                label={t("orch.cancel")}
+                disabled={send.isPending}
+                onPress={() => setPreview(null)}
+              />
             </View>
-          ) : null}
-
-          <TextInput
-            value={draft}
-            onChangeText={setDraft}
-            placeholder={t("group.messagePlaceholder")}
-            accessibilityLabel={t("group.composer")}
-            placeholderTextColor={skin.colors.ink2}
-            style={styles.input}
-            multiline
-          />
-
-          <View style={styles.requirementRow}>
-            <Text style={styles.requirementLabel}>{t("group.requirement")}</Text>
-            <TextInput
-              value={requirement}
-              onChangeText={setRequirement}
-              placeholder={t("group.requirementPlaceholder")}
-              accessibilityLabel={t("group.requirement")}
-              placeholderTextColor={skin.colors.ink2}
-              keyboardType="numeric"
-              style={styles.requirementInput}
-            />
-            <View style={{ flex: 1 }} />
-            <PixelButton
-              skin={skin}
-              variant="solid"
-              label={send.isPending && !preview ? t("group.sending") : t("group.send")}
-              disabled={send.isPending}
-              onPress={submit}
-            />
           </View>
+        ) : null}
+
+        {picked ? (
+          <View style={styles.requirementRow}>
+            <Text style={styles.hint}>
+              {t("group.picked", { name: picked.name })}
+            </Text>
+            <PixelButton skin={skin} mini variant="ghost" label={t("group.clearPick")} onPress={() => setPicked(null)} />
+          </View>
+        ) : null}
+
+        <TextInput
+          value={draft}
+          onChangeText={setDraft}
+          placeholder={t("group.messagePlaceholder")}
+          accessibilityLabel={t("group.composer")}
+          placeholderTextColor={skin.colors.ink2}
+          style={styles.input}
+          multiline
+        />
+
+        <View style={styles.requirementRow}>
+          <Text style={styles.requirementLabel}>{t("group.requirement")}</Text>
+          <TextInput
+            value={requirement}
+            onChangeText={setRequirement}
+            placeholder={t("group.requirementPlaceholder")}
+            accessibilityLabel={t("group.requirement")}
+            placeholderTextColor={skin.colors.ink2}
+            keyboardType="numeric"
+            style={styles.requirementInput}
+          />
+          <View style={{ flex: 1 }} />
+          <PixelButton
+            skin={skin}
+            variant="solid"
+            label={send.isPending && !preview ? t("group.sending") : t("group.send")}
+            disabled={send.isPending}
+            onPress={submit}
+          />
         </View>
-      </OrchSection>
-    </ScrollView>
+      </View>
+    </View>
+  );
+
+  const rail = (
+    <MemberRail
+      skin={skin}
+      t={t}
+      workspaceDir={workspaceDir}
+      rows={rows}
+      pick={picked}
+      onPick={setPicked}
+      {...(onOpenStaff ? { onAddStaff: onOpenStaff } : {})}
+      rosterProblems={rosterProblems}
+      loading={read.isPending}
+      error={readError}
+      warnings={warnings}
+      scrollable={large}
+    />
+  );
+
+  // 读失败是一整页的事（名册和消息一起没了）：只在顶上写一条，两栏里不再各写一遍。
+  const failedPage = readError ? (
+    <PixelBanner skin={skin}>
+      <Text style={skin.error}>{readError}</Text>
+    </PixelBanner>
+  ) : null;
+
+  return (
+    <View style={styles.shell}>
+      {/* 一个项目一个群：先说明是哪个项目、落在哪个目录，再谈消息。 */}
+      <View style={styles.workspaceBar}>
+        <Text style={styles.workspaceLabel}>{t("group.workspace")}</Text>
+        <Text style={styles.workspaceName} numberOfLines={1}>
+          {workspaceLabel}
+        </Text>
+        {/* 没起名字的工作区，名字本来就退回目录：同一行再写一遍只是噪声。 */}
+        {workspaceLabel === workspaceDir ? null : (
+          <Text style={styles.workspaceDir} numberOfLines={1}>
+            {workspaceDir}
+          </Text>
+        )}
+      </View>
+      {failedPage}
+      {large ? (
+        <View style={[styles.page, styles.pageWide]}>
+          {chat}
+          <View style={styles.railWrap}>{rail}</View>
+        </View>
+      ) : (
+        <View style={styles.page}>
+          <View style={styles.railWrapCompact}>{rail}</View>
+          {chat}
+        </View>
+      )}
+    </View>
   );
 }

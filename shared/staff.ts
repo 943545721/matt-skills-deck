@@ -31,8 +31,9 @@ export type StaffKind = "manager" | "worker";
 /**
  * 名册上的一张卡。
  *
- * 卡上**不写工作区**：名册本身就属于一个工作区（`.deck/orchestration.json` 按工作区存），
- * 一份名册里的所有卡都在这个工作区里干活。
+ * 卡上**不写工作区**：名册属于**目录**（`.deck/orchestration.json` 就存在那个目录里），
+ * 一份名册里的所有卡都在这个目录里干活。同一个目录在宿主里可能有多个 workspaceId
+ * （每次重开就生成一个），卡不与其中任何一个绑定，见 `rosterOf`。
  */
 export interface StaffCard {
   /**
@@ -171,4 +172,80 @@ export function withStaffCards(roles: WorkspaceRoles, cards: readonly StaffCard[
   if (normalized) next.staff = normalized;
   else delete next.staff;
   return next;
+}
+
+/** 一份设置里与名册有关的那点形状：读名册不必知道路由、预算之类的字段。 */
+export interface RosterFile {
+  roles?: readonly WorkspaceRoles[];
+}
+
+/**
+ * 这个目录的名册：文件里**所有** role 条目的卡合起来。
+ *
+ * 文件按目录存，`roles` 却按 workspaceId 分桶——这是两块不同的东西：
+ * 会话槽位（主窗口 / 派单窗口）必须是 id，会话本来就属于具体工作区；
+ * 名册反过来只属于目录。同一个目录在宿主里会攒出好几个 id（每次重开一个），
+ * 卡若跟着 id 分桶，后果是「换个工作区打开，人全没了」，或者群里把同一批人列好几遍。
+ *
+ * 合并口径与 `normalizeStaffCards` 一致：同 id 的卡以后来的为准（新版本才生效），
+ * 顺序按第一次出现的位置；仍然封顶 `MAX_STAFF_CARDS`。
+ */
+export function rosterOf(file: RosterFile | null | undefined): StaffCard[] {
+  const roles = file?.roles;
+  if (!roles?.length) return [];
+  const byId = new Map<string, StaffCard>();
+  for (const role of roles) {
+    for (const card of role.staff ?? []) {
+      if (!card?.id) continue;
+      byId.set(card.id, card);
+      if (byId.size >= MAX_STAFF_CARDS) break;
+    }
+    if (byId.size >= MAX_STAFF_CARDS) break;
+  }
+  return [...byId.values()];
+}
+
+/**
+ * 一条 role 还有没有值得留下的东西。
+ *
+ * 两者共用一把尺子：`withWorkspaceRoles` 保存角色绑定时靠它决定留不留这条，
+ * `withDirectoryRoster` 清卡之后靠它决定这条是不是只剩空壳。各写一份迟早分叉。
+ */
+export function roleCarriesFields(role: WorkspaceRoles): boolean {
+  return Boolean(
+    role.mainAgentId?.trim() ||
+      role.dispatcherAgentId?.trim() ||
+      role.progressAgentId?.trim() ||
+      role.prompts ||
+      role.staff?.length,
+  );
+}
+
+/**
+ * 把整份名册写到这个 workspaceId 那条上，并把**其它条目里的卡清掉**。
+ *
+ * 只写不清不行：删掉一张卡之后，旧 workspaceId 那条里还留着它，
+ * 下次 `rosterOf` 一合并就把它复活了。旧条目只清卡，会话槽位与提示词原样保留。
+ * 空数组 = 真的清空名册（与 `normalizeStaffCards` 一致：空数组不留空壳字段）。
+ */
+export function withDirectoryRoster<T extends RosterFile & { roles: WorkspaceRoles[] }>(
+  settings: T,
+  workspaceId: string,
+  cards: readonly StaffCard[],
+): T {
+  const id = workspaceId.trim();
+  if (!id) return settings;
+  const roster = normalizeStaffCards(cards) ?? [];
+  const roles: WorkspaceRoles[] = [];
+  let wrote = false;
+  for (const role of settings.roles) {
+    const sameId = role.workspaceId === id;
+    if (sameId) wrote = true;
+    const next: WorkspaceRoles = { ...role };
+    if (sameId && roster.length) next.staff = roster;
+    else delete next.staff;
+    if (roleCarriesFields(next)) roles.push(next);
+  }
+  if (!wrote && roster.length) roles.push({ workspaceId: id, staff: roster });
+  return { ...settings, roles };
 }

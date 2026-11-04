@@ -50,6 +50,62 @@ test("群成员按 deck.group 标签读入（含归档），消息按 oldest→n
   assert.deepEqual(read.records.map((record) => record.text), ["开工"]);
 });
 
+test("群成员按目录标签读：换 id 打开还是同一个群，改了格式之前建的会话也还在", async () => {
+  const dir = await ws();
+  const agent = (id, group, staffId) => ({
+    agent: { id, title: "", status: "idle", labels: { "deck.group": group, "deck.staff": staffId } },
+  });
+  const all = [
+    agent("a-dir", path.resolve(dir), "staff-aaaaaa"),
+    // 改格式之前建的会话，标签写的是当时的 workspaceId（就是这次打开的这个 id）。
+    agent("a-legacy", "w-new", "staff-aaaaaa"),
+    // 别的目录的群：标签值不是这个目录，一条都不能进来。
+    agent("a-elsewhere", "/somewhere/else", "staff-bbbbbb"),
+  ];
+  const asked = [];
+  const context = {
+    paseo: {
+      agents: {
+        list: async (options) => {
+          const key = options.filter.labels["deck.group"];
+          asked.push(key);
+          return { entries: all.filter((entry) => entry.agent.labels["deck.group"] === key) };
+        },
+      },
+    },
+  };
+
+  const read = await groupReadHandler({ workspaceId: "w-new", workspaceDir: dir }, context);
+
+  assert.equal(read.ok, true);
+  assert.deepEqual(
+    read.members.map((member) => member.agentId).sort(),
+    ["a-dir", "a-legacy"],
+    "目录标签 + 旧 id 标签都要读，别的目录的会话不能混进来",
+  );
+  assert.deepEqual(asked.sort(), ["w-new", path.resolve(dir)].sort());
+});
+
+test("目录写成带尾斜杠：群 key 还是同一个目录，不会算成两个群", async () => {
+  const dir = await ws();
+  const asked = [];
+  const context = {
+    paseo: {
+      agents: {
+        list: async (options) => {
+          asked.push(options.filter.labels["deck.group"]);
+          return { entries: [] };
+        },
+      },
+    },
+  };
+
+  await groupReadHandler({ workspaceId: "w-new", workspaceDir: `${dir}/` }, context);
+
+  assert.equal(asked[0], path.resolve(dir), "带尾斜杠也要落到同一个 key");
+  assert.notEqual(asked[0], `${dir}/`, "key 不能是原样的字符串：读写两边必须算出同一个值");
+});
+
 test("宿主列表失败时仍回群记录，并给 warning（不是 Unknown RPC / 崩掉）", async () => {
   const dir = await ws();
   const read = await groupReadHandler(
@@ -63,7 +119,7 @@ test("宿主列表失败时仍回群记录，并给 warning（不是 Unknown RPC
   assert.match(read.warnings.join("\n"), /宿主不可达/);
 });
 
-test("成员表按工作区分组，当前区在前；两边的群记录按时间并成一份", async () => {
+test("一个项目一个群：只读本目录的名册与对话，别的目录的人与话都不进来", async () => {
   const dirA = await ws();
   const dirB = await ws();
   const roles = (workspaceId, staff) => ({
@@ -86,38 +142,32 @@ test("成员表按工作区分组，当前区在前；两边的群记录按时�
   await appendGroup(dirB, "w-b", { at: earlier, from: "你", agentId: "", kind: "user", text: "乙先说" });
   await appendGroup(dirA, "w-a", { at: later, from: "你", agentId: "", kind: "user", text: "甲后说" });
 
-  const read = await groupReadHandler(
-    { workspaceId: "w-a", workspaceDir: dirA },
-    {
-      paseo: {
-        agents: { list: async () => ({ entries: [] }) },
-        workspaces: {
-          list: async () => ({
-            entries: [
-              { id: "w-b", workspaceDirectory: dirB, name: "乙" },
-              { id: "w-a", workspaceDirectory: dirA, name: "甲" },
-            ],
-          }),
-        },
-      },
-    },
-  );
+  const read = await groupReadHandler({ workspaceId: "w-a", workspaceDir: dirA }, contextOf(async () => ({ entries: [] })));
 
   assert.equal(read.ok, true);
   assert.deepEqual(
-    read.rosters.map((roster) => [roster.workspaceId, roster.current, roster.staff.map((person) => [person.name, person.kind])]),
-    [
-      ["w-a", true, [["前端", "worker"]]],
-      ["w-b", false, [["后端", "manager"]]],
-    ],
+    read.roster.staff.map((person) => [person.name, person.kind]),
+    [["前端", "worker"]],
+    "名册只有本目录这一份：右栏列的是本群的人，没有别的项目的人可点",
   );
   assert.deepEqual(
-    read.records.map((record) => [record.text, record.workspaceName]),
-    [
-      ["乙先说", "乙"],
-      ["甲后说", "甲"],
-    ],
+    read.records.map((record) => record.text),
+    ["甲后说"],
+    "乙那边的「乙先说」属于另一个项目，不能出现在甲的群里",
   );
+});
+
+test("同一目录换了个 workspaceId 打开：两个 id 的群记录都要在，按时间排", async () => {
+  const dir = await ws();
+  const earlier = new Date(Date.now() - 60_000).toISOString();
+  const later = new Date().toISOString();
+  await appendGroup(dir, "w-old", { at: earlier, from: "你", agentId: "", kind: "user", text: "昨天那句" });
+  await appendGroup(dir, "w-new", { at: later, from: "你", agentId: "", kind: "user", text: "今天这句" });
+
+  const read = await groupReadHandler({ workspaceId: "w-new", workspaceDir: dir }, contextOf(async () => ({ entries: [] })));
+
+  assert.equal(read.ok, true);
+  assert.deepEqual(read.records.map((record) => record.text), ["昨天那句", "今天这句"]);
 });
 
 test("工作区参数缺失时明确拒绝", async () => {

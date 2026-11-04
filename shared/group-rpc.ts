@@ -15,6 +15,10 @@ import type { StaffCard } from "./staff.ts";
  * 「按这份计划建票、建会话、落群记录」。
  */
 
+/**
+ * 群标签。值是**这个群所在目录**，不是 workspaceId：同一个目录每次重开都会换一个
+ * workspaceId，群却还是同一个。口径是「一个项目一个群」。
+ */
 export const DECK_GROUP_LABEL = "deck.group";
 
 /** 群消息里一条消息转成的派单计划；`toMain` 时 `staffId` 为 null。 */
@@ -51,22 +55,23 @@ export const groupSendReasonSchema = z.enum([
   "no-requirement",
   "requirement-not-final",
   "invalid-workspace",
-  /** 一句话点到了两个工作区的人：一条派活只落在一个工作区。 */
-  "cross-workspace",
   /** 幂等记录读不出来：不能确认这句之前有没有派过，拒绝重试比重复建票 / 建会话安全。 */
   "read-failed",
 ]);
 export type GroupSendReason = z.infer<typeof groupSendReasonSchema>;
 
+/**
+ * 一条群记录。不带工作区：群读只读当前目录的记录，别的目录的对话不会出现在这里。
+ *
+ * `system` 保留下来只为读旧文件：早先跨目录转派时会写一行「已转派给 …」的索引，
+ * 那些记录还躺在磁盘上，读不出来就成了「消息凭空消失」。现在没有地方再写这个 kind。
+ */
 export const groupRecordSchema = z.object({
   at: z.string(),
   from: z.string().max(64),
   agentId: z.string().max(300),
   kind: z.enum(["user", "staff", "system"]),
   text: z.string().max(2000),
-  /** 这条记录落在哪个工作区。单工作区的旧记录可以不带。 */
-  workspaceId: z.string().max(300).optional(),
-  workspaceName: z.string().max(300).optional(),
 });
 
 export const groupMemberSchema = z.object({
@@ -79,19 +84,15 @@ export const groupMemberSchema = z.object({
 
 export type GroupMember = z.infer<typeof groupMemberSchema>;
 
-/** 一个工作区名册上的一个人。群成员表按这个画，不按会话清单画。 */
+/** 本群名册上的一个人。群成员表按这个画，不按会话清单画（没起会话的人也在）。 */
 export const groupRosterStaffSchema = z.object({
   staffId: z.string().max(64),
   name: z.string().max(64),
   kind: z.enum(["manager", "worker"]),
 });
 
-/** 一个工作区的名册。`detail` 有值时 `staff` 为空是「读失败」，不是「没人」。 */
+/** 本群名册上的人。`detail` 有值时 `staff` 为空是「读失败」，不是「没人」。 */
 export const groupRosterSchema = z.object({
-  workspaceId: z.string().max(300),
-  workspaceDir: z.string().max(4096),
-  name: z.string().max(300),
-  current: z.boolean(),
   staff: z.array(groupRosterStaffSchema),
   detail: z.string().max(2000).optional(),
 });
@@ -100,11 +101,8 @@ export type GroupRoster = z.infer<typeof groupRosterSchema>;
 
 const groupCandidateSchema = z.object({
   staffId: z.string().max(64),
+  /** 重名时把原名列出来让人点，不自动改名。 */
   name: z.string().max(64),
-  /** 重名跨工作区时带上，让人点的是「哪个工作区的这张卡」，不是改过的名字。 */
-  workspaceId: z.string().max(300).optional(),
-  workspaceDir: z.string().max(4096).optional(),
-  workspaceName: z.string().max(300).optional(),
 });
 
 const scope = {
@@ -157,7 +155,7 @@ export const groupSendRpc = defineRpc({
   ]),
 });
 
-/** 群成员（宿主会话清单按 `deck.group` 过滤）+ 群记录（索引，不是真相）。 */
+/** 群成员（宿主会话清单按 `deck.group` 过滤）+ 本群名册 + 群记录（索引，不是真相）。 */
 export const groupReadRpc = defineRpc({
   name: "deck.group.read",
   input: z.object({
@@ -168,8 +166,8 @@ export const groupReadRpc = defineRpc({
     z.object({
       ok: z.literal(true),
       members: z.array(groupMemberSchema),
-      /** 按工作区分组的名册。当前工作区排在第一位。 */
-      rosters: z.array(groupRosterSchema),
+      /** 本群名册。一个群只属于一个目录，所以只有这一份。 */
+      roster: groupRosterSchema,
       records: z.array(groupRecordSchema),
       skipped: z.number().int(),
       warnings: z.array(z.string()),
@@ -205,26 +203,14 @@ export function parseGroupMentions(text: string): GroupMention[] {
   return out;
 }
 
-/** 一份名册，属于一个工作区。当前工作区用 `staff` + `workspace`，其余放 `otherRosters`。 */
-export interface GroupRosterSlice {
-  workspaceId: string;
-  workspaceDir: string;
-  /** 给人看的工作区名。候选里用它，不把目录路径当名字。 */
-  name: string;
-  staff: readonly { id: string; name: string }[];
-}
-
+/**
+ * 重名时给界面点的那种候选。
+ *
+ * 只带本群名册里的一张卡：一个群只属于一个目录，不存在「哪个工作区的那张」。
+ */
 export interface GroupStaffCandidate {
   staffId: string;
   name: string;
-  workspaceId?: string;
-  workspaceDir?: string;
-  workspaceName?: string;
-}
-
-export interface GroupSendScope {
-  workspaceId: string;
-  workspaceDir: string;
 }
 
 export interface GroupSendPlanInput {
@@ -240,15 +226,11 @@ export interface GroupSendPlanInput {
    * 重名时调用方已经点定了这一张，这里不再改名字。
    */
   staffId?: string;
-  /** 当前请求所在的工作区。没给时按「只有这一份名册」处理，候选不带工作区。 */
-  workspace?: GroupRosterSlice;
-  /** 其它工作区的名册。名字对不上当前区、或跨区重名时到这里找。 */
-  otherRosters?: readonly GroupRosterSlice[];
 }
 
 export type GroupSendPlan =
-  | { ok: true; phase: "preview"; targets: GroupTargetPlan[]; scope?: GroupSendScope }
-  | { ok: true; phase: "send"; targets: GroupTargetPlan[]; scope?: GroupSendScope }
+  | { ok: true; phase: "preview"; targets: GroupTargetPlan[] }
+  | { ok: true; phase: "send"; targets: GroupTargetPlan[] }
   | {
       ok: false;
       reason: GroupSendReason;
@@ -281,7 +263,7 @@ function ticketBodyOf(text: string, requirementNumber: number, name: string, sta
 }
 
 function planForStaff(
-  card: { staffId: string; name: string },
+  card: GroupStaffCandidate,
   text: string,
   requirementNumber: number,
 ): GroupTargetPlan {
@@ -312,87 +294,26 @@ function requirementProblem(
   return null;
 }
 
-interface Address {
-  staffId: string;
-  name: string;
-  workspaceId: string;
-  workspaceDir: string;
-  workspaceName: string;
-}
-
-function slicesOf(input: GroupSendPlanInput): GroupRosterSlice[] {
-  const here: GroupRosterSlice = input.workspace ?? {
-    workspaceId: "",
-    workspaceDir: "",
-    name: "",
-    staff: input.staff,
-  };
-  const current: GroupRosterSlice = input.workspace ? { ...input.workspace, staff: input.staff } : here;
-  return [current, ...(input.otherRosters ?? [])];
-}
-
-function addresses(
-  slices: readonly GroupRosterSlice[],
-  match: (card: { id: string; name: string }) => boolean,
-): Address[] {
-  const hits: Address[] = [];
-  for (const slice of slices) {
-    for (const card of slice.staff) {
-      if (!match(card)) continue;
-      hits.push({
-        staffId: card.id,
-        name: card.name,
-        workspaceId: slice.workspaceId,
-        workspaceDir: slice.workspaceDir,
-        workspaceName: slice.name,
-      });
-    }
-  }
-  return hits;
-}
-
-function candidateOf(hit: Address): GroupStaffCandidate {
-  if (!hit.workspaceId) return { staffId: hit.staffId, name: hit.name };
-  return {
-    staffId: hit.staffId,
-    name: hit.name,
-    workspaceId: hit.workspaceId,
-    workspaceDir: hit.workspaceDir,
-    workspaceName: hit.workspaceName,
-  };
-}
-
-function scopeOf(hit: Address): { scope: GroupSendScope } | Record<string, never> {
-  if (!hit.workspaceId || !hit.workspaceDir) return {};
-  return { scope: { workspaceId: hit.workspaceId, workspaceDir: hit.workspaceDir } };
-}
-
-/** 给人看的名册清单。有工作区名时写在 id 旁边，不改卡的名字。 */
-function rosterLabel(slices: readonly GroupRosterSlice[]): string {
-  const parts: string[] = [];
-  for (const slice of slices) {
-    for (const card of slice.staff) {
-      const where = slice.name ? `${card.id} · ${slice.name}` : card.id;
-      parts.push(`${card.name}（${where}）`);
-    }
-  }
+/** 给人看的名册清单：名字 + id，不把目录路径当名字。 */
+function rosterLabel(staff: readonly StaffCard[]): string {
+  const parts = staff.map((card) => `${card.name}（${card.id}）`);
   return parts.join("、") || "（名册是空的）";
 }
 
-function unknownStaff(token: string, slices: readonly GroupRosterSlice[]): GroupSendPlan {
+function unknownStaff(token: string, staff: readonly StaffCard[]): GroupSendPlan {
   return {
     ok: false,
     reason: "unknown-staff",
-    detail: `名册上没有「${token}」。现有岗位：${rosterLabel(slices)}。`,
+    detail: `名册上没有「${token}」。现有岗位：${rosterLabel(staff)}。`,
   };
 }
 
-function ambiguousStaff(token: string, hits: readonly Address[]): GroupSendPlan {
+function ambiguousStaff(token: string, hits: readonly StaffCard[]): GroupSendPlan {
   return {
     ok: false,
     reason: "ambiguous-staff",
     detail: `「${token}」对应 ${hits.length} 张卡，点一个再发。`,
-    candidates: hits.map(candidateOf),
+    candidates: hits.map((card) => ({ staffId: card.id, name: card.name })),
   };
 }
 
@@ -400,27 +321,18 @@ function ambiguousStaff(token: string, hits: readonly Address[]): GroupSendPlan 
  * 按 id 找卡：点选走这里。id 命中就不再用名字匹配，避免同名卡把点选搅回去。
  */
 function planPickedStaff(input: GroupSendPlanInput, text: string, staffId: string): GroupSendPlan {
-  const slices = slicesOf(input);
   const needle = staffId.trim().toLowerCase();
-  const hits = addresses(slices, (card) => card.id.toLowerCase() === needle);
-  // 人已经点了当前这份名册上的卡。别的工作区碰巧有同一个 id，不再拿来问第二次。
-  const homeId = slices[0]?.workspaceId ?? "";
-  const atHome = homeId ? hits.filter((hit) => hit.workspaceId === homeId) : [];
-  const chosen = atHome.length === 1 ? atHome : hits;
-  if (chosen.length === 0) return unknownStaff(staffId.trim(), slices);
-  if (chosen.length > 1) return ambiguousStaff(staffId.trim(), hits);
-  const hit = chosen[0]!;
+  const card = input.staff.find((item) => item.id.toLowerCase() === needle);
+  if (!card) return unknownStaff(staffId.trim(), input.staff);
   return {
     ok: true,
     phase: "send",
-    targets: [planForStaff(hit, text, input.requirement!.number)],
-    ...scopeOf(hit),
+    targets: [planForStaff({ staffId: card.id, name: card.name }, text, input.requirement!.number)],
   };
 }
 
 /**
  * 按正文里的 `@` 找人。id 优先于名字；重名把原名列出来让人点，不自动加后缀。
- * 点到的人必须落在同一个工作区：一条派活不跨区建会话。
  */
 function planNamedMentions(
   input: GroupSendPlanInput,
@@ -428,37 +340,23 @@ function planNamedMentions(
   named: readonly GroupMention[],
   requirementNumber: number,
 ): GroupSendPlan {
-  const slices = slicesOf(input);
-  const resolved: Address[] = [];
+  const resolved: GroupStaffCandidate[] = [];
   for (const mention of named) {
     const needle = mention.token.trim().toLowerCase();
-    const byId = addresses(slices, (card) => card.id.toLowerCase() === needle);
+    const byId = input.staff.filter((card) => card.id.toLowerCase() === needle);
     const hits = byId.length
       ? byId
-      : addresses(slices, (card) => card.name.trim().toLowerCase() === needle);
-    if (hits.length === 0) return unknownStaff(mention.token, slices);
+      : input.staff.filter((card) => card.name.trim().toLowerCase() === needle);
+    if (hits.length === 0) return unknownStaff(mention.token, input.staff);
     if (hits.length > 1) return ambiguousStaff(mention.token, hits);
     const hit = hits[0]!;
-    const seen = resolved.some((item) => item.staffId === hit.staffId && item.workspaceId === hit.workspaceId);
-    if (!seen) resolved.push(hit);
+    if (!resolved.some((item) => item.staffId === hit.id)) resolved.push({ staffId: hit.id, name: hit.name });
   }
 
-  const workspaceIds = [...new Set(resolved.map((item) => item.workspaceId))];
-  if (workspaceIds.length > 1) {
-    return {
-      ok: false,
-      reason: "cross-workspace",
-      detail: "一条消息点到了多个工作区的人。一条派活只落在一个工作区里：点一个人再发。",
-      candidates: resolved.map(candidateOf),
-    };
-  }
-
-  const first = resolved[0];
   return {
     ok: true,
     phase: "send",
     targets: resolved.map((card) => planForStaff(card, text, requirementNumber)),
-    ...(first ? scopeOf(first) : {}),
   };
 }
 
@@ -466,7 +364,7 @@ function planNamedMentions(
  * 把一句群消息算成目标清单。纯函数：不建票、不建会话、不读文件。
  *
  * 返回 `phase: "preview"` 时调用方只能把清单递给界面；`"send"` 才是可以动手的。
- * `scope` 给出这句实际落在哪个工作区：点了别的区的人，会话就建在那个区。
+ * 这里只认得**本群名册**上的卡：一个群属于一个目录，别的项目的人不在这份名册里。
  */
 export function planGroupSend(input: GroupSendPlanInput): GroupSendPlan {
   const text = input.text.trim();
@@ -518,7 +416,7 @@ export function planGroupSend(input: GroupSendPlanInput): GroupSendPlan {
   if (problem) return { ok: false, ...problem };
   const requirementNumber = input.requirement!.number;
 
-  // `@全部` 只铺当前工作区的名册。跨区的人要点名，不能一次把所有区的钱花出去。
+  // `@全部` 只铺本群名册：一个群一个目录，不存在「顺便把别的项目的人也叫上」。
   if (wantsAll) {
     if (input.staff.length === 0) {
       return {

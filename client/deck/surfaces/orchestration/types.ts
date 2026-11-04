@@ -120,7 +120,8 @@ export function profileWithoutModel(row: RoutingRow, profiles: ClientProfile[]):
  * 一个客户端下能点的模型候选。四种结果必须分开，说法完全不同：
  * - `host-empty`：宿主这一趟一个客户端都没报出来（刷新失败 / 还没读），说「删了或改名了」是瞎猜；
  * - `no-client`：还没指客户端，谈不上模型；
- * - `unknown-client`：指的客户端宿主已经不认（删了或改名了）；
+ * - `unknown-client`：清单里没有这个客户端——宿主不认它了（删了或改名了），或者它不在插件
+ *   支持的两家之内（`SUPPORTED_CLIENTS`：其余家注不进接入地址，客户端页与这里都不列）；
  * - `ok` 且清单为空：客户端在，但它一个模型都没报出来（没启用 / 没配凭证）。
  */
 export type ModelChoicesState =
@@ -138,14 +139,9 @@ export function modelChoicesOf(providerId: string, providers: ProviderRow[]): Mo
   return provider ? { kind: "ok", models: provider.models } : { kind: "unknown-client", provider: id };
 }
 
-/** 角色绑定：settings.roles 里当前工作区那一条。 */
+/** 角色绑定：settings.roles 里当前工作区那一条。槽位按 id 取，名册不在这里取。 */
 export function rolesOf(settings: OrchestrationSettings, workspaceId: string) {
   return settings.roles.find((role) => role.workspaceId === workspaceId) ?? null;
-}
-
-/** 当前工作区的名册；没有名册就是空数组，调用方不必处处判 null。 */
-export function staffOf(settings: OrchestrationSettings, workspaceId: string): StaffCard[] {
-  return rolesOf(settings, workspaceId)?.staff ?? [];
 }
 
 /**
@@ -155,22 +151,6 @@ export function staffOf(settings: OrchestrationSettings, workspaceId: string): S
  * 另一个窗口刚加的那张卡就不会被本窗口的旧数组整份覆盖掉。
  */
 export type StaffMutation = (cards: StaffCard[]) => StaffCard[];
-
-/**
- * 整组替换当前工作区的名册，其它字段（角色槽位、提示词）原样带走。
- *
- * 空数组会真的清空名册：`withWorkspaceRoles` 把「没传 staff」当成「保持原样」，
- * 所以这里必须显式给出 `staff`，不能依赖 `withStaffCards` 删除字段后的 undefined。
- */
-export function withStaff(
-  settings: OrchestrationSettings,
-  workspaceId: string,
-  cards: readonly StaffCard[],
-): OrchestrationSettings {
-  const current = rolesOf(settings, workspaceId);
-  const role: WorkspaceRoles = { ...(current ?? {}), workspaceId, staff: [...cards] };
-  return withWorkspaceRoles(settings, role);
-}
 
 /** 「限制」区一次提交的补丁；`undefined` 不动，数值由 `OrchStepper` 提前夹在范围内。 */
 export type LimitsPatch = {

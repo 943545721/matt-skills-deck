@@ -3,8 +3,11 @@ import { matchesWorkspaceScope } from "../shared/session.ts";
 import {
   buildDispatchPreamble,
   buildAgentTree,
+  CODEX_SITE_PROVIDER,
   DECK_TICKET_LABEL,
   isDeckChild,
+  isListedClient,
+  isSupportedClient,
   normalizeOrchestration,
   planDispatch,
   providerSpec,
@@ -13,10 +16,12 @@ import {
   resolveRouteTarget,
   routeFromOf,
   staffCardOf,
+  SUPPORTED_CLIENTS_LABEL,
   ticketLabelOf,
   ticketSpecOf,
   withRoutingRule,
   withWorkspaceRoles,
+  workspaceRolesOf,
   type AgentNodeInput,
   type ClientProfile,
   type ClientTarget,
@@ -212,10 +217,55 @@ export function providersRawOf(config: DaemonConfigView | null): Record<string, 
   return {};
 }
 
+/**
+ * 面板上的客户端 id → 宿主里**真正生效**的那条配置。
+ *
+ * Codex 的站点启用后写在派生 provider `deck-codex` 上：内建 `codex` 的 env 不会被
+ * Codex 适配器当成本次会话的 provider 配置（它只认 `extends: "codex"` 的派生条目）。
+ * 所以凡是按客户端读 / 改 env 的地方都要先过这一层——直接读 `providers.codex`
+ * 会读到一个空条目，界面就会说「启用了但没生效」，获取模型也会必然失败。
+ */
+export function providerEntryOf(
+  providers: Record<string, ProviderConfigView>,
+  clientId: string,
+): ProviderConfigView | undefined {
+  if (clientId !== "codex") return providers[clientId];
+  const derived = providers[CODEX_SITE_PROVIDER];
+  // 只有「能用」的派生条目才顶替内建条目：停用或缺地址时它等于没生效，
+  // 界面这时要显示宿主原生那份配置，否则会一边说「已停用」一边又有会话在跑。
+  return codexSiteUsable(derived) ? derived : providers[clientId];
+}
+
+/**
+ * 派生 Codex 条目能不能真正顶替内建条目：继承 codex、没被停用、地址非空。
+ *
+ * 三个条件缺一个都等于「站点没生效」——建会话的路由（`server/hooks.ts`）与
+ * 面板的读路径必须用同一条判据，否则会出现「界面说停用了、会话还在按站点跑」这类分裂。
+ */
+export function codexSiteUsable(entry: ProviderConfigView | undefined): boolean {
+  return Boolean(entry) && entry?.extends === "codex" && entry.enabled !== false && textOf(entry?.env?.OPENAI_BASE_URL) !== "";
+}
+
+/**
+ * 面板上的客户端 id 写进哪一条：Codex 一律写派生条目。
+ *
+ * **无条件**改道，不判断派生条目在不在：写在内建 `codex` 上的地址与凭证宿主根本不读
+ * （它只认 `extends: "codex"` 的派生条目），那样写等于「配了但不生效」。
+ * 派生条目还不存在时，调用方要顺手把 `extends` / `label` 补上，否则建不成。
+ */
+export function providerWriteTargetOf(clientId: string): string {
+  return clientId === "codex" ? CODEX_SITE_PROVIDER : clientId;
+}
+
 function recordOf(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+/** 配置里的值可能是任何东西（人手改过 config.json）：取字符串，别的当空。 */
+function textOf(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 /** 密钥只回尾 4 位；短值直接全遮，避免「尾 4 位就是全文」。实现在 `shared/provider-models.ts`。 */
@@ -277,7 +327,11 @@ function providerRows(
   const providers = providersRawOf(config);
   return snapshot.map((entry) => {
     const id = (entry.provider ?? "").trim();
-    const configured = providers[id];
+    // Codex 的地址与凭证落在派生条目上：这一行要显示真正生效的那份。
+    // `extends` 例外：那是实现细节，读客户端**自己**的条目——把派生条目的 `extends: "codex"`
+    // 报上去，界面会在 Codex 卡片上印一句「基于 codex」。
+    const own = providers[id];
+    const configured = providerEntryOf(providers, id);
     // 模型名不是机密：`ANTHROPIC_*_MODEL` 的值就是模型 id，宿主自己也在模型列表里印着，
     // 再给一串 `••••lash` 只会让人看不出这台机器跑的是哪个模型。
     const models = modelIdsOf(entry);
@@ -306,7 +360,7 @@ function providerRows(
       models,
       configModels: configuredModelIds(configured, modelsKey),
       modelsKey,
-      extends: typeof configured?.extends === "string" && configured.extends.trim() ? configured.extends.trim() : null,
+      extends: typeof own?.extends === "string" && own.extends.trim() ? own.extends.trim() : null,
       baseUrl: baseUrlOf(envText)?.value ?? null,
       credentialKeys: credentialKeysOf(envText),
       env,
@@ -458,16 +512,51 @@ export async function readOrchestrationState(
     warnings.push(`站点表里有 ${siteRead.dropped} 条格式不对，已忽略：检查 sites.json 或重新建一次`);
   }
   const siteBook = siteRead.ok ? siteRead.book : null;
-  const knownIds = new Set(providerList.map((item) => item.id));
+  // 客户端列表只留插件真能配的两家（Claude / Codex）：其余家在宿主里
+  // 没有读 `*_BASE_URL` 的路径，列出来只能配出一份没人读的配置。
+  // `deck-codex` 也在这里去掉：它是插件为 Codex 站点建的派生 provider，地址与模型
+  // 已经并到 `codex` 那一行显示，再单列一个客户端只会让人以为多了一家。
+  // 这里不逐家报「XX 已隐藏」：宿主本来就把七八家都报出来，那条警告会常驻在页面
+  // 顶部变成噪音。口径写在客户端页的说明行里（`orch.clientsScope`），只有「隐藏的
+  // 客户端下还存着站点」这种真会白存的才单独告警。
+  // 宿主报出来的全部 id（含被隐藏的家与 `deck-codex`）：下面判「宿主没有这家」要靠它，
+  // 光看过滤后的列表会把「宿主有、只是不显示」误说成「宿主里没有」。
+  const hostReportedIds = new Set(providerList.map((row) => row.id.trim().toLowerCase()));
+  providerList = providerList.filter((row) => isListedClient(row.id));
+  const listedIds = new Set(providerList.map((item) => item.id.trim().toLowerCase()));
+  if (providerList.length === 0) {
+    // 过滤后空了有两种原因，界面上一句「没有可选的客户端」不说清是哪种，
+    // 用户会去查一个其实装得好好的客户端。这里把宿主报出来的那几家点名。
+    const reported = [...hostReportedIds].filter((id) => id !== CODEX_SITE_PROVIDER);
+    if (reported.length) {
+      warnings.push(
+        `宿主报出 ${reported.length} 家客户端（${reported.join("、")}），但没有一家在插件支持范围内（${SUPPORTED_CLIENTS_LABEL}）：客户端列表与模型选择器都会是空的`,
+      );
+    }
+  }
   const providers = providerList.map((row) => {
     const sites = siteBook ? sitesOf(siteBook, row.id) : [];
-    return { ...row, ...siteRowsOf(row.id, sites, providersRawOf(config)[row.id]) };
+    // 「现在启用的是哪条」也要按真正生效的条目反推，否则 Codex 会被读成「没启用」。
+    return { ...row, ...siteRowsOf(row.id, sites, providerEntryOf(providersRawOf(config), row.id)) };
   });
   if (siteBook) {
     for (const [clientId, sites] of Object.entries(siteBook.providers)) {
-      if (!knownIds.has(clientId)) {
-        warnings.push(`客户端 ${clientId} 下存着 ${sites.length} 条站点，但宿主里没有这个客户端：这些站点用不上`);
+      // 站点表的键没归一（宿主快照里的 id 大小写不保证），比较前两边都归一一次。
+      const key = clientId.trim().toLowerCase();
+      if (listedIds.has(key)) continue;
+      // 三种「这些站点用不上」，下一步各不相同，不能混成一句：
+      // 派生 provider 不读站点 / 宿主有但不支持 / 宿主里真没这家。
+      if (key === CODEX_SITE_PROVIDER) {
+        warnings.push(
+          `站点表里有 ${sites.length} 条挂在 ${CODEX_SITE_PROVIDER} 这个派生 provider 下：Codex 的站点按 codex 读，这些用不上`,
+        );
+        continue;
       }
+      warnings.push(
+        hostReportedIds.has(key)
+          ? `客户端 ${clientId} 下存着 ${sites.length} 条站点，但插件不支持它（只显示 ${SUPPORTED_CLIENTS_LABEL}）：这些站点不会生效`
+          : `客户端 ${clientId} 下存着 ${sites.length} 条站点，但宿主里没有这个客户端：这些站点用不上`,
+      );
     }
   }
 
@@ -553,6 +642,31 @@ export async function readOrchestrationState(
           ? `（借用 ${item.routeFrom} 档的路由）`
           : "";
     warnings.push(`${item.difficulty} 这一档没有可用客户端${origin}：${item.resolved.detail}`);
+  }
+  // 路由/档案还能指向插件不支持的客户端（宿主那边照常可用，只是注入不进去）。
+  // 会话建得出来，但地址与凭证落不到它身上——不说清楚，就成了「配了却不生效」的另一种版本。
+  const unsupportedRoutes = routing.flatMap((item) =>
+    item.resolved.ok && !isSupportedClient(item.resolved.target.provider)
+      ? [{ difficulty: item.difficulty, provider: item.resolved.target.provider.trim() }]
+      : [],
+  );
+  if (unsupportedRoutes.length) {
+    // 写的是插件自己的派生 provider 时换个说法：用户本来就是冲 Codex 去的，
+    // 说「不在支持范围内，换一个客户端」会把人带到错的方向。
+    const derivedRoute = unsupportedRoutes.filter((item) => item.provider.toLowerCase() === CODEX_SITE_PROVIDER);
+    const otherRoute = unsupportedRoutes.filter((item) => item.provider.toLowerCase() !== CODEX_SITE_PROVIDER);
+    const parts: string[] = [];
+    if (otherRoute.length) {
+      parts.push(
+        `${otherRoute.map((item) => `${item.difficulty}（${item.provider}）`).join("、")} 这几档派的客户端不在插件支持范围内（${SUPPORTED_CLIENTS_LABEL}）：会话能建，但接入地址与凭证注入不了——换一个客户端，或到 Paseo 自己的设置里给这家配`,
+      );
+    }
+    if (derivedRoute.length) {
+      parts.push(
+        `${derivedRoute.map((item) => item.difficulty).join("、")} 这几档直接写了派生 provider ${CODEX_SITE_PROVIDER}：那是插件给 Codex 站点建的条目，路由里请写 codex（站点启用后会自动走派生那一条）`,
+      );
+    }
+    warnings.push(...parts);
   }
   const borrowed = routing.filter((item) => item.resolved.ok && item.routeFrom && !broken.has(item.difficulty));
   if (borrowed.length) {
@@ -707,7 +821,7 @@ export async function revealProviderEnvValue(
   if (!config) {
     return { ok: false, reason: "config-failed", detail: "读不到 daemon 配置：原值就在那份配置里，读不到就不能编一个给你" };
   }
-  const env = recordOf(providersRawOf(config)[provider]?.env);
+  const env = recordOf(providerEntryOf(providersRawOf(config), provider)?.env);
   const value = env?.[key];
   if (typeof value !== "string") {
     return {
@@ -726,6 +840,15 @@ export async function patchProviderConfig(
 ): Promise<ProviderPatchResult> {
   const provider = input.provider.trim();
   if (!provider) return { ok: false, reason: "invalid", detail: "缺少 provider" };
+  // 收窄后的写入口：其余家在宿主那边没有读地址的路径，写进去不会有任何会话用上。
+  // 界面上已经不给入口了，这里是给直接调 RPC 的调用方（agent 也会调）兜一层。
+  if (!isSupportedClient(provider)) {
+    return {
+      ok: false,
+      reason: "invalid",
+      detail: `插件只支持 ${SUPPORTED_CLIENTS_LABEL} 的注入配置：${provider} 的地址与凭证写进去不会被任何会话读——要改它请到 Paseo 自己的设置里`,
+    };
+  }
   const patchEnv = input.env ?? {};
   const envKeys = Object.keys(patchEnv);
   for (const key of envKeys) {
@@ -751,8 +874,51 @@ export async function patchProviderConfig(
       detail: "读不到 daemon 配置：此时无法确认已有的注入键，写入可能把它们从 config.json 里抹掉，先确认 daemon 可读再试",
     };
   }
-  const before = providersRawOf(config)[provider];
+  const providers = providersRawOf(config);
+  // Codex 适配器写死只读 `OPENAI_BASE_URL`：别的名字写进去宿主不会看，
+  // 会话照样走 `~/.codex/config.toml`。与其静默无效，不如在这里说清楚键名。
+  if (provider === "codex") {
+    const wrongName = envKeys.find((key) => /_BASE_URL$/i.test(key) && key !== "OPENAI_BASE_URL");
+    if (wrongName) {
+      return {
+        ok: false,
+        reason: "invalid",
+        detail: `Codex 只认 OPENAI_BASE_URL 这个键名（适配器写死的），${wrongName} 写了也不会生效：改用 OPENAI_BASE_URL 再试`,
+      };
+    }
+  }
+  // 写哪儿、要不要建条目，判据与建会话时的路由同一条：派生条目**可用**才算数。
+  // 不可用（缺失 / 停用 / 没地址 / 没继承 codex）时写进去等于写了个不生效的地方。
+  const usableDerived = codexSiteUsable(providers[CODEX_SITE_PROVIDER]);
+  // 这次补丁里带着接入地址，才谈得上把派生条目建出来：没有地址的派生条目是条死条目，
+  // 会让之后每张 Codex 会话按「残条目」处理。所以「只改模型/凭证」时仍旧写在
+  // 客户端自己的条目上（内建 `codex` 的 `models` 清单宿主照样用），等真配了地址再改道。
+  const addsAddress = textOf(patchEnv.OPENAI_BASE_URL) !== "";
+  const writesDerived = provider === "codex" && (usableDerived || addsAddress);
+  const targetId = writesDerived ? CODEX_SITE_PROVIDER : provider;
+  const before = providers[targetId];
+  // 派生条目不在、或在了但不能用：这次写入要顺手把它建成可用的形状。
+  const creatingDerived = provider === "codex" && writesDerived && !usableDerived;
   const providerPatch: Record<string, unknown> = {};
+  if (creatingDerived) {
+    // `extends` / `label` 缺一样宿主都不认；模型清单也搬过来，否则新条目看着像「一个模型都没有」。
+    // 优先搬派生条目自己那份（残条目里可能已有用户加的模型），没有再搬内建的；键名跟着来源走，
+    // `models` 与 `additionalModels` 语义不同，不能搬到另一把上。
+    providerPatch.extends = "codex";
+    providerPatch.label = "Deck Codex";
+    // 找一个**真的有清单**的来源（残条目可能只有 label）：派生条目自己的优先，其次内建条目。
+    const source = [providers[CODEX_SITE_PROVIDER], providers.codex].find((entry) => {
+      const key = modelListKeyOf(entry);
+      const list = entry?.[key];
+      return Array.isArray(list) && list.length > 0;
+    });
+    if (source) {
+      const inheritedKey = modelListKeyOf(source);
+      providerPatch[inheritedKey] = source[inheritedKey];
+    }
+  }
+  // 读清单的基准：新条目还没有自己的清单，就看内建那条。
+  const modelBase = before ?? (creatingDerived ? providers.codex : undefined);
   const mergedEnv: Record<string, string> = {};
   if (envKeys.length) {
     // 宿主的内存里补丁是深合并，**落盘时 `env` 是整块替换**。
@@ -773,13 +939,12 @@ export async function patchProviderConfig(
     providerPatch.env = mergedEnv;
   }
   if (input.enabled !== undefined) providerPatch.enabled = input.enabled;
-  if (nextLabel) providerPatch.label = nextLabel.slice(0, 120);
   let modelsKey: ModelListKey | null = null;
   if (input.models !== undefined) {
     // 模型清单是**替换**语义：传进来什么，写完就是什么，没列进去的会被删掉。
     // 落在哪把键上要看现存配置——`models` 是「替换内置列表」，往它的
     // `additionalModels` 上写等于写到一个不生效的地方（本机 codex 就是这样）。
-    modelsKey = modelListKeyOf(before);
+    modelsKey = modelListKeyOf(modelBase);
     const wanted: string[] = [];
     for (const id of input.models) {
       const key = id.trim();
@@ -794,7 +959,7 @@ export async function patchProviderConfig(
     }
     // 条目形状是 `{ id, label }`，`label` 必填；留下来的条目要把宿主自己的字段
     // （`label` / `isDefault` / `description` / `thinkingOptions`）原样带回去。
-    const current = before?.[modelsKey] ?? [];
+    const current = modelBase?.[modelsKey] ?? [];
     const kept: Array<Record<string, unknown>> = [];
     for (const item of current) {
       const id = typeof item === "string" ? item.trim() : (item.id ?? "").trim();
@@ -806,8 +971,18 @@ export async function patchProviderConfig(
     }
     providerPatch[modelsKey] = kept;
   }
+  // 显示名一律落在客户端**自己**的条目上：面板卡片上的名字取自宿主快照里 `codex` 那条的
+  // `label`（派生那一行被滤掉了），写到 `deck-codex` 上等于改了个看不见的地方。
+  // `env` / `models` / `enabled` 落在「真正生效的那条」上：派生条目可用时是它，否则是客户端自己的条目
+  // （判据见上面的 `writesDerived`）。注意 `enabled` 因此有两副意思：派生条目可用时停用 = 回原生 Codex，
+  // 写在内建条目上 = 停用整家客户端。目前没有界面入口发这个字段，接界面时要分清。
+  const patches: Record<string, Record<string, unknown>> = {};
+  if (Object.keys(providerPatch).length) patches[targetId] = providerPatch;
+  if (nextLabel) {
+    patches[provider] = { ...(patches[provider] ?? {}), label: nextLabel.slice(0, 120) };
+  }
   try {
-    await paseo.config.patch({ providers: { [provider]: providerPatch } });
+    await paseo.config.patch({ providers: patches });
   } catch (error) {
     return { ok: false, reason: "config-failed", detail: sessionErrorDetail(error) };
   }
@@ -832,22 +1007,30 @@ export async function patchProviderConfig(
 
   // 读回校验：写成功不代表 daemon 真的收下了（补丁字段可能不被支持）。
   const after = await readDaemonConfig(paseo);
-  const configuredAfter = providersRawOf(after)[provider];
-  if (!configuredAfter) {
+  // 整份配置读不回来只能说「没法核对」：写入可能已经成功，别把它报成没落地。
+  if (!after) {
+    warnings.push("读回读不到 daemon 配置：这次写入没法核对是否落地，请到 config.json 确认一次");
+    return { ok: true, provider, applied, warnings };
+  }
+  const afterProviders = providersRawOf(after);
+  const configuredAfter = afterProviders[targetId];
+  // 只改显示名时我们压根没往派生条目上写，不能拿「派生条目看不到」去报配置没落地。
+  if (!configuredAfter && Object.keys(providerPatch).length) {
     warnings.push(`读回看不到客户端 ${provider} 的配置：这次写入可能没有落到 config.json 里，改完请核对一次`);
     return { ok: true, provider, applied, warnings };
   }
-  if (envKeys.length) {
+  if (configuredAfter && envKeys.length) {
     const envAfter = configuredAfter.env ?? {};
     const missing = Object.keys(mergedEnv).filter((key) => (envAfter[key] ?? "") !== mergedEnv[key]);
     if (missing.length) {
       warnings.push(`读回不一致：${missing.join(", ")} 没有生效，检查是否被启动参数覆盖`);
     }
   }
-  if (nextLabel && String(configuredAfter.label ?? "").trim() !== nextLabel) {
+  // 显示名写在客户端自己的条目上，回读也核那一条（`targetId` 可能是派生条目）。
+  if (nextLabel && String(afterProviders[provider]?.label ?? "").trim() !== nextLabel) {
     warnings.push(`读回不一致：显示名没有写进去（期望 ${nextLabel}）`);
   }
-  if (input.models !== undefined && modelsKey) {
+  if (configuredAfter && input.models !== undefined && modelsKey) {
     // 读回按集合比对：既查「该有的没有」，也查「该删的还在」——替换语义下
     // 只查前者会让「取消勾选没生效」静默通过。
     const afterIds = configuredModelIds(configuredAfter, modelsKey);
@@ -1195,7 +1378,8 @@ export async function runDispatch(
 
   const results: DispatchOutcomeResult[] = [];
   // 票面上要写「谁干的」：会话会被归档，票是留下的凭证。
-  const workspaceRoles = stored.settings.roles.find((role) => role.workspaceId === input.workspaceId) ?? null;
+  // 名册按目录合并（同一目录会有好几个 workspaceId），否则换个工作区打开就找不到卡。
+  const workspaceRoles = workspaceRolesOf(stored.settings, input.workspaceId);
 
   for (const rejected of plan.rejected) {
     results.push({ key: rejected.key, ok: false, reason: rejected.reason, detail: rejected.detail });
@@ -1393,6 +1577,15 @@ export type SaveSiteResult =
 export async function saveClientSite(paseo: PaseoApi, input: SaveSiteInput): Promise<SaveSiteResult> {
   const provider = input.provider.trim();
   if (!provider) return { ok: false, reason: "invalid", detail: "缺少客户端 id" };
+  // 不支持的家不给建站/启用（存了也没有会话会读，正是「配了却不生效」那条路）；
+  // 删除仍然放行，免得早先留下的记录清不掉。动作可能一次带好几个（删 + 建 + 启用），
+  // 所以按动作分别拦，不能只看「有没有 removeId」。
+  const unsupportedWrite = (): SaveSiteResult => ({
+    ok: false,
+    reason: "invalid",
+    detail: `插件只支持 ${SUPPORTED_CLIENTS_LABEL} 的接入配置：${provider} 的站点存了也不会生效`,
+  });
+  const writable = isSupportedClient(provider);
 
   const read = await readSiteBook();
   if (!read.ok) return { ok: false, reason: "write-failed", detail: read.detail };
@@ -1413,6 +1606,7 @@ export async function saveClientSite(paseo: PaseoApi, input: SaveSiteInput): Pro
   }
 
   if (input.site) {
+    if (!writable) return unsupportedWrite();
     const id = provider === "" ? "" : normalizeSiteId(input.site.id);
     const existing = current.find((site) => site.id === id);
     const idProblem = siteIdProblem(id, taken.filter((item) => item !== id));
@@ -1436,6 +1630,7 @@ export async function saveClientSite(paseo: PaseoApi, input: SaveSiteInput): Pro
   }
 
   if (input.enableId !== undefined) {
+    if (!writable) return unsupportedWrite();
     const id = normalizeSiteId(input.enableId);
     const site = sitesOf(book, provider).find((item) => item.id === id);
     if (!site) return { ok: false, reason: "not-found", detail: `${provider} 下没有站点 ${id}` };
@@ -1447,8 +1642,26 @@ export async function saveClientSite(paseo: PaseoApi, input: SaveSiteInput): Pro
   const settled = await readSiteBook();
   const sites = settled.ok ? sitesOf(settled.book, provider) : sitesOf(book, provider);
   const config = await readDaemonConfig(paseo);
-  const rows = siteRowsOf(provider, sites, providersRawOf(config)[provider]);
+  // 回给界面的「现在生效的是哪条」要读真正生效的那条配置（Codex 是派生条目）。
+  const configProviders = providersRawOf(config);
+  const rows = siteRowsOf(provider, sites, providerEntryOf(configProviders, provider));
   return { ok: true, provider, sites: sites.map(siteRowOf), enabledSiteId: rows.enabledSiteId, warnings };
+}
+
+/**
+ * 从旧配置的 env 里摸出一把能用的凭证（Codex 站点首次启用时用）。
+ *
+ * 顺序固定：`OPENAI_API_KEY` → 其它 `*_API_KEY` → `*_AUTH_TOKEN` / `*_TOKEN`。
+ * 键名只用来挑值，值永远不回给界面。
+ */
+function legacyCredentialOf(env: Record<string, string> | undefined): string {
+  const entries = Object.entries(env ?? {}).filter(([, value]) => textOf(value) !== "");
+  const direct = entries.find(([key]) => key === "OPENAI_API_KEY");
+  if (direct) return textOf(direct[1]);
+  const apiKey = entries.find(([key]) => /_API_KEY$/i.test(key));
+  if (apiKey) return textOf(apiKey[1]);
+  const token = entries.find(([key]) => /(_AUTH_TOKEN|_TOKEN)$/i.test(key));
+  return token ? textOf(token[1]) : "";
 }
 
 /** 把这一条站点的地址与凭证写进客户端自己的 env；缺凭证时只换地址。 */
@@ -1459,20 +1672,99 @@ async function enableSite(
 ): Promise<{ ok: true; warnings: string[] } | { ok: false; reason: "config-failed"; detail: string }> {
   // 配置里还没有这个客户端的条目是正常的（第一次给它配地址）：补丁会建出这一条。
   // 读不到整份配置才停下——那种情况下 patchProviderConfig 自己会拒绝。
-  const before = providersRawOf(await readDaemonConfig(paseo))[provider];
-  const existingKeys = Object.keys(before?.env ?? {});
-  const keys = envKeysFor(provider, existingKeys);
+  const config = await readDaemonConfig(paseo);
+  if (!config) {
+    return { ok: false, reason: "config-failed", detail: "读不到 daemon 配置：无法保留 provider 已有的模型与 env，拒绝启用站点" };
+  }
+  const providers = providersRawOf(config);
+  const before = providers[provider];
+  const targetProvider = providerWriteTargetOf(provider);
+  const targetBefore = providers[targetProvider];
+  const modelObjects = (items: Array<string | ProviderModelItemView> | undefined) => {
+    const kept = (items ?? []).flatMap((item) => {
+      const id = typeof item === "string" ? item.trim() : item.id?.trim();
+      if (!id) return [];
+      const label = typeof item === "string" ? id : item.label?.trim() || id;
+      return [{ ...(typeof item === "string" ? {} : item), id, label }];
+    });
+    // 空清单不写：`models` 是替换语义，写空等于「一个模型都不剩」。
+    return kept.length ? kept : undefined;
+  };
+  // Codex 适配器只读这两把键（`codex-app-server-agent.js` 的 `OPENAI_BASE_URL` /
+  // `OPENAI_API_KEY`），所以**不能**沿用既有键名：`envKeysFor` 遇到自定义的
+  // `*_API_KEY` 会沿用它，而那是 Codex 根本不看的键。
+  const keys = provider === "codex"
+    ? { baseUrlKey: "OPENAI_BASE_URL", credentialKey: "OPENAI_API_KEY" }
+    : envKeysFor(provider, Object.keys(before?.env ?? {}));
+  // 旧式注入可能把凭证放在别的键上（例如自定义的 `*_API_KEY`）：从内建条目里找回来。
+  // 优先 `OPENAI_API_KEY`（那本来就是 Codex 认的键），再按 `*_API_KEY` → `*_TOKEN` 的顺序，
+  // 不按 env 的插入顺序取第一条——多键时那样可能捡到一把这里根本用不上的钥匙。
+  const credential = site.credential.trim() || (provider === "codex" ? legacyCredentialOf(before?.env) : "");
   const env: Record<string, string> = { [keys.baseUrlKey]: site.baseUrl };
-  const credential = site.credential.trim();
   if (credential) env[keys.credentialKey] = credential;
-  const patched = await patchProviderConfig(paseo, { provider, env });
+  // 模型清单跟「用户最近改的那份」走：派生条目被停用时，模型改动是落回内建条目上的
+  // （见 `patchProviderConfig` 的 `writesDerived`），这里若仍优先搬派生条目留着的旧清单，
+  // 就会把用户刚改的那份盖掉。派生条目可用时才以它为准。
+  const modelSource = codexSiteUsable(targetBefore) ? targetBefore : before;
+  const models = modelObjects(modelSource?.models);
+  const additionalModels = modelObjects(modelSource?.additionalModels);
+  const providerPatch = provider === "codex"
+    ? {
+        extends: "codex",
+        label: "Deck Codex",
+        enabled: true,
+        ...(models ? { models } : {}),
+        ...(additionalModels ? { additionalModels } : {}),
+        env: { ...(targetBefore?.env ?? {}), ...env },
+      }
+    : null;
+  let patched: ProviderPatchResult;
+  if (providerPatch) {
+    try {
+      await paseo.config.patch({ providers: { [targetProvider]: providerPatch } });
+      patched = { ok: true, provider: targetProvider, applied: Object.keys(env).map((key) => `env.${key}`), warnings: [] };
+    } catch (error) {
+      return { ok: false, reason: "config-failed", detail: sessionErrorDetail(error) };
+    }
+  } else {
+    patched = await patchProviderConfig(paseo, { provider: targetProvider, env });
+  }
   if (!patched.ok) return { ok: false, reason: "config-failed", detail: patched.detail };
 
   const warnings: string[] = [];
-  const live = providersRawOf(await readDaemonConfig(paseo))[provider]?.env ?? {};
-  const liveCredential = live[keys.credentialKey] ?? "";
-  if (!credential && !liveCredential.trim()) {
-    warnings.push(`站点 ${site.id} 没填凭证，${provider} 现在也没有凭据：这个客户端起的会话会被接口拒绝`);
+  const afterConfig = await readDaemonConfig(paseo);
+  // 「整份配置读不到」只能说「没法核对」（写入可能已经成功）；
+  // 「配置读得到、就是没有这一条」则是写入没落地，必须报失败。
+  if (!afterConfig) {
+    record("warn", SCOPE, `启用站点后读不到 daemon 配置：无法核对 ${targetProvider} 的写入结果`);
+    warnings.push(`启用后读不到 daemon 配置，无法核对是否生效：请到 ~/.paseo/config.json 确认这次改动`);
+    return { ok: true, warnings };
+  }
+  const liveEntry = providersRawOf(afterConfig)[targetProvider];
+  if (!liveEntry) {
+    return { ok: false, reason: "config-failed", detail: `写入后读回看不到 ${targetProvider}：这次启用没有落地，请核对 config.json` };
+  }
+  if (provider === "codex") {
+    // 派生 provider 没被建成（或没继承 codex），宿主照样会收下 env 却用不到：
+    // 这种必须在启用这一步就暴露，否则之后每一条 Codex 会话都会被路由拦掉。
+    if (liveEntry.extends !== "codex" || liveEntry.enabled === false) {
+      return {
+        ok: false,
+        reason: "config-failed",
+        detail: `${targetProvider} 没有作为派生 Codex provider 生效（extends=${String(liveEntry.extends ?? "未写入")}）：宿主可能不接受派生配置，请核对 config.json`,
+      };
+    }
+  }
+  const live = liveEntry.env ?? {};
+  if (live[keys.baseUrlKey] !== site.baseUrl) {
+    return { ok: false, reason: "config-failed", detail: `写入后读回不一致：${targetProvider} 的 ${keys.baseUrlKey} 没有生效` };
+  }
+  const liveCredential = textOf(live[keys.credentialKey]);
+  if (credential && liveCredential !== credential) {
+    return { ok: false, reason: "config-failed", detail: `写入后读回不一致：${targetProvider} 的 ${keys.credentialKey} 没有生效` };
+  }
+  if (!credential && !liveCredential) {
+    warnings.push(`站点 ${site.id} 没填凭证，${targetProvider} 现在也没有凭据：这个客户端起的会话会被接口拒绝`);
   }
   return { ok: true, warnings };
 }

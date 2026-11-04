@@ -1,21 +1,20 @@
+import path from "node:path";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import {
   DECK_GROUP_LABEL,
   groupReadRpc,
   groupSendRpc,
-  parseGroupMentions,
   planGroupSend,
   type GroupDelivery,
   type GroupMember,
-  type GroupRoster,
   type GroupSendPlan,
   type GroupSendReason,
 } from "../../shared/group-rpc.ts";
 import { isFinalized } from "../../shared/impact.ts";
 import { labelNames } from "../../shared/issue-kind.ts";
 import { guardCreateTicket } from "../../shared/split-guard.ts";
-import { DECK_STAFF_LABEL, staffCardOf, type StaffCard } from "../../shared/staff.ts";
+import { DECK_STAFF_LABEL, rosterOf, staffCardOf, type StaffCard } from "../../shared/staff.ts";
 import {
   DECK_TICKET_LABEL,
   PARENT_AGENT_ID_LABEL,
@@ -23,6 +22,7 @@ import {
   resolveRoute,
   resolveRouteTarget,
   ticketLabelOf,
+  workspaceRolesOf,
   type ClientTarget,
   type ClientProfile,
   type OrchestrationSettings,
@@ -30,8 +30,8 @@ import {
 } from "../../shared/orchestration.ts";
 import { readOrchestration } from "../orchestration-store.ts";
 import { profilesOf, readDaemonConfig } from "../orchestration.ts";
-import { appendGroup, readGroup, type GroupRecord } from "../group-store.ts";
-import { readGroupRosters } from "../group-roster.ts";
+import { appendGroup, readGroupDirectory, type GroupRecord } from "../group-store.ts";
+import { readGroupRoster } from "../group-roster.ts";
 import { readGroupRequest, rememberGroupRequest } from "../group-requests.ts";
 import { buildGroupContext } from "../group-context.ts";
 import { collectStaffHistory } from "../staff-history.ts";
@@ -80,14 +80,42 @@ function agentsOf(listed: unknown): Array<Record<string, unknown>> {
   return out;
 }
 
-/** 这个工作区的角色槽位；名册与派单窗口都从这里取。 */
-function rolesOf(settings: OrchestrationSettings, workspaceId: string): WorkspaceRoles | null {
-  return settings.roles.find((role) => role.workspaceId === workspaceId) ?? null;
+/**
+ * 群标签的值是**目录**，不是 workspaceId。
+ *
+ * 群属于目录：同一个目录每次重开都会攒出一个新的 workspaceId，标签若写 id，
+ * 换了 id 打开群页就一条会话也看不见（名册上有 12 个人，右栏却说都没起过会话）。
+ * 写目录，换多少个 id 都还是这个群。`resolve` 是为了抹平 `尾斜杠 / ./` 这类同目录不同写法。
+ */
+function groupKeyOf(workspaceDir: string): string {
+  return path.resolve(workspaceDir);
 }
 
-/** 这个工作区的名册。读不出来就按空名册处理，并在调用方 warning 里说清楚。 */
-function staffOf(roles: WorkspaceRoles | null): StaffCard[] {
-  return roles?.staff ?? [];
+/**
+ * 按群标签列会话。除目录 key 外也带上当前 workspaceId：改格式之前建的会话标签写的是 id，
+ * 不能因为换了格式就从成员表里消失。同一会话两条都能列到，按 id 去重。
+ *
+ * 更早的 id 下建的会话查不到：宿主的列表只能按标签值精确过滤，历史 id 没法枚举。
+ * 这不比改格式之前更差（那时换个 id 打开，这些会话也看不见），新会话一律写目录 key。
+ */
+async function listedGroupAgents(
+  context: PluginHandlerContext,
+  keys: readonly string[],
+): Promise<{ agents: Array<Record<string, unknown>>; warnings: string[] }> {
+  const seen = new Map<string, Record<string, unknown>>();
+  const warnings: string[] = [];
+  for (const key of [...new Set(keys.map((item) => item.trim()).filter(Boolean))]) {
+    try {
+      const listed = await context.paseo.agents.list({
+        filter: { labels: { [DECK_GROUP_LABEL]: key }, includeArchived: true },
+      });
+      for (const agent of agentsOf(listed)) seen.set(String(agent.id), agent);
+    } catch (error) {
+      // 一个 key 读失败不该让整页没有成员：其余照读，失败写进 warnings。
+      warnings.push(`群成员读不出来（${key}）：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { agents: [...seen.values()], warnings };
 }
 
 /** 群里的会话用哪份客户端：卡上指定了档案就按档案，否则走 normal 档路由。 */
@@ -151,93 +179,9 @@ async function requirementOf(
   };
 }
 
-/**
- * 点了别的工作区的人，就把整句改派到那个工作区再执行。
- *
- * 只在「点了具体的人」时改派。`@全部` 和不带 `@` 仍留在打开群的这个工作区：
- * 一次把所有区的会话都建出来，是把每个区的钱一起花掉。
- * 重名与跨区在这里拒绝，让界面把候选画成可点的人，而不是自动改名。
- */
-async function retargetGroupSend(
-  input: GroupSendInput,
-  context: PluginHandlerContext,
-): Promise<{ ok: true; input: GroupSendInput; warnings: string[] } | { ok: false; result: GroupSendOutput }> {
-  const named = parseGroupMentions(input.text).some((mention) => !mention.all);
-  const picked = input.staffId?.trim();
-  if (!named && !picked) return { ok: true, input, warnings: [] };
-
-  const loaded = await readGroupRosters(context.paseo, {
-    workspaceId: input.workspaceId,
-    workspaceDir: input.workspaceDir,
-  });
-  const current = loaded.rosters.find((roster) => roster.current) ?? loaded.rosters[0];
-  if (!current) return { ok: true, input, warnings: loaded.warnings };
-
-  const staff = current.staff.map((card) => ({ id: card.staffId, name: card.name }));
-  const probe = planGroupSend({
-    text: input.text,
-    staff,
-    workspace: { workspaceId: current.workspaceId, workspaceDir: current.workspaceDir, name: current.name, staff },
-    otherRosters: loaded.rosters
-      .filter((roster) => roster.workspaceId !== current.workspaceId)
-      .map((roster) => ({
-        workspaceId: roster.workspaceId,
-        workspaceDir: roster.workspaceDir,
-        name: roster.name,
-        staff: roster.staff.map((card) => ({ id: card.staffId, name: card.name })),
-      })),
-    // 这一步只决定落在哪个工作区。需求票在目标工作区里再读一次。
-    mainAgentId: "probe",
-    requirement: { number: 1, finalized: true },
-    ...(picked ? { staffId: picked } : {}),
-    ...(input.confirmAll === undefined ? {} : { confirmAll: input.confirmAll }),
-  });
-
-  if (!probe.ok && (probe.reason === "ambiguous-staff" || probe.reason === "cross-workspace")) {
-    // 还没定稿时，先说定稿，不拿候选把真正的拒绝盖住。这与单工作区的顺序一致。
-    const requirement = await requirementOf(input);
-    if (!requirement.ok) return { ok: false, result: reject("no-requirement", requirement.detail) };
-    if (!requirement.requirement?.finalized) {
-      const gated = planGroupSend({
-        text: input.text,
-        staff,
-        mainAgentId: null,
-        requirement: requirement.requirement,
-        ...(picked ? { staffId: picked } : {}),
-        ...(input.confirmAll === undefined ? {} : { confirmAll: input.confirmAll }),
-      });
-      if (!gated.ok) return { ok: false, result: rejectPlan(gated) };
-    }
-    return { ok: false, result: rejectPlan(probe) };
-  }
-
-  if (!probe.ok || !probe.scope) return { ok: true, input, warnings: loaded.warnings };
-  if (probe.scope.workspaceId === input.workspaceId && probe.scope.workspaceDir === input.workspaceDir) {
-    return { ok: true, input, warnings: loaded.warnings };
-  }
-  return {
-    ok: true,
-    input: { ...input, workspaceId: probe.scope.workspaceId, workspaceDir: probe.scope.workspaceDir },
-    warnings: loaded.warnings,
-  };
-}
-
 export async function groupSendHandler(
   input: GroupSendInput,
   context: PluginHandlerContext,
-): Promise<GroupSendOutput> {
-  if (!input.workspaceId.trim() || !input.workspaceDir.trim()) {
-    return reject("invalid-workspace", "需要 workspaceId 与工作区目录");
-  }
-  const directed = await retargetGroupSend(input, context);
-  if (!directed.ok) return directed.result;
-  return executeGroupSend(directed.input, context, directed.warnings);
-}
-
-async function executeGroupSend(
-  input: GroupSendInput,
-  context: PluginHandlerContext,
-  priorWarnings: readonly string[],
 ): Promise<GroupSendOutput> {
   if (!input.workspaceId.trim() || !input.workspaceDir.trim()) {
     return reject("invalid-workspace", "需要 workspaceId 与工作区目录");
@@ -260,13 +204,15 @@ async function executeGroupSend(
     }
   }
   const stored = await readOrchestration(input.workspaceDir);
-  const warnings: string[] = [...priorWarnings];
+  const warnings: string[] = [];
   if (stored.readFailed || stored.corrupt) {
     warnings.push(`编排设置读不出来（${stored.detail ?? "未知原因"}），按默认值处理：名册可能是空的`);
   }
 
-  const roles = rolesOf(stored.settings, input.workspaceId);
-  const staff = staffOf(roles);
+  // 槽位按 workspaceId 取；名册在这一层不跟着 id 分（`rosterOf`）。
+  const roles = workspaceRolesOf(stored.settings, input.workspaceId);
+  // 名册按目录取：没有这一条的 workspaceId 时也要拿到这个目录的卡。
+  const staff = rosterOf(stored.settings);
   const mainAgentId = await mainAgentFor(input.workspaceDir, input.workspaceId);
   const requirement = await requirementOf(input);
   if (!requirement.ok) return reject("no-requirement", requirement.detail);
@@ -279,14 +225,7 @@ async function executeGroupSend(
     ...(input.staffId?.trim() ? { staffId: input.staffId.trim() } : {}),
     ...(input.confirmAll === undefined ? {} : { confirmAll: input.confirmAll }),
   });
-  if (!plan.ok) {
-    return {
-      ok: false,
-      reason: plan.reason,
-      detail: plan.detail,
-      ...(plan.candidates ? { candidates: plan.candidates } : {}),
-    };
-  }
+  if (!plan.ok) return rejectPlan(plan);
   if (plan.phase === "preview") {
     return { ok: true, status: "preview", targets: plan.targets, warnings };
   }
@@ -301,7 +240,8 @@ async function executeGroupSend(
   const deliveries: GroupDelivery[] = [];
   const userText = input.text.trim();
   // 先读旧记录再写这一条：否则这句派活会原样回到被派人的上下文里，等于把他的任务说两遍。
-  const prior = await readGroup(input.workspaceDir, input.workspaceId);
+  // 读整个目录：群属于目录，会话该看到的「本群最近说了什么」不限于今天这个 workspaceId 那个文件。
+  const prior = await readGroupDirectory(input.workspaceDir);
   if (prior.failed) warnings.push(`群记录读不出来（会话照建）：${prior.failed}`);
   const contextRecords: readonly GroupRecord[] = prior.records;
 
@@ -383,7 +323,7 @@ async function executeGroupSend(
 
     const labels: Record<string, string> = {
       [DECK_STAFF_LABEL]: staffId,
-      [DECK_GROUP_LABEL]: input.workspaceId,
+      [DECK_GROUP_LABEL]: groupKeyOf(input.workspaceDir),
       [DECK_TICKET_LABEL]: ticketLabelOf(ticket.repoKey, ticket.number),
       ...(dispatcherAgentId ? { [PARENT_AGENT_ID_LABEL]: dispatcherAgentId } : {}),
     };
@@ -447,53 +387,36 @@ export async function groupReadHandler(
   const limit = input.limit ?? 200;
   const warnings: string[] = [];
 
-  let members: GroupMember[] = [];
-  try {
-    const listed = await context.paseo.agents.list({
-      filter: { labels: { [DECK_GROUP_LABEL]: input.workspaceId }, includeArchived: true },
-    });
-    members = agentsOf(listed).map((agent) => {
-      const labels = (agent.labels ?? {}) as Record<string, string>;
-      return {
-        agentId: String(agent.id),
-        staffId: labels[DECK_STAFF_LABEL] ?? "",
-        title: typeof agent.title === "string" ? agent.title : "",
-        status: typeof agent.status === "string" ? agent.status : "",
-        archived: Boolean(agent.archivedAt),
-      };
-    });
-  } catch (error) {
-    warnings.push(`群成员读不出来：${error instanceof Error ? error.message : String(error)}`);
-  }
-
-  const loaded = await readGroupRosters(context.paseo, {
-    workspaceId: input.workspaceId,
-    workspaceDir: input.workspaceDir,
+  const listed = await listedGroupAgents(context, [groupKeyOf(input.workspaceDir), input.workspaceId]);
+  warnings.push(...listed.warnings);
+  const members: GroupMember[] = listed.agents.map((agent) => {
+    const labels = (agent.labels ?? {}) as Record<string, string>;
+    return {
+      agentId: String(agent.id),
+      staffId: labels[DECK_STAFF_LABEL] ?? "",
+      title: typeof agent.title === "string" ? agent.title : "",
+      status: typeof agent.status === "string" ? agent.status : "",
+      archived: Boolean(agent.archivedAt),
+    };
   });
-  warnings.push(...loaded.warnings);
 
-  const merged: Array<GroupRecord & { workspaceId: string; workspaceName: string }> = [];
-  let skipped = 0;
-  for (const roster of loaded.rosters) {
-    const read = await readGroup(roster.workspaceDir, roster.workspaceId);
-    if (read.failed) {
-      warnings.push(`${roster.name}：${read.failed}`);
-      continue;
-    }
-    skipped += read.skipped;
-    for (const record of read.records) {
-      merged.push({ ...record, workspaceId: roster.workspaceId, workspaceName: roster.name });
-    }
-  }
-  merged.sort((left, right) => (left.at < right.at ? -1 : left.at > right.at ? 1 : 0));
+  const roster = await readGroupRoster(input.workspaceDir);
 
-  const rosters: GroupRoster[] = loaded.rosters;
+  /**
+   * 消息只属于**这个目录**。
+   *
+   * 一个项目一个群：本群的名册、本群的对话。别的目录是别的项目，不在这里读。
+   * 同一目录会攒出好几个 workspaceId，记录文件按 id 存，所以按目录合起来读。
+   */
+  const read = await readGroupDirectory(input.workspaceDir);
+  if (read.failed) warnings.push(read.failed);
+
   return {
     ok: true,
     members,
-    rosters,
-    records: merged.slice(-limit),
-    skipped,
+    roster,
+    records: read.records.slice(-limit),
+    skipped: read.skipped,
     warnings,
   };
 }

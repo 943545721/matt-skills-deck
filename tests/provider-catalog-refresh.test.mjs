@@ -75,6 +75,25 @@ test("配置里停用的客户端也不进摘要：与状态页用的是同一�
   assert.deepEqual(result.providers.map((row) => row.id), ["claude"]);
 });
 
+test("插件不支持的家不进选择器：与客户端列表同一口径", async () => {
+  const { paseo } = fakePaseo([
+    { provider: "claude", status: "ready", models: [{ id: "m1" }] },
+    { provider: "codex", status: "ready", models: [{ id: "x" }] },
+    // OpenCode 只有前缀约定、没有实证；Codex 的派生 provider 也不单列。
+    { provider: "opencode", status: "ready", models: [{ id: "o1" }] },
+    { provider: "deck-codex", status: "ready", models: [{ id: "x" }] },
+    { provider: "cursor", status: "ready", models: [{ id: "c1" }] },
+    { provider: "copilot", status: "ready", models: [{ id: "p1" }] },
+  ]);
+
+  const result = await refreshProviderCatalog(paseo, { workspaceDir: "/tmp/ws" });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.providers.map((row) => row.id), ["claude", "codex"]);
+  // 静默丢掉会让人以为刷新坏了：只在这条路的日志里记数，界面口径写在客户端页说明行。
+  assert.deepEqual(result.warnings, [], "隐藏客户端不该变成每次刷新的告警噪音");
+});
+
 test("目录读取失败带警告，不能显示成「0 个模型」了事", async () => {
   const { paseo } = fakePaseo([
     { provider: "claude", status: "error", error: "spawn claude ENOENT", models: [] },

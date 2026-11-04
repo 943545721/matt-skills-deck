@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readOrchestrationState } from "../server/orchestration.ts";
+import { isListedClient, isSupportedClient, SUPPORTED_CLIENTS, SUPPORTED_CLIENTS_LABEL } from "../shared/orchestration.ts";
 
 /**
  * 编排页的数据来源：`deck.orchestration.state` 背后的组装逻辑。
@@ -127,6 +128,221 @@ test("编排状态：磁盘形状（daemon.agentProfiles / agents.providers）�
   assert.equal(state.ok, true);
   assert.equal(state.profiles.length, 1);
   assert.equal(state.providers.find((row) => row.id === "claude")?.env.length, 1);
+});
+
+test("编排状态：Codex 站点启用后，codex 那一行显示派生条目的地址，且不把派生条目单列、不漏出 extends", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const withSite = fakePaseo({
+    config: {
+      get: async () => ({
+        config: {
+          providers: {
+            codex: { models: [{ id: "gpt-5-codex", label: "GPT-5 Codex" }] },
+            "deck-codex": {
+              extends: "codex",
+              label: "Deck Codex",
+              enabled: true,
+              env: { OPENAI_BASE_URL: "https://api.example.test/v1", OPENAI_API_KEY: "cred-x" },
+            },
+          },
+        },
+      }),
+    },
+    providers: {
+      snapshot: async () => ({
+        entries: [
+          { provider: "codex", label: "Codex", enabled: true, status: "ready", models: [{ id: "gpt-5-codex" }] },
+          { provider: "deck-codex", label: "Deck Codex", enabled: true, status: "ready", models: [{ id: "gpt-5-codex" }] },
+        ],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(withSite, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.deepEqual(
+    state.providers.map((row) => row.id),
+    ["codex"],
+    "派生 provider 是插件的实现细节，不能让人以为多了一家客户端",
+  );
+  const codex = state.providers[0];
+  assert.equal(codex.baseUrl, "https://api.example.test/v1", "界面要显示真正生效的那份地址");
+  assert.equal(codex.extends, null, "「基于 codex」不该印在 codex 自己身上");
+  assert.equal(codex.label, "Codex", "显示名还是宿主快照里的内建名字");
+});
+
+test("客户端列表：只列插件能注入的两家，其余家不出现", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const many = fakePaseo({
+    providers: {
+      snapshot: async () => ({
+        entries: [
+          { provider: "claude", label: "Claude", enabled: true, status: "ready", models: [{ id: "sonnet" }] },
+          { provider: "codex", label: "Codex", enabled: true, status: "ready", models: [{ id: "gpt-5-codex" }] },
+          // OpenCode 只有前缀约定、没有实证：同样不算支持，不列。
+          { provider: "opencode", label: "OpenCode", enabled: true, status: "ready", models: [{ id: "gpt-5" }] },
+          // 宿主会把装了没装的客户端都报出来：插件注不进去的家不该出现在列表里。
+          { provider: "cursor", label: "Cursor", enabled: true, status: "ready", models: [] },
+          { provider: "copilot", label: "Copilot", enabled: false, status: "missing", models: [] },
+          { provider: "pi", label: "Pi", enabled: false, status: "missing", models: [] },
+        ],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(many, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.deepEqual(state.providers.map((row) => row.id), ["claude", "codex"]);
+  // 支持范围本身也钉住：改动这个常量等于改界面口径，得有意识地改。
+  assert.deepEqual([...SUPPORTED_CLIENTS], ["claude", "codex"]);
+  assert.equal(isSupportedClient(" Claude "), true);
+  assert.equal(isSupportedClient("cursor"), false);
+  assert.equal(isSupportedClient("opencode"), false, "只有前缀约定、没有实证，不算支持");
+  assert.equal(isSupportedClient(""), false);
+  // 派生 provider 不算一家客户端：列表与模型选择器都是这个判断。
+  assert.equal(isListedClient("deck-codex"), false);
+  assert.equal(isListedClient(" Codex "), true);
+  assert.equal(SUPPORTED_CLIENTS_LABEL, "Claude / Codex", "告警里印的写法要和客户端页一致");
+  // 不逐家报「XX 已隐藏」：七八家都报会让页面顶部常驻噪音，口径写在客户端页的说明行里。
+  assert.equal(state.warnings.some((line) => line.includes("已隐藏")), false);
+});
+
+test("站点表：隐藏的客户端下存着站点时说明站点不会生效，不误报「宿主里没有」", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const home = await mkdtemp(join(tmpdir(), "deck-orch-home-"));
+  const previousHome = process.env.PASEO_HOME;
+  process.env.PASEO_HOME = home;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  });
+  await mkdir(join(home, "matt-skills-deck"), { recursive: true });
+  await writeFile(
+    join(home, "matt-skills-deck", "sites.json"),
+    JSON.stringify({
+      version: 1,
+      providers: {
+        cursor: [{ id: "legacy", baseUrl: "https://cursor.example.test/v1" }],
+        pi: [{ id: "gone", baseUrl: "https://pi.example.test/v1" }],
+      },
+    }),
+    "utf8",
+  );
+  // 宿主报出 cursor，但没报 pi：两种「不显示」的下一步不一样，得分开说。
+  const paseo = fakePaseo({
+    providers: {
+      snapshot: async () => ({
+        entries: [{ provider: "cursor", label: "Cursor", enabled: true, status: "ready", models: [] }],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.deepEqual(state.providers, []);
+  const hiddenSite = state.warnings.find((line) => line.includes("cursor") && line.includes("条站点"));
+  assert.ok(hiddenSite, "隐藏的客户端下存着站点要说出来");
+  assert.match(hiddenSite, /插件不支持它/);
+  assert.doesNotMatch(hiddenSite, /宿主里没有这个客户端/);
+  assert.ok(state.warnings.some((line) => line.includes("pi") && line.includes("宿主里没有这个客户端")));
+});
+
+test("客户端列表：宿主报的全是不支持的家时，空列表要说清原因，不能让人去查装好的客户端", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const paseo = fakePaseo({
+    providers: {
+      snapshot: async () => ({
+        entries: [
+          { provider: "cursor", label: "Cursor", enabled: true, status: "ready", models: [] },
+          { provider: "copilot", label: "Copilot", enabled: false, status: "missing", models: [] },
+        ],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.deepEqual(state.providers, []);
+  const line = state.warnings.find((warning) => warning.includes("没有一家在插件支持范围内"));
+  assert.ok(line, "空列表必须说清是「都不支持」而不是「宿主没报」");
+  assert.match(line, /cursor/);
+  assert.match(line, /copilot/);
+});
+
+test("站点表：宿主报的 id 大小写不统一、站点挂在派生 provider 下时，告警各说各的", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const home = await mkdtemp(join(tmpdir(), "deck-orch-home-"));
+  const previousHome = process.env.PASEO_HOME;
+  process.env.PASEO_HOME = home;
+  t.after(async () => {
+    if (previousHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  });
+  await mkdir(join(home, "matt-skills-deck"), { recursive: true });
+  await writeFile(
+    join(home, "matt-skills-deck", "sites.json"),
+    JSON.stringify({
+      version: 1,
+      providers: {
+        // 宿主那条报的是 `Cursor`，站点表的键是小写：不能被当成「宿主里没有」。
+        cursor: [{ id: "legacy", baseUrl: "https://cursor.example.test/v1" }],
+        // 派生 provider 不是独立客户端：挂在它下面的站点同样得说清为什么不读。
+        "deck-codex": [{ id: "old", baseUrl: "https://api.example.test/v1" }],
+      },
+    }),
+    "utf8",
+  );
+  const paseo = fakePaseo({
+    providers: {
+      snapshot: async () => ({
+        entries: [{ provider: "Cursor", label: "Cursor", enabled: true, status: "ready", models: [] }],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  const hiddenSite = state.warnings.find((line) => line.includes("cursor") && line.includes("条站点"));
+  assert.ok(hiddenSite, "隐藏的客户端下存着站点要说出来");
+  assert.match(hiddenSite, /插件不支持它/);
+  assert.doesNotMatch(hiddenSite, /宿主里没有这个客户端/);
+  const derivedSite = state.warnings.find((line) => line.includes("deck-codex"));
+  assert.ok(derivedSite, "派生 provider 下的站点也要说");
+  assert.match(derivedSite, /按 codex 读/);
+  assert.doesNotMatch(derivedSite, /插件不支持它/);
+});
+
+test("路由指向插件不支持的客户端时明确告警：会话建得出来，但注入不了", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(
+    join(dir, ".deck", "orchestration.json"),
+    JSON.stringify(settings({ routing: [{ difficulty: "normal", target: { provider: "cursor", model: "composer" } }] })),
+    "utf8",
+  );
+  const state = await readOrchestrationState(fakePaseo(), { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  const line = state.warnings.find((warning) => warning.includes("不在插件支持范围内"));
+  assert.ok(line, "派给 cursor 的档位要说清注入不了，别让人以为配好了");
+  assert.match(line, /cursor/);
+  assert.match(line, /注入不了/);
+
+  // 路由里直接写派生 provider：换成另一句话，别让人以为「换个客户端」才对。
+  await writeFile(
+    join(dir, ".deck", "orchestration.json"),
+    JSON.stringify(settings({ routing: [{ difficulty: "normal", target: { provider: "deck-codex", model: "gpt-5-codex" } }] })),
+    "utf8",
+  );
+  const derived = await readOrchestrationState(fakePaseo(), { workspaceId: "ws1", workspaceDir: dir });
+  const derivedLine = derived.warnings.find((warning) => warning.includes("派生 provider deck-codex"));
+  assert.ok(derivedLine, "写派生 provider 要单独说一句");
+  assert.match(derivedLine, /路由里请写 codex/);
+  assert.equal(
+    derived.warnings.some((warning) => warning.includes("不在插件支持范围内")),
+    false,
+    "不能把派生 provider 说成「不在支持范围内，换一个客户端」",
+  );
 });
 
 test("编排状态：读到了配置但两处都空时明确告警，不让用户以为注入丢了", async (t) => {

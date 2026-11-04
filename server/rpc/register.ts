@@ -83,7 +83,10 @@ import {
   orchestrationSiteHandler,
   orchestrationStateHandler,
   orchestrationWindowHandler,
+  staffScanReadHandler,
+  staffScanStartHandler,
 } from "./orchestration.ts";
+import { staffScanReadRpc, staffScanStartRpc } from "../../shared/staff-scan-rpc.ts";
 import { issueAttachmentSearchRpc } from "../../shared/slash.ts";
 import { workspaceBindingRpc } from "../../shared/workspace-binding.ts";
 import { workspaceBindingHandler } from "./workspace.ts";
@@ -236,6 +239,8 @@ export function registerAll(server: PluginServerContext): void {
   server.handle(orchestrationDispatchRpc, orchestrationDispatchHandler);
   server.handle(orchestrationRequirementDispatchRpc, orchestrationRequirementDispatchHandler);
   server.handle(orchestrationWindowRpc, orchestrationWindowHandler);
+  server.handle(staffScanStartRpc, staffScanStartHandler);
+  server.handle(staffScanReadRpc, staffScanReadHandler);
 
   server.handle(groupSendRpc, groupSendHandler);
   server.handle(groupReadRpc, groupReadHandler);

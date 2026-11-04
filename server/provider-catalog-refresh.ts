@@ -5,7 +5,8 @@ import {
   type ProviderModelList,
 } from "../shared/orchestration-rpc.ts";
 import { record } from "./logs.ts";
-import { providersRawOf, type DaemonConfigView } from "./orchestration.ts";
+import { providerEntryOf, providersRawOf, type DaemonConfigView } from "./orchestration.ts";
+import { isListedClient } from "../shared/orchestration.ts";
 import { modelIdsOf, type ProviderSnapshotEntry } from "./provider-snapshot-view.ts";
 import { sessionErrorDetail } from "./session.ts";
 
@@ -113,10 +114,19 @@ export async function refreshProviderCatalog(
   const configured = providersRawOf(input.config ?? null);
   const providers: ProviderModelList[] = [];
   const warnings: string[] = [];
+  /** 没进选择器的条目（不支持的客户端、派生 provider）：只记日志，不进界面（口径写在客户端页说明行里）。 */
+  const skipped: string[] = [];
   for (const entry of entries) {
     const id = (entry.provider ?? "").trim();
     if (!id) continue;
-    if (entry.enabled === false || configured[id]?.enabled === false) continue;
+    // 与客户端列表同一个判断：插件不支持的家、以及 Codex 站点的派生 provider
+    // （模型已并到 `codex` 那一行）都不在选择器里单列，否则会冒出一个配了也不生效的客户端。
+    if (!isListedClient(id)) {
+      skipped.push(id);
+      continue;
+    }
+    // Codex 启用过站点时「停用」写在派生条目上，这里要和状态页同一口径。
+    if (entry.enabled === false || providerEntryOf(configured, id)?.enabled === false) continue;
     const problem = statusProblem(entry.status);
     if (problem) {
       const error = (entry.error ?? "").trim();
@@ -130,6 +140,10 @@ export async function refreshProviderCatalog(
     providers.push({ id, models: capped.models });
   }
 
-  record("info", SCOPE, `刷新 provider 快照：${workspaceDir} → ${providers.length} 个客户端`);
+  record(
+    "info",
+    SCOPE,
+    `刷新 provider 快照：${workspaceDir} → ${providers.length} 个客户端${skipped.length ? `（另有 ${skipped.length} 条未列：${skipped.join("、")}）` : ""}`,
+  );
   return { ok: true, workspaceDir, providers, warnings };
 }

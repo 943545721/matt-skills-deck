@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { DECK_DIR } from "../shared/local-layout.ts";
 
@@ -75,15 +75,8 @@ function parseRecord(value: unknown): GroupRecord | null {
   };
 }
 
-export async function readGroup(workspaceDir: string, workspaceId: string): Promise<GroupReadResult> {
-  const file = groupFileOf(workspaceDir, workspaceId);
-  let text: string;
-  try {
-    text = await readFile(file, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { records: [], skipped: 0 };
-    return { records: [], skipped: 0, failed: `读取群记录失败：${String(error)}` };
-  }
+/** 一份记录文件的正文 → 行数组；坏行只丢那一行，计入 `skipped`。 */
+function parseLines(text: string): { records: GroupRecord[]; skipped: number } {
   const records: GroupRecord[] = [];
   let skipped = 0;
   for (const line of text.split(/\r?\n/)) {
@@ -97,6 +90,56 @@ export async function readGroup(workspaceDir: string, workspaceId: string): Prom
     }
   }
   return { records, skipped };
+}
+
+export async function readGroup(workspaceDir: string, workspaceId: string): Promise<GroupReadResult> {
+  const file = groupFileOf(workspaceDir, workspaceId);
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { records: [], skipped: 0 };
+    return { records: [], skipped: 0, failed: `读取群记录失败：${String(error)}` };
+  }
+  return parseLines(text);
+}
+
+/**
+ * 这个目录的全部群记录：`.deck/group/*.jsonl` 合起来按时间排。
+ *
+ * 文件按 workspaceId 存（一次派活挂在哪个 id 下就落哪个文件），但群属于**目录**：
+ * 同一目录换了个 id 打开，昨天的话不能凭空消失。反过来，别的目录的记录一条也不该
+ * 混进来——那是另一个项目的对话，出现在这里就是串台。
+ */
+export async function readGroupDirectory(workspaceDir: string): Promise<GroupReadResult> {
+  const dir = path.join(workspaceDir, DECK_DIR, GROUP_DIR);
+  let names: string[];
+  try {
+    names = (await readdir(dir)).filter((name) => name.endsWith(".jsonl")).sort();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { records: [], skipped: 0 };
+    return { records: [], skipped: 0, failed: `读取群记录目录失败：${String(error)}` };
+  }
+
+  const records: GroupRecord[] = [];
+  let skipped = 0;
+  const failed: string[] = [];
+  for (const name of names) {
+    try {
+      const parsed = parseLines(await readFile(path.join(dir, name), "utf8"));
+      records.push(...parsed.records);
+      skipped += parsed.skipped;
+    } catch (error) {
+      // 一个文件读不出来不该把整个群变空：其余文件照读，失败写进 `failed`。
+      failed.push(`${name}：${String(error)}`);
+    }
+  }
+  records.sort((left, right) => (left.at < right.at ? -1 : left.at > right.at ? 1 : 0));
+  return {
+    records,
+    skipped,
+    ...(failed.length ? { failed: `部分群记录读不出来（${failed.join("；")}）` } : {}),
+  };
 }
 
 function toMillis(value: Date | number | string): number {
