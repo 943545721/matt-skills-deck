@@ -33,6 +33,7 @@ import {
   type RouteFailureReason,
   type RouteResolution,
   type RoutingRule,
+  type ThinkingResolutionContext,
   type WorkspaceRoles,
 } from "../shared/orchestration.ts";
 import {
@@ -54,6 +55,7 @@ import {
   providerWriteTargetOf,
   providersRawOf,
   textOf,
+  thinkingContextOf,
   withMissingModels,
   type ProviderConfigSource,
   type ProviderConfigView,
@@ -424,10 +426,11 @@ const ALL_DIFFICULTIES: Difficulty[] = ["trivial", "normal", "hard", "critical"]
 function resolveRuleTarget(
   rule: RoutingRule,
   profiles: readonly ClientProfile[],
+  thinking: ThinkingResolutionContext = {},
 ):
   | { ok: true; target: ClientTarget; via: "profile" | "target" }
   | { ok: false; reason: RouteFailureReason; detail: string } {
-  return resolveRouteTarget(rule, profiles);
+  return resolveRouteTarget(rule, profiles, thinking);
 }
 
 export async function readOrchestrationState(
@@ -614,9 +617,11 @@ export async function readOrchestrationState(
     ),
   );
 
+  // 与派单执行走同一份「这个客户端现在声明了哪些模型」：预览与实际不会说两套话。
+  const thinking = thinkingContextOf(stored.settings.modelThinking, config);
   const routing = ALL_DIFFICULTIES.map((difficulty) => {
     const rule = resolveRoute(stored.settings, difficulty);
-    const resolved = resolveRuleTarget(rule, profiles);
+    const resolved = resolveRuleTarget(rule, profiles, thinking);
     return {
       difficulty,
       profileId: rule.profileId ?? null,
@@ -1410,6 +1415,8 @@ export async function runDispatch(
     mapBudgets: stored.settings.mapBudgets,
     repoKeys,
     runningByMap: running.counts,
+    // 卡片上按模型配的默认档：计划里就把最终档位合成好，建会话时照抄。
+    thinking: thinkingContextOf(stored.settings.modelThinking, config),
     ...(input.map?.trim() ? { map: input.map.trim() } : {}),
     depth: depth - 1,
     dispatchId,

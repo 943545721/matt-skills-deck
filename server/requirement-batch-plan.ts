@@ -22,6 +22,7 @@ import {
   type SplitBatch,
   type SplitWorkspace,
 } from "../shared/requirement-split.ts";
+import { thinkingContextOf, type ProviderConfigSource } from "./provider-entry.ts";
 import type {
   RequirementDispatchBatchPlan,
   RequirementDispatchEntry,
@@ -102,12 +103,16 @@ function dispatchPlanOf(
   tasks: readonly DispatchTaskInput[],
   dispatchId: string,
   profiles: readonly ClientProfile[] | undefined,
+  daemonConfig: ProviderConfigSource | null | undefined,
 ): DispatchPlan {
   return planDispatch({
     workspaceId: batch.workspaceId,
     roles: workspace.settings.roles,
     routing: workspace.settings.routing,
     profiles: profiles ?? [],
+    // 清单里的目标要和真正派出去的一致：默认档在这里就合成好，模型清单也和
+    // `readOrchestrationState` / `runDispatch` 用同一份宿主配置来裁。
+    thinking: thinkingContextOf(workspace.settings.modelThinking, daemonConfig ?? null),
     tasks,
     maxDepth: workspace.settings.maxDepth,
     maxChildrenPerDispatch: workspace.settings.maxChildrenPerDispatch,
@@ -150,6 +155,8 @@ export function batchPlanOf(input: {
   readonly requirementBody: string | null | undefined;
   readonly baseDispatchId: string;
   readonly profiles: readonly ClientProfile[] | undefined;
+  /** 宿主配置：预览与执行同判「模型还在不在」，不给则预览不裁剪。 */
+  readonly daemonConfig: ProviderConfigSource | null | undefined;
   readonly warnings: string[];
 }): BatchPlanOutcome {
   const { batch, workspace, number, warnings } = input;
@@ -166,7 +173,7 @@ export function batchPlanOf(input: {
   }
   const dispatchId = batchDispatchIdOf(input.baseDispatchId, batch.workspaceId);
   const tasks = tasksOf(batch, number, input.requirementRepoKey, input.requirementBody);
-  const plan = dispatchPlanOf(batch, workspace, tasks, dispatchId, input.profiles);
+  const plan = dispatchPlanOf(batch, workspace, tasks, dispatchId, input.profiles, input.daemonConfig);
   const entries = entriesOf(plan, batch, number, warnings);
   warnings.push(...plan.rejected.map((item) => `${batch.workspaceName}：${item.key} 被拒——${item.detail}`));
   return {

@@ -9,7 +9,9 @@ import type { PanelKey } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelButton, PixelCard } from "../../pixel.tsx";
 import { HostCatalogBar } from "./HostCatalogBar.tsx";
+import type { ModelThinkingDefault } from "./modelThinking.ts";
 import { ModelPicker } from "./ModelPicker.tsx";
+import { ModelThinkingList } from "./ModelThinkingList.tsx";
 import type { ProviderRow, SiteRow } from "./types.ts";
 
 /**
@@ -43,6 +45,8 @@ export function ClientsPanel({
   onSaveEnv,
   onSaveModel,
   onSaveLabel,
+  modelThinking,
+  onSaveThinking,
   onDiagnose,
   onInstall,
   onReveal,
@@ -59,6 +63,10 @@ export function ClientsPanel({
   onSaveModel(input: { provider: string; models: string[] }): void;
   /** 只改显示名。 */
   onSaveLabel(input: { provider: string; label: string }): void;
+  /** 全量默认档表（来自设置）；界面按 provider + model 查自己那一条。 */
+  modelThinking: readonly ModelThinkingDefault[];
+  /** 设 / 清一个模型的默认档；`thinkingOptionId: null` 是清除。 */
+  onSaveThinking(input: { provider: string; model: string; thinkingOptionId: string | null }): void;
   /** 取宿主诊断原文；失败时返回可直接展示的原因。 */
   onDiagnose(provider: string): Promise<{ ok: true; diagnostic: string } | { ok: false; detail: string }>;
   /** 取某一个键的原值；用户显式点「显示」才会调用。 */
@@ -508,15 +516,30 @@ export function ClientsPanel({
 
                 {field(
                   t("orch.field.models"),
-                  <ModelPicker
-                    skin={skin}
-                    t={t}
-                    models={provider.configModels}
-                    listKey={provider.modelsKey}
-                    busy={busy}
-                    onSave={(ids) => onSaveModel({ provider: provider.id, models: ids })}
-                    onFetch={() => onFetchModels(provider.id)}
-                  />,
+                  <View style={{ gap: 10, flex: 1 }}>
+                    <ModelPicker
+                      skin={skin}
+                      t={t}
+                      models={provider.configModels}
+                      listKey={provider.modelsKey}
+                      busy={busy}
+                      onSave={(ids) => onSaveModel({ provider: provider.id, models: ids })}
+                      onFetch={() => onFetchModels(provider.id)}
+                    />
+                    {/* 每个已选模型自己的默认档：派单用这个模型时自动带上。 */}
+                    <ModelThinkingList
+                      skin={skin}
+                      t={t}
+                      provider={provider.id}
+                      models={provider.configModels}
+                      providers={providers}
+                      defaults={modelThinking}
+                      busy={busy}
+                      onSet={(model, thinkingOptionId) =>
+                        onSaveThinking({ provider: provider.id, model, thinkingOptionId })
+                      }
+                    />
+                  </View>,
                   true,
                 )}
 

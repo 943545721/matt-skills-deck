@@ -3,6 +3,7 @@ import { z } from "zod";
 import { FIXED_ROLE_NAMES, MAX_ROLE_PROMPT_CHARS, ROLE_LANGS } from "./role-prompts.ts";
 import {
   MAX_MIN_CONCURRENT_STAFF,
+  MAX_MODEL_THINKING,
   MAX_STAFF_CARDS,
   MAX_STAFF_SESSION_QUOTA,
   MAX_STAFF_CONCURRENCY,
@@ -50,6 +51,13 @@ export const staffCardSchema = z.object({
   maxConcurrent: z.number().int().min(1).max(MAX_STAFF_CONCURRENCY).optional(),
 });
 
+/** 客户端卡片上按「客户端 + 模型」配的一条默认档；id 不写死。 */
+export const modelThinkingDefaultSchema = z.object({
+  provider: z.string().min(1).max(120),
+  model: z.string().min(1).max(200),
+  thinkingOptionId: z.string().min(1).max(200),
+});
+
 export const orchestrationSettingsSchema = z.object({
   roles: z.array(
     z.object({
@@ -70,6 +78,11 @@ export const orchestrationSettingsSchema = z.object({
     }),
   ),
   routing: z.array(routingRuleSchema),
+  /**
+   * 卡片上按「客户端 + 模型」配的默认档位。
+   * 旧设置文件没有这一段，归一化后是空数组——线上始终有这一项。
+   */
+  modelThinking: z.array(modelThinkingDefaultSchema).max(MAX_MODEL_THINKING),
   maxDepth: z.number().int().min(1).max(6),
   maxChildrenPerDispatch: z.number().int().min(1).max(24),
   /**

@@ -47,7 +47,7 @@ async function workspaceWith(settings) {
 }
 
 /** 只够跑通建窗口的假宿主：配置可读、建会话可注入结果、旧会话可归档。 */
-function fakePaseo({ id = "agent-new", snapshots = [], createError, archiveError, onCreate } = {}) {
+function fakePaseo({ id = "agent-new", snapshots = [], createError, archiveError, onCreate, config = {} } = {}) {
   const created = [];
   const archived = [];
   /** 会话落进哪条工作区：窗口必须走句柄，否则宿主会按目录再登记一条同名工作区。 */
@@ -63,7 +63,7 @@ function fakePaseo({ id = "agent-new", snapshots = [], createError, archiveError
     return { id };
   };
   const paseo = {
-    config: { get: async () => ({ config: {} }) },
+    config: { get: async () => ({ config }) },
     agents: {
       create,
       ref: (agentId) => ({
@@ -127,6 +127,33 @@ test("建窗口：跟 normal 档路由走，带身份提示词，但不传首条
   assert.deepEqual(options.labels, { "deck.role": "main", "deck.role.window": "1" });
   assert.equal(options.prompt, undefined, "窗口建出来停在 idle，不带首条提示词");
   assert.equal(options.parent, undefined, "固定窗口不挂父会话");
+});
+
+test("建窗口：带上同模型的默认档；模型从清单删掉后不再带", async () => {
+  const modelThinking = [{ provider: "claude", model: "sonnet", thinkingOptionId: "high" }];
+  const settings = { ...settingsWith(), modelThinking };
+
+  const dir = await workspaceWith(settings);
+  const kept = fakePaseo({ config: { providers: { claude: { additionalModels: [{ id: "sonnet" }] } } } });
+  const keptResult = await orchestrationWindowHandler(
+    { workspaceDir: dir, workspaceId: WS, role: "main" },
+    contextOf(kept.paseo),
+  );
+  assert.equal(keptResult.ok, true, JSON.stringify(keptResult));
+  assert.equal(kept.created[0].config.thinkingOptionId, "high", "路由没显式设档时用默认档");
+
+  const dir2 = await workspaceWith(settings);
+  const removed = fakePaseo({ config: { providers: { claude: { additionalModels: [] } } } });
+  const removedResult = await orchestrationWindowHandler(
+    { workspaceDir: dir2, workspaceId: WS, role: "main" },
+    contextOf(removed.paseo),
+  );
+  assert.equal(removedResult.ok, true, JSON.stringify(removedResult));
+  assert.equal(
+    "thinkingOptionId" in removed.created[0].config,
+    false,
+    "模型已经不在清单里，默认档不许继续生效",
+  );
 });
 
 test("建窗口：用户没改过提示词时回落到该语言的默认值", async () => {

@@ -26,10 +26,12 @@ import {
   type ClientTarget,
   type ClientProfile,
   type OrchestrationSettings,
+  type ThinkingResolutionContext,
   type WorkspaceRoles,
 } from "../../shared/orchestration.ts";
 import { readOrchestration } from "../orchestration-store.ts";
 import { profilesOf, readDaemonConfig } from "../orchestration.ts";
+import { thinkingContextOf } from "../provider-entry.ts";
 import { appendGroup, readGroupDirectory, type GroupRecord } from "../group-store.ts";
 import { readGroupRoster } from "../group-roster.ts";
 import { readGroupRequest, rememberGroupRequest } from "../group-requests.ts";
@@ -118,29 +120,36 @@ async function listedGroupAgents(
   return { agents: [...seen.values()], warnings };
 }
 
-/** 群里的会话用哪份客户端：卡上指定了档案就按档案，否则走 normal 档路由。 */
+/**
+ * 群里的会话用哪份客户端：卡上指定了档案就按档案，否则走 normal 档路由。
+ *
+ * 两条分支都过 `resolveRouteTarget`：卡上没显式设档位、模型又有默认档时，
+ * 群建的会话也得带上，否则同一个模型在不同入口会跑出不同的思考档。
+ */
 function targetOf(
   settings: OrchestrationSettings,
   profiles: readonly ClientProfile[],
   card: StaffCard | null,
+  thinking: ThinkingResolutionContext,
 ): { ok: true; target: ClientTarget } | { ok: false; detail: string } {
   const profileId = card?.profileId?.trim();
-  if (profileId) {
-    const profile = profiles.find((item) => item.id === profileId);
-    if (!profile) {
-      return { ok: false, detail: `岗位卡 ${card?.name ?? ""} 指定的客户端档案 ${profileId} 已不存在` };
-    }
-    const target: ClientTarget = {
-      provider: profile.provider,
-      ...(profile.model ? { model: profile.model } : {}),
-      ...(profile.modeId ? { modeId: profile.modeId } : {}),
-      ...(profile.thinkingOptionId ? { thinkingOptionId: profile.thinkingOptionId } : {}),
-      ...(profile.featureValues ? { featureValues: profile.featureValues } : {}),
+  // 档案分支也走 `resolveRouteTarget`：目标怎么由档案拼出来只有那一处，
+  // 群发不另抄一份（否则以后档案多一个字段，就要记得改两处）。
+  const rule = profileId
+    ? { difficulty: "normal" as const, profileId }
+    : resolveRoute(settings, "normal");
+  const resolved = resolveRouteTarget(rule, profiles, thinking);
+  if (!resolved.ok) {
+    return {
+      ok: false,
+      // 档案不见了要说清楚是「岗位卡指向的档案被删了」，不是一条普通的路由坏了。
+      detail:
+        profileId && resolved.reason === "profile-missing"
+          ? `岗位卡 ${card?.name ?? ""} 指定的客户端档案 ${profileId} 已不存在`
+          : resolved.detail,
     };
-    return { ok: true, target };
   }
-  const resolved = resolveRouteTarget(resolveRoute(settings, "normal"), profiles);
-  return resolved.ok ? { ok: true, target: resolved.target } : { ok: false, detail: resolved.detail };
+  return { ok: true, target: resolved.target };
 }
 
 /** 派单窗口：群里的会话挂回它，回传链照旧。没配就没有父会话，如实说出来。 */
@@ -231,7 +240,10 @@ export async function groupSendHandler(
   }
 
   // 档案读宿主配置（不是编排设置）：客户端与模型只存在于 daemon config 里。
-  const profiles = profilesOf(await readDaemonConfig(context.paseo));
+  const daemon = await readDaemonConfig(context.paseo);
+  const profiles = profilesOf(daemon);
+  // 默认档位也要按宿主当前模型清单筛：模型被删掉的条目不能继续发出去。
+  const thinking = thinkingContextOf(stored.settings.modelThinking, daemon);
   const dispatcherAgentId = dispatcherOf(roles);
   if (!dispatcherAgentId) {
     warnings.push("这个工作区没有配派单窗口：群里建的会话没有父会话，回传链会断在它自己这里。");
@@ -273,7 +285,7 @@ export async function groupSendHandler(
       deliveries.push({ staffId, name: target.name, agentId: null, ticketNumber: null, detail: "岗位卡已经不在名册上" });
       continue;
     }
-    const spec = targetOf(stored.settings, profiles, card);
+    const spec = targetOf(stored.settings, profiles, card, thinking);
     if (!spec.ok) {
       deliveries.push({ staffId, name: target.name, agentId: null, ticketNumber: null, detail: spec.detail });
       continue;
@@ -331,6 +343,9 @@ export async function groupSendHandler(
       cwd: input.workspaceDir,
       workspaceId: input.workspaceId,
       provider: providerSpec(spec.target),
+      // 合成好的思考档要真的带到会话上，只在 targetOf 里算出来而不传等于没有默认档。
+      // 档案的 modeId / featureValues 不在这里顺手加：那是 #30 之外的行为变化。
+      ...(spec.target.thinkingOptionId ? { thinkingOptionId: spec.target.thinkingOptionId } : {}),
       prompt: userText,
       title: target.ticketTitle,
       ...(groupContext.text ? { systemPrompt: groupContext.text } : {}),

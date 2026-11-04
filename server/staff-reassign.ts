@@ -10,7 +10,12 @@
  */
 
 import type { PaseoApi } from "@getpaseo/client";
-import type { ClientTarget, RoutingRule } from "../shared/orchestration.ts";
+import type {
+  ClientTarget,
+  ModelThinkingDefault,
+  RoutingRule,
+  ThinkingResolutionContext,
+} from "../shared/orchestration.ts";
 import {
   DECK_STAFF_LABEL,
   DECK_TICKET_LABEL,
@@ -26,6 +31,7 @@ import { resolveOwner } from "../shared/staff-guard.ts";
 import { buildGroupContext } from "./group-context.ts";
 import { readGroupDirectory } from "./group-store.ts";
 import { profilesOf, readDaemonConfig } from "./orchestration.ts";
+import { thinkingContextOf } from "./provider-entry.ts";
 import { readOrchestration } from "./orchestration-store.ts";
 import { createAgent, sessionErrorDetail } from "./session.ts";
 import { collectStaffHistory } from "./staff-history.ts";
@@ -49,6 +55,8 @@ export interface ReassignInput {
   readonly card: StaffCard;
   readonly roster: readonly StaffCard[];
   readonly routing: readonly RoutingRule[];
+  /** 卡片上按模型配的默认档；没显式设档位时用它。 */
+  readonly modelThinking: readonly ModelThinkingDefault[];
   /** 这个工作区配的派单窗口：原会话没有父标签时用它接上回传链。 */
   readonly dispatcherAgentId?: string | null;
 }
@@ -60,6 +68,7 @@ export type ReassignTargetResolution =
       readonly card: StaffCard;
       readonly roster: readonly StaffCard[];
       readonly routing: readonly RoutingRule[];
+      readonly modelThinking: readonly ModelThinkingDefault[];
       readonly dispatcherAgentId: string | null;
     }
   | { readonly ok: false; readonly reason: "read-failed" | "invalid-action"; readonly detail: string };
@@ -154,6 +163,7 @@ export async function resolveReassignTarget(input: {
     card,
     roster,
     routing: read.settings.routing,
+    modelThinking: read.settings.modelThinking,
     dispatcherAgentId: binding?.dispatcherAgentId?.trim() || null,
   };
 }
@@ -214,11 +224,12 @@ async function originalLabelsOf(
 function clientTargetOf(
   input: ReassignInput,
   profiles: ReturnType<typeof profilesOf>,
+  thinking: ThinkingResolutionContext,
 ): { readonly ok: true; readonly target: ClientTarget } | { readonly ok: false; readonly detail: string } {
   const rule = input.card.profileId
     ? { difficulty: "normal" as const, profileId: input.card.profileId }
     : resolveRoute({ routing: input.routing }, "normal");
-  const target = resolveRouteTarget(rule, profiles);
+  const target = resolveRouteTarget(rule, profiles, thinking);
   if (!target.ok) {
     return { ok: false, detail: `找不到「${input.card.name}」可用的客户端：${target.detail}` };
   }
@@ -260,8 +271,9 @@ async function createForStaff(
   prompt: string,
   warnings: string[],
 ): Promise<ReassignDelivery> {
-  const profiles = profilesOf(await readDaemonConfig(input.paseo));
-  const client = clientTargetOf(input, profiles);
+  const config = await readDaemonConfig(input.paseo);
+  const profiles = profilesOf(config);
+  const client = clientTargetOf(input, profiles, thinkingContextOf(input.modelThinking, config));
   if (!client.ok) return client;
 
   let originalLabels: Record<string, string> = {};

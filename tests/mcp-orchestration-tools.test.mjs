@@ -105,6 +105,45 @@ test("deck_dispatch_plan：按难度给出客户端、标签和带抬头的提�
   assert.match(hard.prompt, /整理成三段/);
 });
 
+test("deck_dispatch_plan：MCP 派单也吃卡片默认档；模型删掉后不再带", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    modelThinking: [{ provider: "claude", model: "sonnet", thinkingOptionId: "high" }],
+  });
+  // MCP 进程从 `<PASEO_HOME>/config.json` 读宿主配置；这份文件不在工作区里。
+  const home = await mkdtemp(join(tmpdir(), "deck-mcp-home-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const previousHome = process.env.PASEO_HOME;
+  process.env.PASEO_HOME = home;
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.PASEO_HOME;
+    else process.env.PASEO_HOME = previousHome;
+  });
+
+  const args = { tasks: [{ key: "t1", prompt: "写单测", difficulty: "normal" }], depth: 1 };
+  const first = await runTool("deck_dispatch_plan", args, dir);
+  assert.equal(first.isError, false, first.raw);
+  assert.equal(
+    first.body.tasks[0].thinkingOptionId,
+    "high",
+    "MCP 派单与 RPC 派单走同一份默认档",
+  );
+  // 计划里算了档位，hint 还得让外部调用方知道要把它交给宿主；
+  // 只写 providerSpec / labels / prompt 的话，照 hint 做的调用方会把档位丢掉。
+  assert.match(first.body.hint, /config\.thinkingOptionId/, "hint 要说明把档位传给宿主 create_agent");
+  assert.match(first.body.hint, /config\.modeId/, "modeId 同样要交给宿主");
+
+  // 宿主配置里这个客户端的模型清单被清空：残留默认档不许再传出去。
+  await writeFile(
+    join(home, "config.json"),
+    JSON.stringify({ agents: { providers: { claude: { additionalModels: [] } } } }),
+    "utf8",
+  );
+  const second = await runTool("deck_dispatch_plan", args, dir);
+  assert.equal(second.isError, false, second.raw);
+  assert.equal(second.body.tasks[0].thinkingOptionId, null, "模型删掉后不再带档位");
+});
+
 test("deck_dispatch_plan：没配派单窗口时逐条拒绝，并给出可执行的下一步", async (t) => {
   // 角色在、派单窗口没选：这一条走的是 no-dispatcher
   const dir = await workspace(t, { ...baseSettings, roles: [{ workspaceId: "ws1", mainAgentId: "main-1" }] });

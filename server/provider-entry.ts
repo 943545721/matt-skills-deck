@@ -1,4 +1,6 @@
 import { CODEX_SITE_PROVIDER } from "../shared/orchestration.ts";
+import type { ModelThinkingDefault, ThinkingResolutionContext } from "../shared/model-thinking.ts";
+import { configuredModelIds, modelListKeyOf } from "../shared/provider-models.ts";
 
 /**
  * daemon 配置里「一个客户端那一格」的视图。
@@ -70,6 +72,65 @@ export function providerEntryOf(
   // 只有「能用」的派生条目才顶替内建条目：停用或缺地址时它等于没生效，
   // 界面这时要显示宿主原生那份配置，否则会一边说「已停用」一边又有会话在跑。
   return codexSiteUsable(derived) ? derived : providers[clientId];
+}
+
+/**
+ * 客户端卡片上「已选模型」的那份清单；没写过清单的客户端返回 null。
+ *
+ * 与客户端卡片的读法同源（`providerEntryOf` + `modelListKeyOf` + `configuredModelIds`）：
+ * 卡片上没勾的模型，默认档就不该再往外传。`null` 表示「没写清单、只有宿主内置模型」，
+ * 这种客户端不参与「模型还在不在」的判断——不然内置模型会被整片误删。
+ *
+ * 用 `modelListKeyOf` 挑键，与卡片读模型清单（`configModels`）保持同一套判据：
+ * 两处对「这个客户端有哪些模型」给出的答案必须一样，否则卡片上能配默认档的模型，
+ * 派单时可能被判成「已删」而静默失效。
+ *
+ * 两把键都不是数组时返回 null（没表过态）；其中一把是空数组时仍算表过态——
+ * 用户把模型全删了，残留默认档就该失效。
+ */
+function declaredModelIds(entry: ProviderConfigView | undefined): string[] | null {
+  if (!entry) return null;
+  const record = entry as Record<string, unknown>;
+  if (!Array.isArray(record.models) && !Array.isArray(record.additionalModels)) return null;
+  return configuredModelIds(entry, modelListKeyOf(entry));
+}
+
+/**
+ * 每个客户端现在能选的模型。
+ *
+ * 用途是丢掉默认档表里已被删掉的模型上的残留条目，见 `shared/model-thinking.ts`。
+ * MCP 进程与插件进程共用这一份：两边读的是同一份 config.json，判据不能各写一份。
+ */
+export function configuredModelsByProvider(
+  config: ProviderConfigSource | null,
+): Record<string, readonly string[]> {
+  const providers = providersRawOf(config);
+  const models: Record<string, readonly string[]> = {};
+  const ids = new Set(Object.keys(providers));
+  // Codex 的模型清单落在派生条目上，路由里写的却是 codex：两边对齐，
+  // 删掉某个模型之后才判得出来。
+  if (providers[CODEX_SITE_PROVIDER]) ids.add("codex");
+  for (const id of ids) {
+    const list = declaredModelIds(providerEntryOf(providers, id));
+    if (list) models[id] = list;
+  }
+  return models;
+}
+
+/**
+ * 默认思考档的解析上下文——**拼上下文的唯一入口**。
+ *
+ * 插件进程、MCP 子进程、需求批次预览都从这里拿：只有一份「这个客户端现在有哪些模型」
+ * 的判据，才不会出现某条路径忘了带 `modelsByProvider`、于是已删模型的残留档还在下发。
+ */
+export function thinkingContextOf(
+  modelThinking: readonly ModelThinkingDefault[] | undefined,
+  config: ProviderConfigSource | null,
+): ThinkingResolutionContext {
+  return {
+    modelThinking: modelThinking ?? [],
+    modelsByProvider: configuredModelsByProvider(config),
+  };
 }
 
 /**

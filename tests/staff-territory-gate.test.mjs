@@ -860,3 +860,51 @@ test("staffing / contract 的合法终态各走各的", async (t) => {
   assert.equal(impl.ok, true);
   assert.equal(impl.record.state, "impl-changed");
 });
+
+test("转派新建的会话带上同模型的默认档；模型从清单删掉后不再带", async (t) => {
+  const modelThinking = [{ provider: "mock", model: "model", thinkingOptionId: "high" }];
+  const routing = [{ difficulty: "normal", target: { provider: "mock", model: "model" } }];
+
+  const dir = await makeWorkspace(t);
+  await writeRouting(dir, routing, {
+    modelThinking,
+    roles: [{ workspaceId: "ws-1", staff: ROSTER, dispatcherAgentId: "dispatch-1" }],
+  });
+  await appendCoordination(dir, record());
+  const kept = reassignPaseo({
+    sessions: [],
+    original: { id: "agent-1", workspaceId: "ws-1", labels: { "deck.staff": "front" } },
+    config: { providers: { mock: { additionalModels: [{ id: "model" }] } } },
+  });
+
+  const keptResult = await orchestrationInboxActHandler(
+    { workspaceId: "ws-1", workspaceDir: dir, index: 0, action: "reassign", toStaff: "back" },
+    context(kept.paseo),
+  );
+  assert.equal(keptResult.ok, true, JSON.stringify(keptResult));
+  assert.equal(kept.created[0].options.config.thinkingOptionId, "high", "路由没显式设档时用默认档");
+
+  // 同一份默认表，但模型已经从清单里删掉：残留条目不许再往外传。
+  const dir2 = await makeWorkspace(t);
+  await writeRouting(dir2, routing, {
+    modelThinking,
+    roles: [{ workspaceId: "ws-1", staff: ROSTER, dispatcherAgentId: "dispatch-1" }],
+  });
+  await appendCoordination(dir2, record());
+  const removed = reassignPaseo({
+    sessions: [],
+    original: { id: "agent-1", workspaceId: "ws-1", labels: { "deck.staff": "front" } },
+    config: { providers: { mock: { additionalModels: [] } } },
+  });
+
+  const removedResult = await orchestrationInboxActHandler(
+    { workspaceId: "ws-1", workspaceDir: dir2, index: 0, action: "reassign", toStaff: "back" },
+    context(removed.paseo),
+  );
+  assert.equal(removedResult.ok, true, JSON.stringify(removedResult));
+  assert.equal(
+    "thinkingOptionId" in removed.created[0].options.config,
+    false,
+    "模型已经不在清单里，默认档不许继续生效",
+  );
+});

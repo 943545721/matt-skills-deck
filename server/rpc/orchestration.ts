@@ -54,6 +54,7 @@ import {
   saveOrchestration,
   saveProfile,
 } from "../orchestration.ts";
+import { thinkingContextOf } from "../provider-entry.ts";
 import { createAgent, sessionErrorDetail } from "../session.ts";
 import {
   readRequirementForDispatch,
@@ -292,6 +293,7 @@ export async function orchestrationInboxActHandler(
       card: reassign.card,
       roster: reassign.roster,
       routing: reassign.routing,
+      modelThinking: reassign.modelThinking,
       dispatcherAgentId: reassign.dispatcherAgentId,
     });
     if (!delivery.ok) {
@@ -489,6 +491,8 @@ export async function orchestrationRequirementDispatchHandler(
     requirement: requirement.ticket,
     workspaces: lookup.workspaces,
     profiles: profilesOf(config),
+    // 预览与执行读同一份宿主配置，模型被删后清单里的默认档才跟着消失。
+    daemonConfig: config,
     ...(input.confirm === true ? { confirmRequirementSplit: false } : {}),
   });
   if (!result.ok) return result;
@@ -637,7 +641,13 @@ async function resolveWindowTarget(
 ): Promise<{ ok: true; target: ClientTarget } | WindowFailure> {
   const config = await readDaemonConfig(paseo);
   const rule = resolveRoute(settings, "normal");
-  const resolved = resolveRouteTarget(rule, profilesOf(config));
+  // 建窗口（以及复用这条的扫岗）也吃卡片上按模型配的默认档：
+  // 与派单、改派走同一个解析函数，三处不会说两套话。
+  const resolved = resolveRouteTarget(
+    rule,
+    profilesOf(config),
+    thinkingContextOf(settings.modelThinking, config),
+  );
   if (!resolved.ok) {
     return {
       ok: false,

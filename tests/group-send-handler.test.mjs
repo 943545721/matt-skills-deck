@@ -90,7 +90,7 @@ function fakePaseo({ config = {}, entries = [], workspaceDir = null } = {}) {
   };
 }
 
-async function workspace(t, { staff = [FRONTEND], workspaceId = WORKSPACE_ID } = {}) {
+async function workspace(t, { staff = [FRONTEND], workspaceId = WORKSPACE_ID, extra = {} } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "deck-group-send-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const written = await writeOrchestration(
@@ -101,6 +101,7 @@ async function workspace(t, { staff = [FRONTEND], workspaceId = WORKSPACE_ID } =
       maxDepth: 3,
       maxChildrenPerDispatch: 4,
       reportOnFinish: true,
+      ...extra,
     },
     { workspaceId },
   );
@@ -193,6 +194,97 @@ test("@岗位：先建票再建会话，群记录先 user 后 staff，票面带 
   assert.equal(options.labels["paseo.parent-agent-id"], "dispatch-1");
   assert.equal(options.parent, "dispatch-1");
   assert.equal(options.prompt, text);
+});
+
+/* ------------------------------------------ 群发也是「建会话」：要带默认思考档 */
+
+test("群建的会话带上同模型的默认档；模型从清单删掉后不再带", async (t) => {
+  const modelThinking = [{ provider: "claude", model: "sonnet", thinkingOptionId: "high" }];
+
+  const dir = await workspace(t, { extra: { modelThinking } });
+  const requirement = await requirementTicket(dir);
+  const paseo = fakePaseo({
+    workspaceDir: dir,
+    config: { providers: { claude: { additionalModels: [{ id: "sonnet" }] } } },
+  });
+  const sent = await groupSendHandler(
+    { workspaceId: WORKSPACE_ID, workspaceDir: dir, text: "@前端 改一下间距", requirementNumber: requirement },
+    { paseo },
+  );
+  assert.equal(sent.ok, true, JSON.stringify(sent));
+  assert.equal(paseo.created[0].options.config.thinkingOptionId, "high", "路由没显式设档时用默认档");
+
+  // 同一份默认表，但那个模型已经从清单里删掉：残留条目不许再往外传。
+  const dir2 = await workspace(t, { extra: { modelThinking } });
+  const requirement2 = await requirementTicket(dir2);
+  const paseo2 = fakePaseo({
+    workspaceDir: dir2,
+    config: { providers: { claude: { additionalModels: [] } } },
+  });
+  const sent2 = await groupSendHandler(
+    { workspaceId: WORKSPACE_ID, workspaceDir: dir2, text: "@前端 改一下间距", requirementNumber: requirement2 },
+    { paseo: paseo2 },
+  );
+  assert.equal(sent2.ok, true, JSON.stringify(sent2));
+  assert.equal(
+    "thinkingOptionId" in paseo2.created[0].options.config,
+    false,
+    "模型已经不在清单里，默认档不许继续生效",
+  );
+});
+
+test("岗位卡指定档案时同样按默认档合成；卡上显式档位优先", async (t) => {
+  const modelThinking = [{ provider: "claude", model: "sonnet", thinkingOptionId: "high" }];
+  const profiles = [
+    { id: "daily", provider: "claude", model: "sonnet" },
+    { id: "deep", provider: "claude", model: "sonnet", thinkingOptionId: "low" },
+  ];
+  const config = {
+    agentProfiles: profiles,
+    providers: { claude: { additionalModels: [{ id: "sonnet" }] } },
+  };
+
+  for (const [profileId, expected] of [["daily", "high"], ["deep", "low"]]) {
+    const dir = await workspace(t, {
+      staff: [{ ...FRONTEND, profileId }],
+      extra: { modelThinking },
+    });
+    const requirement = await requirementTicket(dir);
+    const paseo = fakePaseo({ workspaceDir: dir, config });
+    const sent = await groupSendHandler(
+      { workspaceId: WORKSPACE_ID, workspaceDir: dir, text: "@前端 改一下间距", requirementNumber: requirement },
+      { paseo },
+    );
+    assert.equal(sent.ok, true, JSON.stringify(sent));
+    assert.equal(paseo.created[0].options.config.provider, "claude/sonnet");
+    assert.equal(paseo.created[0].options.config.thinkingOptionId, expected, `档案 ${profileId} 的档位`);
+  }
+});
+
+test("档案缺模型：提前拒绝并说清是哪份档案，票和会话都不建", async (t) => {
+  // 档案分支走 `resolveRouteTarget` 之后，不完整的档案在插件这层就被挡下（宿主只认
+  // provider/model）。这条测试钉住「提前拒绝」这个行为本身，以及错误说人话。
+  const dir = await workspace(t, { staff: [{ ...FRONTEND, profileId: "broken" }] });
+  const requirement = await requirementTicket(dir);
+  const paseo = fakePaseo({
+    workspaceDir: dir,
+    config: {
+      agentProfiles: [{ id: "broken", name: "半成品", provider: "claude" }],
+      providers: { claude: { additionalModels: [{ id: "sonnet" }] } },
+    },
+  });
+  const sent = await groupSendHandler(
+    { workspaceId: WORKSPACE_ID, workspaceDir: dir, text: "@前端 改一下间距", requirementNumber: requirement },
+    { paseo },
+  );
+
+  assert.equal(sent.ok, true, JSON.stringify(sent));
+  const delivery = sent.deliveries.find((item) => item.staffId === FRONTEND.id);
+  assert.equal(delivery.agentId, null, "档案不完整时一个会话都不能建");
+  assert.equal(delivery.ticketNumber, null, "拒绝发生在建票之前");
+  assert.match(delivery.detail, /半成品/, "要说清是哪份档案");
+  assert.match(delivery.detail, /模型/, "要说清缺的是模型");
+  assert.equal(paseo.created.length, 0);
 });
 
 /* ---------------------------------------------------- 需求未定稿：零副作用 */

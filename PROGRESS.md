@@ -1087,3 +1087,42 @@ provider 仍是 `deck-codex`、回合返回 ok（会话已删除）。
   点下去改不了正在跑的会话，只能当摆设。真要能选，得宿主把这条 API 开出来。
 - Codex 模型不报档位，插件面板上就只剩手填；若想让聊天栏出现下拉，只能在 `~/.codex/config.toml`
   写 `model_reasoning_effort`，宿主读到的默认档会被报成一个可选项——那是用户本机配置，插件不代改。
+
+## 「档位放在客户端卡片上」：每个模型带自己的默认思考档位
+
+用户原话：「这个档位应是在图二这个地方 客户端 注入的根据对应的模型 配置对应的单位 这样才是合理的」。
+#29 把档位接到了宿主快照上，但入口只在档案页与难度路由；#30 要求把默认档放回客户端卡片的模型清单上。
+
+**改动**：
+
+- 设置新增 `OrchestrationSettings.modelThinking: Array<{ provider, model, thinkingOptionId }>`
+  （`shared/orchestration.ts`）。旧设置文件没有这一段时按空表处理：归一化走
+  `normalizeModelThinking(record.modelThinking)`，`undefined` 返回 `[]`，读写都不报错；
+  `DEFAULT_ORCHESTRATION` 里也是 `modelThinking: []`。
+- 归一规则只在 `shared/model-thinking.ts`：缺字段的条目丢掉、按 trim 后的 provider + model 去重
+  （保留第一条）、条数按 `MAX_MODEL_THINKING`（200，与单个客户端的模型清单写入上限同源）封顶。
+- 解析只此一份 `resolveThinkingOptionId()`：档案 / 路由里显式的 `thinkingOptionId` 优先；
+  没有才用卡片上同 provider + model 的默认档；两处都没有就不传，由宿主用模型自己的默认。
+  `withResolvedThinking()` 把结果写回目标并返回新对象；上下文里的 `modelsByProvider`
+  会先判模型还在不在清单里——模型被删掉后，残留的默认档不再下发。
+- 五个建会话入口共用这套解析，上下文统一由 `thinkingContextOf()` 拼：派单
+  （`server/orchestration.ts`）、改派（`server/staff-reassign.ts`）、建派单窗口
+  （`server/rpc/orchestration.ts`）、群发（`server/rpc/group.ts`）、MCP `deck_dispatch_plan`
+  （`server/mcp/tools.ts`）。
+- 客户端：`ClientsPanel` 模型区新增 `ModelThinkingList`，每个已选模型显示当前默认档，可设 / 清；
+  选项走 `thinkingChoicesOf()`，只列宿主为该模型报出的档位，宿主没报就只留手填；
+  清除即从表里移除该条，整表以新数组写回设置保存。中英文案在 `panelText.tsx`。
+- 不写死档位 id：代码里没有档位常量列表，`low` / `medium` / `high` 只出现在测试夹具里。
+
+**验证**（客户端改动完成后实测）：`npm run typecheck` 通过；`npm test` 1705 / 1705 全绿，
+含 `tests/model-thinking.test.mjs`（服务端解析 / 归一）与 `tests/model-thinking-default.test.mjs`
+（卡片表的查找、去重、封顶、清除）。宿主快照的档位数据见上一节实测：Claude 的
+`group/site8083` 报 low / medium / high / max，Codex 的两个模型一个档位都不报——所以 Codex
+卡片上不出现 chips，只有手填框，这是宿主数据决定的，不是渲染问题。
+
+**没做的**：
+
+- 没有清理「模型从卡片清单删掉后」留在 `modelThinking` 里的残留条目：删模型走的是客户端注入
+  （`deck.orchestration.provider`），不经过设置保存；残留条目由 `modelsByProvider` 在解析时挡掉，
+  界面上也不显示。要不要顺手清掉由后续决定。
+- 聊天窗口输入栏仍然改不了档位（原因见上一节），这次只动卡片与派单解析。

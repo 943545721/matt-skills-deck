@@ -14,6 +14,12 @@
 import { DEFAULT_ROLE_PROMPTS, FIXED_ROLES, MAX_ROLE_PROMPT_CHARS } from "./role-prompts.ts";
 import type { FixedRole, RoleLang } from "./role-prompts.ts";
 import { asRecord, clampInt, optionalText, text } from "./coerce.ts";
+import {
+  normalizeModelThinking,
+  resolveThinkingOptionId,
+  type ModelThinkingDefault,
+  type ThinkingResolutionContext,
+} from "./model-thinking.ts";
 import { DECK_STAFF_LABEL, MAX_STAFF_CARDS, normalizeStaffCards, normalizeStaffId, normalizeStaffPath, roleCarriesFields, rosterOf, staffCardOf } from "./staff.ts";
 import type { StaffCard } from "./staff.ts";
 import { resolveOwner } from "./staff-guard.ts";
@@ -80,6 +86,16 @@ export {
   type RoleLang,
   type LocalizedText,
 } from "./role-prompts.ts";
+
+// 默认档那一段整体在 `./model-thinking.ts`：解析规则与归一在独立领域里，
+// 从编排门面统一导出，调用方仍然只认 `shared/orchestration.ts` 这一个入口。
+export {
+  MAX_MODEL_THINKING,
+  normalizeModelThinking,
+  resolveThinkingOptionId,
+  type ModelThinkingDefault,
+  type ThinkingResolutionContext,
+} from "./model-thinking.ts";
 
 // 岗位名册那一段整体在 `./staff.ts`：名册是独立领域，堆在这里只会让本文件继续变长。
 // 下面的重新导出保留旧引用路径（`shared/orchestration.ts` 仍是编排的对外门面）。
@@ -207,6 +223,12 @@ export interface MapBudget {
 export interface OrchestrationSettings {
   roles: WorkspaceRoles[];
   routing: RoutingRule[];
+  /**
+   * 客户端卡片上按「客户端 + 模型」配的默认档位。
+   *
+   * 旧设置文件没有这一段 = 空表，读写与派单行为都与接这个功能之前一致。
+   */
+  modelThinking: ModelThinkingDefault[];
   /** 主窗口 → 派单窗口 → 子会话，默认 3；到顶就不许再派。 */
   maxDepth: number;
   /** 一次派单最多建几个子会话。 */
@@ -245,6 +267,7 @@ const DEFAULT_ROUTE: ClientTarget = { provider: "claude" };
 export const DEFAULT_ORCHESTRATION: OrchestrationSettings = {
   roles: [],
   routing: [],
+  modelThinking: [],
   maxDepth: DEFAULT_MAX_DEPTH,
   maxChildrenPerDispatch: DEFAULT_MAX_CHILDREN,
   mapBudgets: [],
@@ -416,6 +439,18 @@ export function targetProblem(
   return null;
 }
 
+/** 把解析出的档位写进目标；返回新对象，不动入参。没有档位就保持不传。 */
+export function withResolvedThinking(
+  target: ClientTarget,
+  context: ThinkingResolutionContext = {},
+): ClientTarget {
+  const thinkingOptionId = resolveThinkingOptionId(target, context);
+  const next: ClientTarget = { ...target };
+  if (thinkingOptionId) next.thinkingOptionId = thinkingOptionId;
+  else delete next.thinkingOptionId;
+  return next;
+}
+
 /**
  * 规则 → 具体会话配置。
  *
@@ -423,10 +458,15 @@ export function targetProblem(
  * 有 `target` 才用 target，否则明确报错，让界面显示「这条路由坏了」。
  *
  * 少模型也算坏：宿主不会为「只有客户端」的目标兜底，这一档在补上模型之前发不出去。
+ *
+ * `thinking` 是卡片里按模型配的默认档：解析出的目标已经合成了最终要传的档位，
+ * 派单 / 改派 / 建派单窗口 / 群发 / MCP `deck_dispatch_plan`，外加状态预览与需求批次
+ * 预览，都走这一处，不各自再算一遍。
  */
 export function resolveRouteTarget(
   rule: RoutingRule,
   profiles: readonly ClientProfile[],
+  thinking: ThinkingResolutionContext = {},
 ): RouteResolution {
   const profileId = rule.profileId?.trim();
   if (profileId) {
@@ -448,7 +488,7 @@ export function resolveRouteTarget(
           detail: `客户端档案 ${profile.name?.trim() || profile.id}：${problem.detail}`,
         };
       }
-      return { ok: true, via: "profile", target };
+      return { ok: true, via: "profile", target: withResolvedThinking(target, thinking) };
     }
     if (!rule.target) {
       return {
@@ -461,7 +501,7 @@ export function resolveRouteTarget(
   if (rule.target?.provider.trim()) {
     const problem = targetProblem(rule.target);
     if (problem) return { ok: false, reason: problem.reason, detail: problem.detail };
-    return { ok: true, via: "target", target: rule.target };
+    return { ok: true, via: "target", target: withResolvedThinking(rule.target, thinking) };
   }
   return { ok: false, reason: "no-target", detail: "这一档既没有档案也没有兜底 provider" };
 }
@@ -761,6 +801,11 @@ export interface DispatchPlanInput {
    * 两个不同会话。角色绑定仍是放行条件，这里只解决「写给谁看」。
    */
   callerAgentId?: string;
+  /**
+   * 卡片上按模型配的默认档 + 当前可选模型。
+   * 不传 = 与接这个功能之前完全一致：只认档案 / 路由里显式写的档位。
+   */
+  thinking?: ThinkingResolutionContext;
 }
 
 function stableKey(parts: readonly (string | number | undefined)[]): string {
@@ -981,7 +1026,7 @@ export function planDispatch(input: DispatchPlanInput): DispatchPlan {
     const rule = card?.profileId
       ? { difficulty, profileId: card.profileId }
       : resolveRoute({ routing: input.routing }, difficulty);
-    const resolution = resolveRouteTarget(rule, input.profiles);
+    const resolution = resolveRouteTarget(rule, input.profiles, input.thinking);
     if (!resolution.ok) {
       reject({ ...task, key }, "route-unavailable", resolution.detail);
       continue;
@@ -1446,6 +1491,8 @@ export function normalizeOrchestration(value: unknown): OrchestrationSettings {
   return {
     roles,
     routing,
+    // 旧设置没有这一段 = 空表：不报错、不影响现有读写。
+    modelThinking: normalizeModelThinking(record.modelThinking),
     maxDepth,
     maxChildrenPerDispatch: maxChildren,
     mapBudgets: normalizeMapBudgets(record.mapBudgets),

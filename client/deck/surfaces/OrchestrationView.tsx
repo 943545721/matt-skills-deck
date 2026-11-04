@@ -34,6 +34,7 @@ import { DEFAULT_SECTION, sectionLabel, type OrchestrationSection } from "./orch
 import { GroupPanel } from "./orchestration/GroupPanel.tsx";
 import { InboxPanel } from "./orchestration/InboxPanel.tsx";
 import { mergeArchivedRows } from "./orchestration/archivedFilter.ts";
+import { withModelThinking } from "./orchestration/modelThinking.ts";
 import { ClientsPanel } from "./orchestration/ClientsPanel.tsx";
 import { DispatchPanel } from "./orchestration/DispatchPanel.tsx";
 import { ProfilesPanel } from "./orchestration/ProfilesPanel.tsx";
@@ -555,10 +556,24 @@ export function OrchestrationView({
                 skin={skin}
                 t={t}
                 providers={data.providers}
-                busy={patchProvider.isPending}
+                // 默认档走设置保存：两个忙碌源都算上，否则保存往返里按钮仍可连点。
+                busy={patchProvider.isPending || busy}
                 onSaveEnv={(input) => patchProvider.mutate(input)}
                 onSaveModel={(input) => patchProvider.mutate(input)}
                 onSaveLabel={(input) => patchProvider.mutate(input)}
+                // 默认档存在插件设置里（宿主没有按模型存档位的字段），所以走设置保存而不是客户端注入。
+                modelThinking={settings?.modelThinking ?? []}
+                onSaveThinking={(input) =>
+                  void applySettings((current) => ({
+                    ...current,
+                    modelThinking: withModelThinking(
+                      current.modelThinking ?? [],
+                      input.provider,
+                      input.model,
+                      input.thinkingOptionId,
+                    ),
+                  }))
+                }
                 onDiagnose={async (provider) => {
                   try {
                     const result = await diagnosticRpc({ provider });

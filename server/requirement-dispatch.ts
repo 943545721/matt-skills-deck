@@ -44,6 +44,7 @@ import {
 } from "../shared/orchestration.ts";
 import { rosterOf, type StaffCard } from "../shared/staff.ts";
 import { guardCreateTicket } from "../shared/split-guard.ts";
+import type { ProviderConfigSource } from "./provider-entry.ts";
 import { requirementLabelsOf } from "./requirement-read.ts";
 import { readOrchestration } from "./orchestration-store.ts";
 import { runDispatch, type DispatchOutcomeResult } from "./orchestration.ts";
@@ -85,6 +86,11 @@ export interface RequirementDispatchInput {
   readonly dispatchId?: string;
   /** 客户端档案；不给时只按路由里的 provider/model 预览。 */
   readonly profiles?: readonly ClientProfile[];
+  /**
+   * 宿主配置（`config.json` 的 provider 条目）：预览与执行都要按同一份模型清单裁默认档，
+   * 否则模型被删掉后预览仍显示默认档、执行却不带。不给时预览不做这层裁剪。
+   */
+  readonly daemonConfig?: ProviderConfigSource | null;
   readonly lang?: "zh" | "en";
 }
 
@@ -505,6 +511,7 @@ function planBatchesOf(input: {
   readonly requirementBody: string;
   readonly baseDispatchId: string;
   readonly profiles: readonly ClientProfile[] | undefined;
+  readonly daemonConfig: ProviderConfigSource | null | undefined;
   readonly warnings: string[];
 }): PlannedBatches {
   const byWorkspace = new Map(input.resolved.map((item) => [item.input.workspaceId, item]));
@@ -523,6 +530,7 @@ function planBatchesOf(input: {
       requirementBody: input.requirementBody,
       baseDispatchId: input.baseDispatchId,
       profiles: input.profiles,
+      daemonConfig: input.daemonConfig,
       warnings: input.warnings,
     });
     if (outcome.kind === "fail") return { ok: false, failure: outcome.failure };
@@ -564,6 +572,7 @@ export async function planRequirementDispatch(input: RequirementDispatchInput): 
     requirementBody: typeof input.requirement.body === "string" ? input.requirement.body : "",
     baseDispatchId: text(input.dispatchId) || `req-${number}`,
     profiles: input.profiles,
+    daemonConfig: input.daemonConfig,
     warnings,
   });
   if (!planned.ok) return planned.failure;

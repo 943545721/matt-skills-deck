@@ -40,6 +40,7 @@ import {
 import { SUGGEST_DEFINITION, SUGGEST_TOOL_NAME, normalizeSuggestions } from "../../shared/suggestions.ts";
 import { writeChildHandoff } from "../handoff-store.ts";
 import { readPlanContext } from "../daemon-profiles.ts";
+import { thinkingContextOf } from "../provider-entry.ts";
 import {
   MAX_STAFF_ID_CHARS,
   MAX_STAFF_PATH_CHARS,
@@ -2005,6 +2006,9 @@ async function runDispatchPlan(args: unknown, context: ToolContext): Promise<Too
     roles: read.settings.roles,
     routing: read.settings.routing,
     profiles: read.profiles,
+    // 卡片上按模型配的默认档：MCP 派单同样是建会话入口，不能与 RPC 派单说两套话。
+    // 上下文与插件进程共用 `thinkingContextOf`，删掉的模型上的残留档在这里也一并失效。
+    thinking: thinkingContextOf(read.settings.modelThinking, read.config),
     tasks: gatedTasks,
     maxDepth: read.settings.maxDepth,
     maxChildrenPerDispatch: read.settings.maxChildrenPerDispatch,
@@ -2105,7 +2109,9 @@ async function runDispatchPlan(args: unknown, context: ToolContext): Promise<Too
       "每条 tasks 要两步：先用 deck_issue_create 把它带来的 ticket（title / body / labels）建成一张票" +
       "（这一步要人确认；票上写着难度与执行客户端），拿到票号后把 labels 里的 deck.ticket 换成 #<票号>；" +
       "再对这条任务调宿主 create_agent：config.provider 用 providerSpec（宿主认 provider/model 这种写法，" +
-      "拆开写成 provider + model 两个字段也可以）；labels 用换过票号的那一份；prompt 用这里的 prompt。" +
+      "拆开写成 provider + model 两个字段也可以）；config.modeId / config.thinkingOptionId 用这条任务里的同名值，" +
+      "不为 null 时原样传、不要自己猜或省略（档位是卡片上按模型配好的，漏传就等于没配）；" +
+      "labels 用换过票号的那一份；prompt 用这里的 prompt。" +
       "票建不出来就别派这条——派出去的活必须留得下记录。" +
       "子会话会成为你的子会话；它调 deck_handoff 写回结果，你结束时再据此汇报给上一级。" +
       "routeFrom 不为 null 表示这一档是借来的路由：照办也行，但要把这件事写进你给上级的汇报里。",
@@ -2172,6 +2178,8 @@ async function runRequirementDispatchTool(args: unknown, context: ToolContext): 
     requirement: requirement.ticket,
     workspaces: lookup.workspaces,
     profiles: read.profiles,
+    // 与执行层同一份宿主配置：模型删掉后清单里不该再显示它的默认档。
+    daemonConfig: read.config,
   });
   if (!plan.ok) return fail(plan.reason, plan.detail);
 

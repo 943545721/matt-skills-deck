@@ -35,7 +35,7 @@ const requirement = (patch = {}) => ({
   ...patch,
 });
 
-function settings(workspaceId, dispatcherAgentId, staff) {
+function settings(workspaceId, dispatcherAgentId, staff, extra = {}) {
   return {
     version: 1,
     updatedAt: "2026-11-03T00:00:00.000Z",
@@ -45,16 +45,17 @@ function settings(workspaceId, dispatcherAgentId, staff) {
     maxDepth: 3,
     maxChildrenPerDispatch: 5,
     reportOnFinish: true,
+    ...extra,
   };
 }
 
-async function workspace(t, workspaceId, name, dispatcherAgentId, staff, repoNames) {
+async function workspace(t, workspaceId, name, dispatcherAgentId, staff, repoNames, extra) {
   const dir = await mkdtemp(join(tmpdir(), `deck-req-dispatch-${workspaceId}-`));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await mkdir(join(dir, ".deck"), { recursive: true });
   await writeFile(
     join(dir, ".deck", "orchestration.json"),
-    JSON.stringify(settings(workspaceId, dispatcherAgentId, staff)),
+    JSON.stringify(settings(workspaceId, dispatcherAgentId, staff, extra)),
     "utf8",
   );
   return { workspaceId, workspaceDir: dir, name, repos: repoNames, dispatcherAgentId };
@@ -118,6 +119,41 @@ test("按影响面拆成每区一批：各用自己工作区的名册与派单�
   assert.equal(saas.entries[0].ticket.staff.id, "w-saas");
   assert.equal(saas.entries[0].task.repoKey, "saas");
   assert.equal(saas.entries[0].task.requirementRepoKey, "app");
+});
+
+test("需求批次预览与执行同判：模型从宿主清单删掉后预览也不再显示默认档", async (t) => {
+  // 预览（planRequirementDispatch）与执行（runDispatch）必须按同一份宿主配置裁默认档，
+  // 否则模型删掉后清单上还写着默认档，点确认却一个也不带。
+  const modelThinking = [{ provider: "claude", model: "sonnet", thinkingOptionId: "high" }];
+  const workspaces = [
+    await workspace(t, "ws-app", "app", "dispatch-app", [{ id: "w-app", name: "应用", kind: "worker", duty: "改应用" }], ["app"], { modelThinking }),
+    await workspace(t, "ws-saas", "saas", "dispatch-saas", [{ id: "w-saas", name: "SaaS", kind: "worker", duty: "改 SaaS" }], ["saas"], { modelThinking }),
+  ];
+
+  const live = await planRequirementDispatch({
+    requirement: requirement({ repoKey: "app" }),
+    workspaces,
+    daemonConfig: { agents: { providers: { claude: { additionalModels: [{ id: "sonnet" }] } } } },
+  });
+  assert.equal(live.ok, true, JSON.stringify(live));
+  assert.equal(live.batches.length, 2, "两个区各一批；批数退化时下面的循环会空跑");
+  for (const batch of live.batches) {
+    assert.equal(batch.entries[0].task.target.thinkingOptionId, "high", `${batch.workspaceId} 的模型还在清单里`);
+  }
+
+  const removed = await planRequirementDispatch({
+    requirement: requirement({ repoKey: "app" }),
+    workspaces,
+    daemonConfig: { agents: { providers: { claude: { additionalModels: [] } } } },
+  });
+  assert.equal(removed.ok, true, JSON.stringify(removed));
+  for (const batch of removed.batches) {
+    assert.equal(
+      "thinkingOptionId" in batch.entries[0].task.target,
+      false,
+      `${batch.workspaceId} 的模型已从清单删掉，预览不该再显示默认档`,
+    );
+  }
 });
 
 test("票面父挂回需求：父票号与 Refs 都指向需求", async (t) => {
