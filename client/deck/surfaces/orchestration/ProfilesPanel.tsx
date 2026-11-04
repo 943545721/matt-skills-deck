@@ -5,8 +5,9 @@ import { TextInput } from "@getpaseo/plugin/client/ui";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelButton, PixelCard, PixelHead } from "../../pixel.tsx";
 import type { PanelKey } from "../../panel/panelText.tsx";
-import { modelChoicesOf, specOf, type ClientProfile, type ProviderRow } from "./types.ts";
+import { modelChoicesOf, specOf, thinkingChoicesOf, type ClientProfile, type ProviderRow } from "./types.ts";
 import { ModelChoices } from "./ModelChoices.tsx";
+import { ThinkingChoices } from "./ThinkingChoices.tsx";
 
 /**
  * 客户端档案：一个「provider + 模型 + 模式 + 思考档位」的命名组合。
@@ -130,7 +131,12 @@ export function ProfilesPanel({
             variant="tab"
             active={draft.provider === id}
             label={id}
-            onPress={() => set({ provider: id })}
+            // 档位是按 provider + model 报的：换了客户端，旧的档位 id 不再适用。
+            // 点已经选中的那一枚是无操作，别把用户已经选好的档位顺手清掉。
+            onPress={() => {
+              if (draft.provider === id) return;
+              set({ provider: id, thinkingOptionId: "" });
+            }}
           />
         ))}
       </View>
@@ -140,14 +146,26 @@ export function ProfilesPanel({
         t={t}
         state={modelChoicesOf(draft.provider, providers)}
         current={draft.model.trim() || null}
-        onPick={(model) => set({ model })}
+        // 换模型就把旧档位清掉：档位是按模型报的，旧 id 多半不属于新模型。
+        // 点已选中的模型同样是无操作。
+        onPick={(model) => {
+          if (draft.model === model) return;
+          set({ model, thinkingOptionId: "" });
+        }}
       />
       <View style={styles.form}>
         <TextInput
           accessibilityLabel={t("orch.profileModel")}
           style={styles.input}
           value={draft.model}
-          onChangeText={(model) => set({ model })}
+          onChangeText={(model) =>
+            // 只改了首尾空白不算换模型，别清掉档位。
+            setDraft((current) =>
+              current.model.trim() === model.trim()
+                ? { ...current, model }
+                : { ...current, model, thinkingOptionId: "" },
+            )
+          }
           placeholder={t("orch.profileModel")}
           placeholderTextColor={skin.colors.ink2}
           autoCapitalize="none"
@@ -161,6 +179,16 @@ export function ProfilesPanel({
           placeholderTextColor={skin.colors.ink2}
           autoCapitalize="none"
         />
+      </View>
+      {/* 档位：宿主为这个模型报了才出现；没报就只剩下面那个手填框。 */}
+      <ThinkingChoices
+        skin={skin}
+        t={t}
+        state={thinkingChoicesOf(draft.provider, draft.model, providers)}
+        current={draft.thinkingOptionId.trim() || null}
+        onPick={(thinkingOptionId) => set({ thinkingOptionId })}
+      />
+      <View style={styles.form}>
         <TextInput
           accessibilityLabel={t("orch.profileThinking")}
           style={styles.input}

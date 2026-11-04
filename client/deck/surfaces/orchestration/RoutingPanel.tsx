@@ -14,6 +14,8 @@ import {
   modelChoicesOf,
   profileWithoutModel,
   specOf,
+  thinkingChoicesOf,
+  withModelClearingThinking,
   type ClientProfile,
   type ClientTarget,
   type Difficulty,
@@ -21,6 +23,7 @@ import {
   type RoutingRow,
 } from "./types.ts";
 import { ModelChoices } from "./ModelChoices.tsx";
+import { ThinkingChoices } from "./ThinkingChoices.tsx";
 
 /**
  * 难度路由：trivial / normal / hard / critical 各落到哪个客户端与模型。
@@ -55,6 +58,11 @@ export function RoutingPanel({
 }) {
   const [editing, setEditing] = useState<Difficulty | null>(null);
   const [model, setModel] = useState("");
+  /**
+   * 手填兜底：宿主没给这个模型报档位时，用户仍能写一个 id。
+   * 按难度分开存：四档共用一份草稿时，在「简单」写一半切到「常规」会把内容带过去。
+   */
+  const [thinking, setThinking] = useState<Partial<Record<Difficulty, string>>>({});
   const styles = useMemo(
     () => ({
       screen: { flex: 1, gap: 8 },
@@ -95,6 +103,7 @@ export function RoutingPanel({
       {DIFFICULTIES.map((difficulty) => {
         const row = rowOf(difficulty);
         const open = editing === difficulty;
+        const thinkingDraft = thinking[difficulty] ?? "";
         const via = row.resolved.ok && row.resolved.via === "profile" ? ` · ${t("orch.route.viaProfile")}` : "";
         // 配了但发不出去（比如只选了客户端没填模型）时仍要显示配的是什么，
         // 否则行上写「未配置」、用户会以为自己根本没选过。
@@ -172,7 +181,11 @@ export function RoutingPanel({
                       variant="tab"
                       active={target?.provider === provider.id}
                       label={provider.id}
-                      onPress={() => onPatch(difficulty, { target: { provider: provider.id } })}
+                      // 点已选中的客户端是无操作：否则会顺手把模型和档位一起清掉。
+                      onPress={() => {
+                        if (target?.provider === provider.id) return;
+                        onPatch(difficulty, { target: { provider: provider.id } });
+                      }}
                     />
                   ))}
                 </View>
@@ -192,7 +205,8 @@ export function RoutingPanel({
                         t={t}
                         state={choices}
                         current={target.model ?? null}
-                        onPick={(picked) => onPatch(difficulty, { target: { ...target, model: picked } })}
+                        // 换模型顺手清旧档位：档位按模型报，旧 id 可能不属于新模型。
+                        onPick={(picked) => onPatch(difficulty, { target: withModelClearingThinking(target, picked) })}
                       />
                     ) : null}
 
@@ -213,8 +227,41 @@ export function RoutingPanel({
                         disabled={busy || !model.trim() || !target}
                         onPress={() => {
                           if (!target) return;
-                          onPatch(difficulty, { target: { ...target, model: model.trim() } });
+                          onPatch(difficulty, { target: withModelClearingThinking(target, model.trim()) });
                           setModel("");
+                        }}
+                      />
+                    </View>
+
+                    {/* 档位：宿主为这个模型报了才出现；没报就只剩下面的手填框。 */}
+                    {target ? (
+                      <ThinkingChoices
+                        skin={skin}
+                        t={t}
+                        state={thinkingChoicesOf(target.provider, target.model, providers)}
+                        current={target.thinkingOptionId ?? null}
+                        onPick={(thinkingOptionId) => onPatch(difficulty, { target: { ...target, thinkingOptionId } })}
+                      />
+                    ) : null}
+                    <View style={styles.form}>
+                      <TextInput
+                        accessibilityLabel={t("orch.route.thinkingField")}
+                        style={styles.input}
+                        value={thinkingDraft}
+                        onChangeText={(value) => setThinking((prev) => ({ ...prev, [difficulty]: value }))}
+                        placeholder={t("orch.route.thinkingField")}
+                        placeholderTextColor={skin.colors.ink2}
+                        autoCapitalize="none"
+                      />
+                      <PixelButton
+                        skin={skin}
+                        mini
+                        label={t("orch.route.useThinking")}
+                        disabled={busy || !thinkingDraft.trim() || !target?.model?.trim()}
+                        onPress={() => {
+                          if (!target) return;
+                          onPatch(difficulty, { target: { ...target, thinkingOptionId: thinkingDraft.trim() } });
+                          setThinking((prev) => ({ ...prev, [difficulty]: "" }));
                         }}
                       />
                     </View>

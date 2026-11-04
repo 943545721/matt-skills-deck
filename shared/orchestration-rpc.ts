@@ -154,6 +154,26 @@ export const treeNodeSchema = z.lazy(() =>
   }),
 ) as unknown as z.ZodType<TreeNodeWire>;
 
+/**
+ * 宿主报出的一个推理档位。
+ *
+ * 选项一律来自宿主快照，插件不写死档位列表；`label` 缺失时服务端已退回 id，
+ * 所以这里要求非空。`description` 只是给人看的补充，认不出就不带。
+ */
+export const thinkingOptionSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  description: z.string().optional(),
+  isDefault: z.boolean().optional(),
+});
+
+/** 某个模型报出的档位；没有档位的模型不会出现在 `providerRowSchema.modelThinking` 里。 */
+export const modelThinkingSchema = z.object({
+  id: z.string(),
+  thinkingOptions: z.array(thinkingOptionSchema),
+  defaultThinkingOptionId: z.string().optional(),
+});
+
 export const providerRowSchema = z.object({
   id: z.string(),
   label: z.string().nullable(),
@@ -161,6 +181,13 @@ export const providerRowSchema = z.object({
   status: z.string(),
   /** 宿主**认得**的全部模型（内置 + 配置里声明的），这是唯一可信的模型来源。 */
   models: z.array(z.string()),
+  /**
+   * 宿主为各模型报出的推理档位，按模型 id 索引。
+   *
+   * 可选：老宿主不报这个字段时界面只有手填。它和 `models` 是两回事，
+   * 模型清单的读写与镜像逻辑不受影响。
+   */
+  modelThinking: z.array(modelThinkingSchema).optional(),
   /** 配置里自己声明的模型 id（`models` 或 `additionalModels` 里的）。 */
   configModels: z.array(z.string()),
   /** 声明放在哪把键上：`models` = 替换内置列表，`additionalModels` = 追加。 */

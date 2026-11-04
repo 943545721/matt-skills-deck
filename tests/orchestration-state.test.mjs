@@ -115,6 +115,49 @@ test("编排状态：数据来自根级 providers / agentProfiles（线上形状
   assert.equal(claude.env.length, 2, "注入的键必须读得出来");
 });
 
+test("编排状态：推理档位随客户端行下发，没报档位的模型不占位", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const paseo = fakePaseo({
+    providers: {
+      snapshot: async () => ({
+        entries: [
+          {
+            provider: "claude",
+            status: "ready",
+            models: [
+              {
+                id: "sonnet",
+                thinkingOptions: [
+                  { id: "low", label: "Low" },
+                  { id: "high", label: "High", isDefault: true },
+                ],
+                defaultThinkingOptionId: "high",
+              },
+              { id: "haiku" },
+            ],
+          },
+        ],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  const claude = state.providers.find((row) => row.id === "claude");
+  assert.ok(claude);
+  assert.deepEqual(claude.models, ["sonnet", "haiku"], "模型清单语义不变");
+  assert.deepEqual(claude.modelThinking, [
+    {
+      id: "sonnet",
+      thinkingOptions: [
+        { id: "low", label: "Low" },
+        { id: "high", label: "High", isDefault: true },
+      ],
+      defaultThinkingOptionId: "high",
+    },
+  ]);
+});
+
 test("编排状态：磁盘形状（daemon.agentProfiles / agents.providers）也认，换版本不至于显示为空", async (t) => {
   const dir = await workspace(t);
   await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");

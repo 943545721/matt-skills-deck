@@ -83,7 +83,7 @@ import {
   type ModelListKey,
 } from "../shared/provider-models.ts";
 import { createAgent, sessionErrorDetail } from "./session.ts";
-import { modelIdsOf, type ProviderSnapshotEntry } from "./provider-snapshot-view.ts";
+import { modelIdsOf, modelThinkingOf, type ModelThinking, type ProviderSnapshotEntry } from "./provider-snapshot-view.ts";
 import { createDispatchTicket, recordDispatchTicket } from "./tracker/dispatch-ticket.ts";
 import { collectStaffHistory } from "./staff-history.ts";
 import { writableRepoKeys } from "./tracker/targets.ts";
@@ -264,6 +264,8 @@ function providerRows(
   enabled: boolean;
   status: string;
   models: string[];
+  /** 每个模型报出的推理档位；没报档位的模型不出现。 */
+  modelThinking: ModelThinking[];
   configModels: string[];
   modelsKey: ModelListKey;
   /** 派生客户端的基座；不是派生条目就是 null。 */
@@ -287,6 +289,8 @@ function providerRows(
     // 模型名不是机密：`ANTHROPIC_*_MODEL` 的值就是模型 id，宿主自己也在模型列表里印着，
     // 再给一串 `••••lash` 只会让人看不出这台机器跑的是哪个模型。
     const models = modelIdsOf(entry);
+    // 档位跟着模型报，模型没有就不带：界面据此决定要不要渲染下拉。
+    const modelThinking = modelThinkingOf(entry);
     const env = Object.entries(configured?.env ?? {})
       .map(([key, value]) => {
         const text = typeof value === "string" ? value : "";
@@ -310,6 +314,7 @@ function providerRows(
       enabled: entry.enabled !== false && (configured?.enabled ?? true),
       status: entry.status ?? "unknown",
       models,
+      modelThinking,
       configModels: configuredModelIds(configured, modelsKey),
       modelsKey,
       extends: typeof own?.extends === "string" && own.extends.trim() ? own.extends.trim() : null,

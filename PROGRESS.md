@@ -1050,3 +1050,40 @@ provider 仍是 `deck-codex`、回合返回 ok（会话已删除）。
 本来就会传到所有工作区，不需要手动刷新。`providers.refresh()`（不带 `cwd`）会去 warm up 所有工作区，
 日志里一次就跑了 33 秒，放在保存按钮后面是拿用户的等待换一个当前并不存在的问题。客户端页的「刷新宿主模型」仍在
 （只刷当前工作区）。
+
+## 「为什么我们的没有低/中/高档位」：档位改成跟宿主快照走
+
+用户原话：「为什么我们的没有这个选项了 不能写死 要动态 … 新的电脑 又不能注入了？」
+前置事实：宿主每个模型都会报 `thinkingOptions` / `defaultThinkingOptionId`，换模型就换一套。
+
+**病根**：插件把宿主快照压成了 `models: string[]`，档位数据在入口就被丢掉；界面上只有档案页
+一个自由文本框，四档难度的直填目标连这个字段都没有，用户只能盲填一个 id，填错也不出声。
+
+**修正**：
+
+- `server/provider-snapshot-view.ts` 的 `modelThinkingOf()`：按模型保留 `thinkingOptions`
+  （`id` / `label` / `description?` / `isDefault?`）与 `defaultThinkingOptionId`；字段缺失、
+  类型不对、重复 id、默认指向不存在的档位，一律退化成「没有档位」，不抛错、不挡状态页。
+  `modelIdsOf` 顺带先验数组（`models` 是对象时原来整页状态读不出来）。
+- 契约 `shared/orchestration-rpc.ts` 加**可选** `modelThinking`，`models: string[]` 语义不变
+  ——模型清单的读写与镜像不受影响，老快照照读。
+- 客户端新增 `ThinkingChoices.tsx`：只渲染宿主报出来的档位，没报就整块不渲染；未选时提示
+  「不选就走模型默认的 X」。`thinkingChoicesOf()` 未选模型 / 客户端不在清单 / 模型无档位
+  一律返回 `none`，绝不补一个默认档；`withModelClearingThinking()` 换模型时清旧档，返回新对象。
+- 档案页与四档难度的直填目标都接上；点已选中的项是无操作，不会把档位误清成空。手填框保留
+  （宿主没报档位时它是唯一入口）。四档的手填草稿按难度分开存——共用一份会串档。
+- 代码里没有档位常量列表；`low/high/max` 只出现在测试夹具里。
+
+**验证**：`npm run typecheck` 通过；`npm test` 1680 / 1680 全绿。真机读宿主快照
+（`providers.snapshot`，本机 daemon）：Claude 的 `group/site8083` 报 low/medium/high/max、
+默认 high；`codex` 与 `deck-codex` 的两个模型（`group/site8083`、`auto/gpt-6-astra`）**一个档位都不报**，
+所以 Codex 上不会出现 chips、只剩手填框——这是宿主的数据决定的，不是渲染问题。
+插件已于 16:33:29 reload（Plugin ready，无报错）。
+
+**没做的**：
+
+- 聊天窗口（宿主输入栏）里没有档位选择器，也不打算做。插件能 `addComposerPill` 放按钮进去，
+  但 `PaseoApi` 没暴露 `setAgentThinkingOption`（宿主 daemon 内部有 `set_agent_thinking_request`），
+  点下去改不了正在跑的会话，只能当摆设。真要能选，得宿主把这条 API 开出来。
+- Codex 模型不报档位，插件面板上就只剩手填；若想让聊天栏出现下拉，只能在 `~/.codex/config.toml`
+  写 `model_reasoning_effort`，宿主读到的默认档会被报成一个可选项——那是用户本机配置，插件不代改。

@@ -21,6 +21,7 @@ import {
   providerStateRowSchema,
   routeResolutionSchema,
   siteRowSchema,
+  thinkingOptionSchema,
   treeNodeSchema,
 } from "../../../../shared/orchestration-rpc.ts";
 
@@ -39,6 +40,8 @@ export type OrchestrationSettings = z.infer<typeof orchestrationSettingsSchema>;
 export type ProviderRow = z.infer<typeof providerStateRowSchema>;
 /** 客户端下的一条站点（凭证只到掩码这一层）。 */
 export type SiteRow = z.infer<typeof siteRowSchema>;
+/** 宿主为某个模型报出的一个推理档位。 */
+export type ThinkingChoice = z.infer<typeof thinkingOptionSchema>;
 export type AgentRow = z.infer<typeof agentRowSchema>;
 export type TreeNode = z.infer<typeof treeNodeSchema>;
 export type RouteResolution = z.infer<typeof routeResolutionSchema>;
@@ -137,6 +140,48 @@ export function modelChoicesOf(providerId: string, providers: ProviderRow[]): Mo
   if (!id) return { kind: "no-client" };
   const provider = providers.find((candidate) => candidate.id === id);
   return provider ? { kind: "ok", models: provider.models } : { kind: "unknown-client", provider: id };
+}
+
+/**
+ * 某个 provider + 模型下能点的推理档位。
+ *
+ * 档位只从宿主快照来：没选模型、模型不在清单、模型没报档位，都算「没有可选项」——
+ * 这时界面不渲染下拉，也不替用户补一个默认档（手填框还在）。
+ */
+export type ThinkingChoicesState =
+  | { kind: "none" }
+  | { kind: "ok"; options: ThinkingChoice[]; defaultOptionId: string | null };
+
+export function thinkingChoicesOf(
+  providerId: string,
+  modelId: string | null | undefined,
+  providers: ProviderRow[],
+): ThinkingChoicesState {
+  const provider = providerId.trim();
+  const model = (modelId ?? "").trim();
+  if (!provider || !model) return { kind: "none" };
+  const row = providers.find((candidate) => candidate.id === provider);
+  if (!row) return { kind: "none" };
+  const entry = (row.modelThinking ?? []).find((candidate) => candidate.id === model);
+  if (!entry || entry.thinkingOptions.length === 0) return { kind: "none" };
+  // 宿主可能只给选项上的 `isDefault`，也可能给模型级的 `defaultThinkingOptionId`；两边都认。
+  const flagged = entry.thinkingOptions.find((option) => option.isDefault)?.id ?? null;
+  const declared = entry.defaultThinkingOptionId ?? "";
+  const defaultOptionId = entry.thinkingOptions.some((option) => option.id === declared) ? declared : flagged;
+  return { kind: "ok", options: entry.thinkingOptions, defaultOptionId };
+}
+
+/**
+ * 换模型：旧档位可能不属于新模型，顺手清掉，免得界面印一个宿主不认的档位。
+ *
+ * 名字把副作用写出来，免得调用方把它当成单纯的 setter。返回新对象，不原地改传入的 target。
+ */
+export function withModelClearingThinking(target: ClientTarget, model: string): ClientTarget {
+  // 按 trim 后的值比：旧数据里可能存着带空格的模型 id，只因为空格被归一就当换模型、把档位清掉，不是用户的意思。
+  if ((target.model ?? "").trim() === model.trim()) return target;
+  const next: ClientTarget = { ...target, model };
+  delete next.thinkingOptionId;
+  return next;
 }
 
 /** 角色绑定：settings.roles 里当前工作区那一条。槽位按 id 取，名册不在这里取。 */
