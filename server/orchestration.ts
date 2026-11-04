@@ -3,6 +3,7 @@ import { matchesWorkspaceScope } from "../shared/session.ts";
 import {
   buildDispatchPreamble,
   buildAgentTree,
+  CODEX_SITE_LABEL,
   CODEX_SITE_PROVIDER,
   DECK_TICKET_LABEL,
   isDeckChild,
@@ -34,6 +35,30 @@ import {
   type RoutingRule,
   type WorkspaceRoles,
 } from "../shared/orchestration.ts";
+import {
+  describeCodexEnsureFailure,
+  ensureCodexAddressEffective,
+  forgetAdoptFailures,
+  forgetMirrorFailures,
+  mirrorCodexSiteModels,
+} from "./codex-adopt.ts";
+import {
+  CODEX_ADDRESS_KEY,
+  CODEX_CREDENTIAL_KEY,
+  codexSiteUsable,
+  legacyCodexAddressOf,
+  legacyCredentialOf,
+  mirroredModelsOf,
+  modelObjectsOf,
+  providerEntryOf,
+  providerWriteTargetOf,
+  providersRawOf,
+  textOf,
+  withMissingModels,
+  type ProviderConfigSource,
+  type ProviderConfigView,
+  type ProviderModelItemView,
+} from "./provider-entry.ts";
 import { readOrchestration, writeOrchestration } from "./orchestration-store.ts";
 import { readSiteBook, updateSiteBook } from "./sites-store.ts";
 import {
@@ -104,13 +129,11 @@ interface ProfileView {
   notes?: string;
 }
 
-export interface DaemonConfigView {
+export interface DaemonConfigView extends ProviderConfigSource {
   /** 线上视图（`config.get` / `config.patch`）：`providers`、`agentProfiles` 都在**根级**。 */
-  providers?: Record<string, ProviderConfigView>;
   agentProfiles?: RawProfile[];
   /** 磁盘形状（`~/.paseo/config.json`）：`daemon.agentProfiles` / `agents.providers`。 */
   daemon?: { agentProfiles?: RawProfile[] };
-  agents?: { providers?: Record<string, ProviderConfigView> };
 }
 
 /** 档案条目原样保留宿主写的字段（`icon` / `color` / `featureValues` 等），只认识其中几个。 */
@@ -176,26 +199,6 @@ function toHostProfile(item: RawProfile): HostAgentProfile {
   return out;
 }
 
-interface ProviderModelItemView {
-  id?: string;
-  label?: string;
-  isDefault?: boolean;
-  description?: string;
-  [extra: string]: unknown;
-}
-
-export interface ProviderConfigView {
-  /** 派生客户端的基座 id（宿主：非内置 id + `extends` 才会被建成 provider）。 */
-  extends?: string;
-  label?: string;
-  env?: Record<string, string>;
-  enabled?: boolean;
-  /** 追加到内置列表（宿主把两把键都当可写字段）。 */
-  additionalModels?: Array<string | ProviderModelItemView>;
-  /** 替换内置列表：有这把键就说明这个客户端不用追加模式。 */
-  models?: Array<string | ProviderModelItemView>;
-}
-
 /**
  * 档案数组的两种形状都要认。
  *
@@ -209,63 +212,10 @@ function profilesRawOf(config: DaemonConfigView | null): RawProfile[] {
   return [];
 }
 
-export function providersRawOf(config: DaemonConfigView | null): Record<string, ProviderConfigView> {
-  const root = config?.providers;
-  if (root && typeof root === "object" && !Array.isArray(root)) return root;
-  const nested = config?.agents?.providers;
-  if (nested && typeof nested === "object" && !Array.isArray(nested)) return nested;
-  return {};
-}
-
-/**
- * 面板上的客户端 id → 宿主里**真正生效**的那条配置。
- *
- * Codex 的站点启用后写在派生 provider `deck-codex` 上：内建 `codex` 的 env 不会被
- * Codex 适配器当成本次会话的 provider 配置（它只认 `extends: "codex"` 的派生条目）。
- * 所以凡是按客户端读 / 改 env 的地方都要先过这一层——直接读 `providers.codex`
- * 会读到一个空条目，界面就会说「启用了但没生效」，获取模型也会必然失败。
- */
-export function providerEntryOf(
-  providers: Record<string, ProviderConfigView>,
-  clientId: string,
-): ProviderConfigView | undefined {
-  if (clientId !== "codex") return providers[clientId];
-  const derived = providers[CODEX_SITE_PROVIDER];
-  // 只有「能用」的派生条目才顶替内建条目：停用或缺地址时它等于没生效，
-  // 界面这时要显示宿主原生那份配置，否则会一边说「已停用」一边又有会话在跑。
-  return codexSiteUsable(derived) ? derived : providers[clientId];
-}
-
-/**
- * 派生 Codex 条目能不能真正顶替内建条目：继承 codex、没被停用、地址非空。
- *
- * 三个条件缺一个都等于「站点没生效」——建会话的路由（`server/hooks.ts`）与
- * 面板的读路径必须用同一条判据，否则会出现「界面说停用了、会话还在按站点跑」这类分裂。
- */
-export function codexSiteUsable(entry: ProviderConfigView | undefined): boolean {
-  return Boolean(entry) && entry?.extends === "codex" && entry.enabled !== false && textOf(entry?.env?.OPENAI_BASE_URL) !== "";
-}
-
-/**
- * 面板上的客户端 id 写进哪一条：Codex 一律写派生条目。
- *
- * **无条件**改道，不判断派生条目在不在：写在内建 `codex` 上的地址与凭证宿主根本不读
- * （它只认 `extends: "codex"` 的派生条目），那样写等于「配了但不生效」。
- * 派生条目还不存在时，调用方要顺手把 `extends` / `label` 补上，否则建不成。
- */
-export function providerWriteTargetOf(clientId: string): string {
-  return clientId === "codex" ? CODEX_SITE_PROVIDER : clientId;
-}
-
 function recordOf(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-/** 配置里的值可能是任何东西（人手改过 config.json）：取字符串，别的当空。 */
-function textOf(value: unknown): string {
-  return typeof value === "string" ? value.trim() : "";
 }
 
 /** 密钥只回尾 4 位；短值直接全遮，避免「尾 4 位就是全文」。实现在 `shared/provider-models.ts`。 */
@@ -325,7 +275,9 @@ function providerRows(
   env: Array<{ key: string; display: string; masked: boolean; hasValue: boolean }>;
 }> {
   const providers = providersRawOf(config);
-  return snapshot.map((entry) => {
+  return snapshot.map((rawEntry) => {
+    // 快照是外部输入：一条 null / 非对象不该把整个状态页带下去，当成空条目处理。
+    const entry: ProviderSnapshotEntry = rawEntry && typeof rawEntry === "object" ? rawEntry : {};
     const id = (entry.provider ?? "").trim();
     // Codex 的地址与凭证落在派生条目上：这一行要显示真正生效的那份。
     // `extends` 例外：那是实现细节，读客户端**自己**的条目——把派生条目的 `extends: "codex"`
@@ -487,12 +439,53 @@ export async function readOrchestrationState(
   } else if (stored.readFailed) {
     warnings.push(`编排设置读不出来（不是「没配过」）：${stored.detail ?? "未知原因"}——下面显示的是默认值`);
   }
-  const config = await readDaemonConfig(paseo);
+  let config = await readDaemonConfig(paseo);
   if (!config) warnings.push("daemon 配置读不到：客户端档案与注入配置这次显示为空，接手派单前先刷新");
   else if (!profilesRawOf(config).length && !Object.keys(providersRawOf(config)).length) {
     // 读到了 config 却两处都空：要么真没配过，要么宿主的形状又变了。
     // 明确说出来，别让用户以为「我配的注入丢了」。
     warnings.push("daemon 配置里既没有客户端档案也没有 providers：如果确认配过，就是宿主换配置形状了，先核对 config.json");
+  }
+  // 旧式 Codex 注入自愈：地址写在内建 `codex` 上时宿主不读，会话会退回 `~/.codex/config.toml`。
+  // 这里把它搬到派生条目——打开面板看到的就是会话真正在用的那份，不用用户自己再点一遍。
+  // 每次运行只试一遍同一条地址（`unadoptable`），宿主不接受派生 provider 时不会反复写盘。
+  let codexAddressWarned = false;
+  if (config) {
+    const ensured = await ensureCodexAddressEffective(paseo, config);
+    if (!ensured.ok) {
+      // 两种失败不能混着说：`unverified` 是「已经写进去了、只是没核对上」，说成「接管失败」
+      // 会把用户推回去再配一遍；`adopt-failed` 才是「地址没搬过去、会话会退回旧地址」。
+      codexAddressWarned = true;
+      warnings.push(describeCodexEnsureFailure(ensured.reason, ensured.detail, legacyCodexAddressOf(providersRawOf(config))));
+    } else if (ensured.adopted) {
+      config = ensured.config;
+    }
+    // 两份模型清单对齐：宿主的模型选择器按 provider 条目各显示一份（「Codex」那行读内建条目，
+    // 注入生效的 `deck-codex` 是另一行），只写一份就会出现「这个窗口看得到、换个项目的新窗口就没了」。
+    // 这里顺手对齐，用户不用为了「换个窗口也能看到」再保存一次。失败只影响别的窗口看到什么，
+    // 不影响会话本身，所以给一句提示、不挡读状态。
+    const mirrored = await mirrorCodexSiteModels(paseo, config);
+    if (mirrored.ok) {
+      if (mirrored.mirrored) config = mirrored.config;
+    } else {
+      warnings.push(`Codex 的模型清单没能同步到「Codex」那一条：${mirrored.detail}——传到其它窗口的模型选择器可能还是旧清单`);
+    }
+  }
+  // 地址配着、新会话却用不上（派生条目被停用 / 缺地址 / 没继承 codex）时必须说出来：
+  // 卡片上明明有地址，不说就是又一手说「配好了」、一手悄悄走回 `~/.codex/config.toml`。
+  // 地址取两处之一：派生条目自己也可能是那条存过地址、却被停用/没继承 codex 的（接管路径不管它，
+  // 那是用户明确留下的状态），只看内建 `codex` 会把这种情况整片漏成静默。
+  if (config && !codexAddressWarned) {
+    const entries = providersRawOf(config);
+    const address =
+      textOf(entries[CODEX_SITE_PROVIDER]?.env?.[CODEX_ADDRESS_KEY]) || textOf(entries.codex?.env?.[CODEX_ADDRESS_KEY]);
+    if (address && !codexSiteUsable(entries[CODEX_SITE_PROVIDER])) {
+      // 三种原因都要点到（停用 / 没地址 / 没继承 codex）：只写前两种，第三种用户会以为看错了。
+      warnings.push(
+        `Codex 的接入地址（${address}）现在不生效：派生条目 ${CODEX_SITE_PROVIDER} 被停用、没有地址，或没继承 codex` +
+          "——要用它就回客户端页把接入地址重新保存一次（会写进去并启用这个派生条目）",
+      );
+    }
   }
   const profiles = profilesOf(config);
 
@@ -878,7 +871,7 @@ export async function patchProviderConfig(
   // Codex 适配器写死只读 `OPENAI_BASE_URL`：别的名字写进去宿主不会看，
   // 会话照样走 `~/.codex/config.toml`。与其静默无效，不如在这里说清楚键名。
   if (provider === "codex") {
-    const wrongName = envKeys.find((key) => /_BASE_URL$/i.test(key) && key !== "OPENAI_BASE_URL");
+    const wrongName = envKeys.find((key) => /_BASE_URL$/i.test(key) && key !== CODEX_ADDRESS_KEY);
     if (wrongName) {
       return {
         ok: false,
@@ -893,7 +886,7 @@ export async function patchProviderConfig(
   // 这次补丁里带着接入地址，才谈得上把派生条目建出来：没有地址的派生条目是条死条目，
   // 会让之后每张 Codex 会话按「残条目」处理。所以「只改模型/凭证」时仍旧写在
   // 客户端自己的条目上（内建 `codex` 的 `models` 清单宿主照样用），等真配了地址再改道。
-  const addsAddress = textOf(patchEnv.OPENAI_BASE_URL) !== "";
+  const addsAddress = textOf(patchEnv[CODEX_ADDRESS_KEY]) !== "";
   const writesDerived = provider === "codex" && (usableDerived || addsAddress);
   const targetId = writesDerived ? CODEX_SITE_PROVIDER : provider;
   const before = providers[targetId];
@@ -905,7 +898,7 @@ export async function patchProviderConfig(
     // 优先搬派生条目自己那份（残条目里可能已有用户加的模型），没有再搬内建的；键名跟着来源走，
     // `models` 与 `additionalModels` 语义不同，不能搬到另一把上。
     providerPatch.extends = "codex";
-    providerPatch.label = "Deck Codex";
+    providerPatch.label = CODEX_SITE_LABEL;
     // 找一个**真的有清单**的来源（残条目可能只有 label）：派生条目自己的优先，其次内建条目。
     const source = [providers[CODEX_SITE_PROVIDER], providers.codex].find((entry) => {
       const key = modelListKeyOf(entry);
@@ -917,6 +910,12 @@ export async function patchProviderConfig(
       providerPatch[inheritedKey] = source[inheritedKey];
     }
   }
+  // 写进派生条目就顺手开启它（调用方没明确说停用时）：一条停用的派生条目会被路由当成
+  // 「站点没生效」，地址与凭证写进去一句也不生效——那正是「配了却没生效」的形状。
+  // 用户在客户端页上改地址，意思就是「让这条用起来」，不该还要再去别处拨一个开关。
+  // `writesDerived` 已经蕴含 provider === "codex"：别家客户端带着一个叫 `OPENAI_BASE_URL`
+  // 的 env 过来时，不能让这段顺手替它开开关。
+  if (writesDerived && addsAddress && input.enabled === undefined) providerPatch.enabled = true;
   // 读清单的基准：新条目还没有自己的清单，就看内建那条。
   const modelBase = before ?? (creatingDerived ? providers.codex : undefined);
   const mergedEnv: Record<string, string> = {};
@@ -934,6 +933,13 @@ export async function patchProviderConfig(
     }
     for (const [key, value] of Object.entries(existingEnv ?? {})) {
       if (typeof value === "string") mergedEnv[key] = value;
+    }
+    // 建派生条目时把内建 `codex` 上那把凭证带过来：用户可能是先在卡片上存了凭证（落在内建条目）、
+    // 再存地址（改道写派生条目）。只带**这一把**，不整份照抄——适配器只读 `OPENAI_API_KEY`，
+    // 抄别的键只会在卡片上多出没人读、看不懂的行；地址也不抄旧的，那是这次写入自己决定的。
+    if (creatingDerived && !envKeys.includes(CODEX_CREDENTIAL_KEY)) {
+      const inherited = legacyCredentialOf(providers.codex?.env);
+      if (inherited) mergedEnv[CODEX_CREDENTIAL_KEY] = inherited;
     }
     Object.assign(mergedEnv, patchEnv);
     providerPatch.env = mergedEnv;
@@ -971,6 +977,16 @@ export async function patchProviderConfig(
     }
     providerPatch[modelsKey] = kept;
   }
+  /**
+   * 模型清单要写成**两份**。
+   *
+   * 宿主的模型选择器是按 provider 条目各显示一份的：卡片上看到的那行「Codex」读内建 `codex`
+   * 的清单，注入真正生效的派生条目 `deck-codex` 是另一行、另一份清单。只写一份的后果就是
+   * 「这个窗口看得到那个模型、换个项目的新窗口就没了」——用户没理由理解这两层的区别，
+   * 他只知道「我配了两个模型」。所以派生条目可用时，把同一份清单照写到内建条目上。
+   */
+  const mirroredModels =
+    input.models !== undefined && writesDerived && modelsKey ? (providerPatch[modelsKey] as Array<Record<string, unknown>>) : null;
   // 显示名一律落在客户端**自己**的条目上：面板卡片上的名字取自宿主快照里 `codex` 那条的
   // `label`（派生那一行被滤掉了），写到 `deck-codex` 上等于改了个看不见的地方。
   // `env` / `models` / `enabled` 落在「真正生效的那条」上：派生条目可用时是它，否则是客户端自己的条目
@@ -981,17 +997,40 @@ export async function patchProviderConfig(
   if (nextLabel) {
     patches[provider] = { ...(patches[provider] ?? {}), label: nextLabel.slice(0, 120) };
   }
+  // 照写的那份落在内建条目**自己**用的那把键上：`models` 与 `additionalModels` 语义不同，
+  // 搬错键就等于写到一个不生效的地方。内建条目上用户自己加的模型不删（`mirroredModelsOf`）。
+  const mirrorKey: ModelListKey | null = mirroredModels ? modelListKeyOf(providers.codex) : null;
+  const mirrorModels =
+    mirroredModels && mirrorKey
+      ? mirroredModelsOf(
+          providers.codex?.[mirrorKey],
+          mirroredModels as Array<ProviderModelItemView & { id: string; label: string }>,
+          before?.[modelsKey ?? "models"],
+        )
+      : null;
+  if (mirrorModels && mirrorKey) {
+    patches[provider] = { ...(patches[provider] ?? {}), [mirrorKey]: mirrorModels };
+  }
   try {
     await paseo.config.patch({ providers: patches });
   } catch (error) {
     return { ok: false, reason: "config-failed", detail: sessionErrorDetail(error) };
   }
+  // 用户在卡片上重新存了地址：说明他刚动过配置，之前「这条地址搬不动」的判定值得再试一次
+  // ——否则一次失败会在整段运行里把他锁死在同一个结论上（宿主升级、他手动改好 config 都救不回来）。
+  if (provider === "codex" && addsAddress) forgetAdoptFailures(textOf(patchEnv[CODEX_ADDRESS_KEY]));
+  // 用户刚改过模型清单：之前「补不进内建那一条」的判定值得再试一次（否则一次失败会在本次运行里
+  // 一直挂着，靠读客户端页永远等不到重试）。
+  if (input.models !== undefined) forgetMirrorFailures();
 
   const applied = [
     ...envKeys.map((key) => `env.${key}`),
-    ...(input.enabled !== undefined ? ["enabled"] : []),
+    // 调用方没提 enabled 而我们顺手开了它（写派生条目时）：这算这次改动的结果，得列出来。
+    ...(input.enabled !== undefined || providerPatch.enabled === true ? ["enabled"] : []),
     ...(nextLabel ? ["label"] : []),
     ...(input.models !== undefined && modelsKey ? [modelsKey] : []),
+    // 照写进内建条目的那份也算这次改动的结果：用户在看的就是两行选择器。
+    ...(mirrorModels && mirrorKey && mirrorKey !== modelsKey ? [mirrorKey] : []),
   ];
   const warnings: string[] = [
     "注入配置对**之后新建**的会话生效；已经在跑的会话不受影响。",
@@ -1014,6 +1053,18 @@ export async function patchProviderConfig(
   }
   const afterProviders = providersRawOf(after);
   const configuredAfter = afterProviders[targetId];
+  // 往派生条目里写了地址、读回却不是一条能用的：写盘嘴上说成功、建会话照样被拦，
+  // 这种「假成功」必须当场报失败，否则用户会在「保存成功」和「建不了会话」之间来回打转。
+  // （调用方明确传 `enabled: false` 是要求关掉它，那不算。）
+  // 判据是「这次带没带地址」，不是「写没写派生条目」：清空地址（传空串）时也写派生条目，
+  // 但那是有意的清空，读回不可用是意料之中，不能报成「宿主没写成」。
+  if (provider === "codex" && addsAddress && input.enabled !== false && !codexSiteUsable(configuredAfter)) {
+    return {
+      ok: false,
+      reason: "config-failed",
+      detail: `宿主没把 ${CODEX_SITE_PROVIDER} 存成能用的形状（继承 codex、地址、启用三样缺一不可）：这次地址不生效，先核对 ~/.paseo/config.json`,
+    };
+  }
   // 只改显示名时我们压根没往派生条目上写，不能拿「派生条目看不到」去报配置没落地。
   if (!configuredAfter && Object.keys(providerPatch).length) {
     warnings.push(`读回看不到客户端 ${provider} 的配置：这次写入可能没有落到 config.json 里，改完请核对一次`);
@@ -1030,15 +1081,31 @@ export async function patchProviderConfig(
   if (nextLabel && String(afterProviders[provider]?.label ?? "").trim() !== nextLabel) {
     warnings.push(`读回不一致：显示名没有写进去（期望 ${nextLabel}）`);
   }
+  // 用户勾的模型 id，两处核对共用一份：各算一遍迟早分叉。
+  const wantedIds = (input.models ?? []).map((id) => id.trim()).filter(Boolean);
   if (configuredAfter && input.models !== undefined && modelsKey) {
     // 读回按集合比对：既查「该有的没有」，也查「该删的还在」——替换语义下
     // 只查前者会让「取消勾选没生效」静默通过。
     const afterIds = configuredModelIds(configuredAfter, modelsKey);
-    const wantedIds = input.models.map((id) => id.trim()).filter(Boolean);
     const missing = wantedIds.filter((id) => !afterIds.includes(id));
     const leftover = afterIds.filter((id) => !wantedIds.includes(id));
     if (missing.length) warnings.push(`读回不一致：模型 ${missing.join(", ")} 没有写进去`);
     if (leftover.length) warnings.push(`读回不一致：已取消的模型 ${leftover.join(", ")} 仍在配置里，可能需要手动改 config.json`);
+  }
+  // 照写到内建条目的那份也要核对：模型选择器里「Codex」那行显示的就是它，
+  // 没落地的话换个窗口还是看不到刚才勾的模型。
+  if (mirrorModels && mirrorKey) {
+    const liveMirrorIds = configuredModelIds(afterProviders[provider], mirrorKey);
+    const missing = wantedIds.filter((id) => !liveMirrorIds.includes(id));
+    if (missing.length) {
+      warnings.push(`读回不一致：模型 ${missing.join(", ")} 没写进 ${provider} 那一条，别的窗口里模型选择器可能还是旧清单`);
+    }
+    // 宿主若把 `additionalModels` 当追加处理，同一份清单会被重复写进去：查一次，
+    // 否则模型选择器里会出现两行同名模型，而且下一次保存再叠一份。
+    const duplicated = [...new Set(liveMirrorIds.filter((id, index) => liveMirrorIds.indexOf(id) !== index))];
+    if (duplicated.length) {
+      warnings.push(`读回不一致：${provider} 那一条里模型 ${duplicated.join(", ")} 重复了，去 config.json 删掉多余的一份`);
+    }
   }
   return { ok: true, provider, applied, warnings };
 }
@@ -1648,22 +1715,6 @@ export async function saveClientSite(paseo: PaseoApi, input: SaveSiteInput): Pro
   return { ok: true, provider, sites: sites.map(siteRowOf), enabledSiteId: rows.enabledSiteId, warnings };
 }
 
-/**
- * 从旧配置的 env 里摸出一把能用的凭证（Codex 站点首次启用时用）。
- *
- * 顺序固定：`OPENAI_API_KEY` → 其它 `*_API_KEY` → `*_AUTH_TOKEN` / `*_TOKEN`。
- * 键名只用来挑值，值永远不回给界面。
- */
-function legacyCredentialOf(env: Record<string, string> | undefined): string {
-  const entries = Object.entries(env ?? {}).filter(([, value]) => textOf(value) !== "");
-  const direct = entries.find(([key]) => key === "OPENAI_API_KEY");
-  if (direct) return textOf(direct[1]);
-  const apiKey = entries.find(([key]) => /_API_KEY$/i.test(key));
-  if (apiKey) return textOf(apiKey[1]);
-  const token = entries.find(([key]) => /(_AUTH_TOKEN|_TOKEN)$/i.test(key));
-  return token ? textOf(token[1]) : "";
-}
-
 /** 把这一条站点的地址与凭证写进客户端自己的 env；缺凭证时只换地址。 */
 async function enableSite(
   paseo: PaseoApi,
@@ -1680,21 +1731,11 @@ async function enableSite(
   const before = providers[provider];
   const targetProvider = providerWriteTargetOf(provider);
   const targetBefore = providers[targetProvider];
-  const modelObjects = (items: Array<string | ProviderModelItemView> | undefined) => {
-    const kept = (items ?? []).flatMap((item) => {
-      const id = typeof item === "string" ? item.trim() : item.id?.trim();
-      if (!id) return [];
-      const label = typeof item === "string" ? id : item.label?.trim() || id;
-      return [{ ...(typeof item === "string" ? {} : item), id, label }];
-    });
-    // 空清单不写：`models` 是替换语义，写空等于「一个模型都不剩」。
-    return kept.length ? kept : undefined;
-  };
   // Codex 适配器只读这两把键（`codex-app-server-agent.js` 的 `OPENAI_BASE_URL` /
   // `OPENAI_API_KEY`），所以**不能**沿用既有键名：`envKeysFor` 遇到自定义的
   // `*_API_KEY` 会沿用它，而那是 Codex 根本不看的键。
   const keys = provider === "codex"
-    ? { baseUrlKey: "OPENAI_BASE_URL", credentialKey: "OPENAI_API_KEY" }
+    ? { baseUrlKey: CODEX_ADDRESS_KEY, credentialKey: CODEX_CREDENTIAL_KEY }
     : envKeysFor(provider, Object.keys(before?.env ?? {}));
   // 旧式注入可能把凭证放在别的键上（例如自定义的 `*_API_KEY`）：从内建条目里找回来。
   // 优先 `OPENAI_API_KEY`（那本来就是 Codex 认的键），再按 `*_API_KEY` → `*_TOKEN` 的顺序，
@@ -1706,22 +1747,40 @@ async function enableSite(
   // （见 `patchProviderConfig` 的 `writesDerived`），这里若仍优先搬派生条目留着的旧清单，
   // 就会把用户刚改的那份盖掉。派生条目可用时才以它为准。
   const modelSource = codexSiteUsable(targetBefore) ? targetBefore : before;
-  const models = modelObjects(modelSource?.models);
-  const additionalModels = modelObjects(modelSource?.additionalModels);
+  const models = modelObjectsOf(modelSource?.models);
+  const additionalModels = modelObjectsOf(modelSource?.additionalModels);
   const providerPatch = provider === "codex"
     ? {
         extends: "codex",
-        label: "Deck Codex",
+        label: CODEX_SITE_LABEL,
         enabled: true,
         ...(models ? { models } : {}),
         ...(additionalModels ? { additionalModels } : {}),
         env: { ...(targetBefore?.env ?? {}), ...env },
       }
     : null;
+  // 模型清单要写成两份（同 `patchProviderConfig` 里那段说明）：这条路径直写补丁、
+  // 不经那个函数，所以对齐得自己做一遍。否则启用站点之后，模型选择器里「Codex」那一行
+  // 还是旧清单——用户换个项目开新窗口，刚配的模型就「不见了」。
+  // 只补不删：内建那行可能有用户自己在宿主设置里加的模型。
+  // 要照写的那份按**来源条目自己用的那把键**取：接管旧式配置时清单落在 `additionalModels` 上，
+  // 只看 `models` 就会漏掉整个对齐。
+  const mirrorSourceKey: ModelListKey | null = provider === "codex" ? modelListKeyOf(modelSource) : null;
+  const mirrorSourceModels = mirrorSourceKey ? modelObjectsOf(modelSource?.[mirrorSourceKey]) : undefined;
+  const mirrorKey: ModelListKey | null = mirrorSourceModels ? modelListKeyOf(before) : null;
+  const mirrorModels =
+    mirrorKey && mirrorSourceModels
+      ? mirroredModelsOf(before?.[mirrorKey], mirrorSourceModels, modelSource?.[mirrorSourceKey ?? "models"])
+      : null;
+  const mirrorChanged = Boolean(
+    mirrorKey && mirrorModels && mirrorModels.length !== (modelObjectsOf(before?.[mirrorKey])?.length ?? 0),
+  );
   let patched: ProviderPatchResult;
   if (providerPatch) {
     try {
-      await paseo.config.patch({ providers: { [targetProvider]: providerPatch } });
+      const patches: Record<string, Record<string, unknown>> = { [targetProvider]: providerPatch };
+      if (mirrorKey && mirrorModels && mirrorChanged) patches.codex = { [mirrorKey]: mirrorModels };
+      await paseo.config.patch({ providers: patches });
       patched = { ok: true, provider: targetProvider, applied: Object.keys(env).map((key) => `env.${key}`), warnings: [] };
     } catch (error) {
       return { ok: false, reason: "config-failed", detail: sessionErrorDetail(error) };
@@ -1765,6 +1824,15 @@ async function enableSite(
   }
   if (!credential && !liveCredential) {
     warnings.push(`站点 ${site.id} 没填凭证，${targetProvider} 现在也没有凭据：这个客户端起的会话会被接口拒绝`);
+  }
+  // 照写进内建条目的那份也核一遍：模型选择器里「Codex」那行显示的是它，没落地的话
+  // 换个项目开新窗口还是看不见刚配的模型（就是用户报的那个现象）。
+  if (mirrorModels && mirrorKey && mirrorChanged) {
+    const liveMirrorIds = configuredModelIds(providersRawOf(afterConfig).codex, mirrorKey);
+    const missing = mirrorModels.map((item) => item.id).filter((id) => !liveMirrorIds.includes(id));
+    if (missing.length) {
+      warnings.push(`读回不一致：模型 ${missing.join(", ")} 没写进 codex 那一条，别的窗口里模型选择器可能还是旧清单`);
+    }
   }
   return { ok: true, warnings };
 }

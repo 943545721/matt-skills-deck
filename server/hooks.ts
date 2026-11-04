@@ -3,14 +3,15 @@ import type { AgentPermissionRequest, AgentPermissionRequestKind } from "@getpas
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { CODEX_SITE_PROVIDER, providerId } from "../shared/orchestration.ts";
-import { codexSiteUsable } from "./orchestration.ts";
+import { describeCodexEnsureFailure, ensureCodexAddressEffective } from "./codex-adopt.ts";
+import { codexSiteUsable, legacyCodexAddressOf, providersRawOf } from "./provider-entry.ts";
 import { resolveOwner } from "../shared/staff-guard.ts";
 import { record } from "./logs.ts";
 import { MCP_SERVER_NAME, PREAPPROVED_TOOL_NAMES } from "./mcp/tools.ts";
 import { pluginRoot } from "./paths.ts";
 import { TurnReporter, reportEnabledFor } from "./report.ts";
 import { getSettings } from "./settings.ts";
-import { providersRawOf, readDaemonConfig } from "./orchestration.ts";
+import { readDaemonConfig } from "./orchestration.ts";
 import { readOrchestration } from "./orchestration-store.ts";
 import { decideStaffGate, decideWorkerDispatch, staffGateApplies } from "./staff-gates.ts";
 import { DECK_STAFF_LABEL, rosterOf } from "../shared/staff.ts";
@@ -112,12 +113,15 @@ export function routeCodexSiteProvider(
   if (stale) {
     throw new CodexSiteRouteError(
       `Codex 接入地址（${stale}）尚未绑定到会话 provider，继续建会话会退回 ~/.codex/config.toml 里的地址。` +
-        "请在编排面板的 Codex 行把这条地址存成站点并启用——凭证可以留空，会沿用现有配置里的那一把——然后再建会话",
+        "请在客户端页把这条地址重新保存一次：地址会写进会话真正用的那条 provider 并启用它" +
+        "——凭证可以留空，会沿用现有配置里的那一把——然后再建会话",
     );
   }
   // 派生条目在、但没继承 codex：这不是插件写出来的形状，别拿它开会话。
   if (codex && codex.extends !== "codex") {
-    throw new CodexSiteRouteError("Codex 站点派生 provider 配置不完整；请在编排面板重新启用站点后再建会话");
+    throw new CodexSiteRouteError(
+      "Codex 会话用的那条 provider 配置不完整（没继承 codex）；在客户端页把接入地址重新保存一次就会修成可用的形状",
+    );
   }
   // 其余两种情况都按普通 Codex 放行：
   // - `enabled: false`（在 Paseo 自己的 provider 设置里停用这条派生 provider）→ 站点没生效，回到原生 Codex；
@@ -143,7 +147,21 @@ async function routeProviderIfCodex(
       "读不到宿主配置，没法确认 Codex 该走哪条接入地址（daemon 可能刚重启）：请重试一次；若一直如此，先到编排面板看 Codex 站点是否还在",
     );
   }
-  return routeCodexSiteProvider(request, providersRawOf(config));
+  // 路由之前先看一眼是不是「旧式注入」留下的状态（地址写在内建 `codex` 上、宿主不读）：
+  // 是就当场搬到派生条目，让用户配过的地址真的用上，而不是拿一条「请你去建站点」的
+  // 提示把人拦住。搬不动（宿主不接受派生 provider 之类）才落到下面的拦截。
+  // 与面板读状态走同一个 `ensureCodexAddressEffective`：两处各写一遍迟早一处重读、一处用旧配置。
+  const legacyAddress = legacyCodexAddressOf(providersRawOf(config));
+  const ensured = await ensureCodexAddressEffective(paseo, config);
+  if (!ensured.ok) {
+    // 接管失败就别再往下走成那句「请你去存成站点」：用户手上已经有一条地址了，
+    // 要告诉他的是为什么没接上，而不是让他再配一遍。措辞与面板告警共用一句
+    // （`describeCodexEnsureFailure`），两处各写一版迟早说岔。
+    const message = describeCodexEnsureFailure(ensured.reason, ensured.detail, legacyAddress);
+    record("warn", SCOPE, message);
+    throw new CodexSiteRouteError(`先别建会话：${message}`);
+  }
+  return routeCodexSiteProvider(request, providersRawOf(ensured.config));
 }
 
 export function injectDeckTools(

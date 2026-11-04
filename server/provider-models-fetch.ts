@@ -1,6 +1,7 @@
 import type { PaseoApi } from "@getpaseo/client";
 import { endpointAuthOf, modelListUrls, parseModelList } from "../shared/provider-models.ts";
-import { providerEntryOf, providersRawOf, readDaemonConfig } from "./orchestration.ts";
+import { readDaemonConfig } from "./orchestration.ts";
+import { providerEntryOf, providersRawOf } from "./provider-entry.ts";
 import { record } from "./logs.ts";
 
 /**

@@ -310,6 +310,16 @@ export function providerId(spec: string | undefined): string {
 export const CODEX_SITE_PROVIDER = "deck-codex";
 
 /**
+ * 派生条目在宿主里的显示名（Paseo 自己的模型选择器/设置里看到的那一行）。
+ *
+ * 与 id 分开：id 是路由用的键，改一次就断一批配置；显示名只是给人看的。
+ * 三处建/改派生条目（接管旧式地址、启用站点、保存模型）共用这一个常量，
+ * 免得某个窗口里出现「Deck Codex」、另一个窗口是别的名字。这是一句**用户可见的界面文案**，
+ * 不做中文化：宿主界面本身是英文的，混排更难认。
+ */
+export const CODEX_SITE_LABEL = "Deck Codex";
+
+/**
  * 插件真能为它配接入地址的客户端：Claude / Codex。
  *
  * 其余家（OpenCode、Copilot、Cursor、Pi、Oh My Pi、Antigravity、Muse Code……）在宿主里

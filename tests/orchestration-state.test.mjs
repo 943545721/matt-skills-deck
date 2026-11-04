@@ -4,7 +4,11 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readOrchestrationState } from "../server/orchestration.ts";
+import { forgetMirrorFailures, resetAdoptAttemptsForTest } from "../server/codex-adopt.ts";
 import { isListedClient, isSupportedClient, SUPPORTED_CLIENTS, SUPPORTED_CLIENTS_LABEL } from "../shared/orchestration.ts";
+
+// 「模型清单补不进去」的记忆是模块级的：每个用例从干净的起点开始。
+test.beforeEach(() => forgetMirrorFailures());
 
 /**
  * 编排页的数据来源：`deck.orchestration.state` 背后的组装逻辑。
@@ -449,4 +453,205 @@ test("编排状态：空工作区参数直接拒绝", async () => {
   const state = await readOrchestrationState(fakePaseo(), { workspaceId: "  ", workspaceDir: "/w" });
   assert.equal(state.ok, false);
   assert.equal(state.reason, "invalid-workspace");
+});
+
+test("旧式 Codex 注入：读状态时自动搬到派生条目，面板看到的就是会话真正用的那条", async (t) => {
+  resetAdoptAttemptsForTest();
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  // 历史现场：地址写在内建 codex 上，宿主根本不读。
+  let config = {
+    providers: { codex: { env: { OPENAI_BASE_URL: "http://127.0.0.1:3425", SUB2API_API_KEY: "cred-legacy" } } },
+  };
+  const patches = [];
+  const paseo = fakePaseo({
+    config: {
+      get: async () => ({ config }),
+      patch: async (input) => {
+        patches.push(input);
+        config = { ...config, providers: { ...config.providers, ...(input.providers ?? {}) } };
+        return { ok: true };
+      },
+    },
+    providers: {
+      snapshot: async () => ({
+        entries: [
+          { provider: "claude", label: "Claude", enabled: true, status: "ready", models: [{ id: "sonnet" }] },
+          { provider: "codex", label: "Codex", enabled: true, status: "ready", models: [{ id: "gpt-5-codex" }] },
+        ],
+      }),
+    },
+  });
+
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+
+  assert.equal(state.ok, true);
+  assert.equal(patches.length, 1, "读一次状态就把旧式地址搬一次");
+  const codex = state.providers.find((row) => row.id === "codex");
+  assert.equal(codex.baseUrl, "http://127.0.0.1:3425");
+  assert.ok(codex.credentialKeys.includes("OPENAI_API_KEY"), "凭证要补成适配器真读的那把键");
+  assert.equal(state.providers.some((row) => row.id === "deck-codex"), false, "派生条目不单列");
+  assert.equal(
+    state.warnings.some((line) => line.includes("现在不生效")),
+    false,
+    "搬成功了就不该再说地址不生效（那会和卡片状态打架）",
+  );
+});
+
+test("旧式 Codex 注入：地址只存在派生条目上、而那条被停用时，也要说出来", async (t) => {
+  resetAdoptAttemptsForTest();
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const paseo = fakePaseo({
+    // 用户把派生条目关了，地址就留在它自己身上；内建 codex 上什么都没有。
+    config: {
+      get: async () => ({
+        config: {
+          providers: {
+            "deck-codex": { extends: "codex", label: "Deck Codex", enabled: false, env: { OPENAI_BASE_URL: "http://127.0.0.1:3425" } },
+          },
+        },
+      }),
+      patch: async () => ({ ok: true }),
+    },
+    providers: {
+      snapshot: async () => ({
+        entries: [{ provider: "codex", label: "Codex", enabled: true, status: "ready", models: [{ id: "gpt-5-codex" }] }],
+      }),
+    },
+  });
+
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+
+  assert.equal(state.ok, true);
+  assert.ok(
+    state.warnings.some((line) => line.includes("现在不生效")),
+    "地址配在派生条目自己身上却用不了，不能一个字都不说",
+  );
+});
+
+test("旧式 Codex 注入：派生条目被停用时不静默，面板说清楚「这条地址现在不生效」", async (t) => {
+  resetAdoptAttemptsForTest();
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const patches = [];
+  const paseo = fakePaseo({
+    // 用户把派生条目关了（或旧版本留下的残条目），内建 codex 上还留着那条地址。
+    config: {
+      get: async () => ({
+        config: {
+          providers: {
+            codex: { env: { OPENAI_BASE_URL: "http://127.0.0.1:3425" } },
+            "deck-codex": { extends: "codex", label: "Deck Codex", enabled: false },
+          },
+        },
+      }),
+      patch: async (input) => {
+        patches.push(input);
+        return { ok: true };
+      },
+    },
+    providers: {
+      snapshot: async () => ({
+        entries: [{ provider: "codex", label: "Codex", enabled: true, status: "ready", models: [{ id: "gpt-5-codex" }] }],
+      }),
+    },
+  });
+
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+
+  assert.equal(state.ok, true);
+  assert.equal(patches.length, 0, "派生条目已存在是用户明确状态，别翻他刚关掉的站点");
+  assert.ok(
+    state.warnings.some((line) => line.includes("现在不生效")),
+    "停用着就得说出来，不能让用户以为填过的地址还在用",
+  );
+});
+
+test("模型清单：读状态时顺手对齐到「Codex」那一条，换个窗口看到的模型一样", async (t) => {
+  resetAdoptAttemptsForTest();
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  // 用户报的那个现场：站点那条有 2 个模型，内建 codex 上还只有旧的 1 个。
+  // 宿主的模型选择器按条目各显示一份，于是「这个窗口能选 gpt-6、换个项目的新窗口就没有了」。
+  let config = {
+    providers: {
+      codex: { label: "Codex", models: [{ id: "group/site8083", label: "group/site8083" }] },
+      "deck-codex": {
+        extends: "codex",
+        label: "Deck Codex",
+        enabled: true,
+        models: [
+          { id: "group/site8083", label: "group/site8083" },
+          { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" },
+        ],
+        env: { OPENAI_BASE_URL: "http://127.0.0.1:3425", OPENAI_API_KEY: "cred-1" },
+      },
+    },
+  };
+  const patches = [];
+  const paseo = fakePaseo({
+    config: {
+      get: async () => ({ config }),
+      patch: async (input) => {
+        patches.push(input);
+        config = { ...config, providers: { ...config.providers, ...(input.providers ?? {}) } };
+        return { ok: true };
+      },
+    },
+    providers: {
+      snapshot: async () => ({
+        entries: [{ provider: "codex", label: "Codex", enabled: true, status: "ready", models: [{ id: "group/site8083" }] }],
+      }),
+    },
+  });
+
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+
+  assert.equal(state.ok, true);
+  assert.equal(patches.length, 1, "对齐清单要真写一次宿主配置");
+  assert.deepEqual(
+    config.providers.codex.models.map((item) => item.id),
+    ["group/site8083", "auto/gpt-6-astra"],
+    "内建条目那条也要列出两个模型",
+  );
+  assert.deepEqual(
+    state.warnings.filter((line) => line.includes("没能同步")),
+    [],
+    "对齐成功就不该报同步失败",
+  );
+});
+
+test("模型清单：对齐写不进去时说一句，不假装同步了", async (t) => {
+  resetAdoptAttemptsForTest();
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const config = {
+    providers: {
+      codex: { label: "Codex", models: [{ id: "group/site8083", label: "group/site8083" }] },
+      "deck-codex": {
+        extends: "codex",
+        label: "Deck Codex",
+        enabled: true,
+        models: [{ id: "group/site8083", label: "group/site8083" }, { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" }],
+        env: { OPENAI_BASE_URL: "http://127.0.0.1:3425", OPENAI_API_KEY: "cred-1" },
+      },
+    },
+  };
+  const paseo = fakePaseo({
+    config: { get: async () => ({ config }), patch: async () => ({ ok: true }) },
+    providers: {
+      snapshot: async () => ({
+        entries: [{ provider: "codex", label: "Codex", enabled: true, status: "ready", models: [{ id: "group/site8083" }] }],
+      }),
+    },
+  });
+
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+
+  assert.equal(state.ok, true, "同步失败不挡读状态（它不影响会话本身）");
+  assert.ok(
+    state.warnings.some((line) => line.includes("没能同步")),
+    `要提示其它窗口可能还是旧清单，实际警告：${state.warnings.join(" / ")}`,
+  );
 });

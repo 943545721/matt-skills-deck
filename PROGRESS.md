@@ -942,3 +942,111 @@ React 19.1.0 / RN 0.81.5 / zod 4 / tanstack 5 / Node ≥22.18、`gh` 20s 超时�
 
 **没做的**：日志仍不落盘。跨重载保留历史需要写 `<PASEO_HOME>/matt-skills-deck/`，
 这与「只在内存、不碰用户目录」的现有设计相冲突，等用户明确要再做。
+
+## Codex 配置「填了就是不生效，还得再建站点」：改成一步到位
+
+用户原话：「你这不是傻逼逻辑吗 为什么配置那么难理解。优化视觉吧 配置就是配置了 怎么还那么麻烦」，
+前置要求是「这块的注入必须是实际生效的」。
+
+**病根**：宿主 Codex 适配器只把 `extends: "codex"` 且 `env.OPENAI_BASE_URL` 非空的派生条目
+（id 固定 `deck-codex`）当成本次会话的 provider 配置；写在内建 `codex` 上的 env 宿主根本不读。
+插件早期正是写在内建条目上的，于是卡片上地址填得好好的、会话却走 `~/.codex/config.toml`。
+让用户理解这两层、再手动「建站点 → 启用」是把内部实现泄漏给了使用者。
+
+**修正**：
+
+- `server/codex-adopt.ts`（新）：内建 `codex` 上有地址、`deck-codex` 又不存在时，插件自己把地址搬过去
+  （env 只写适配器真读的 `OPENAI_BASE_URL` + `OPENAI_API_KEY`，凭证从旧键挑一把抄过来，
+  模型清单一起走），搬完读回核对；`ensureCodexAddressEffective`
+  是读状态与建会话钩子共用的唯一入口，失败分 `patch-failed` / `unverified`（后者是「写进去了但没核对上」，
+  不能报成没搬成），措辞只有 `describeCodexEnsureFailure` 一处。
+- `server/provider-entry.ts`（新）：provider 条目读/写的判据（可用性、写目标、旧地址探测、凭证挑选、
+  模型清单归一）收在一处，`orchestration.ts` 与 `codex-adopt.ts` 都从这儿拿，避免三份判据漂移。
+- `server/orchestration.ts`：写地址进派生条目时顺手 `enabled: true`（用户存地址就是要它生效）；
+  建派生条目时把内建条目上的凭证一起带过去（先存凭证、后存地址也不会丢）；写完读回不是能用的形状
+  就报失败，不报「保存成功」；派生条目被停用/没地址/没继承 codex 且配过地址时，页面顶部告警。
+- 客户端卡片主区只留 接入地址 / 凭据 / 模型 / 站点（可选备用线路），名称与 id 收进「高级」；
+  `orch.siteNone` 改成「站点是可选的备用线路」，不再暗示必须建站点。
+
+**验证**：`npm run typecheck` 通过；`npm test` 1639 / 1639（新增 adopt 自愈、读写路径、钩子接管、
+告警与假成功等 20 余条）；已 `paseo plugin reload`（13:39:41 Plugin ready）。此前实测：
+`~/.paseo/config.json` 出现 `deck-codex`（`extends: codex`、`enabled: true`、env 三条、模型 group/site8083），
+`paseo run --provider codex/group/site8083` 建出的会话 provider 显示 `deck-codex`，回合正常返回。
+
+**没做的**：
+
+- 「只存凭证、没存地址」时不再额外告警：没有地址就没有可注入的目标，而内建 `codex` 的 env 宿主到底
+  用不用，没有实测结论，不拿未证实的结论吓用户。
+- 会话列表/回传里的 provider 字段会显示派生 id `deck-codex`（宿主的记录就是它），没做显示归一。
+- 「把内建 `codex` 上那条旧地址清掉」只是顺手尝试：宿主对 provider 补丁是深合并还是整块替换，
+  `PROGRESS.md` 里两条记录相反，尚未定论，所以文档里没承诺已经删掉。
+
+## 「为什么我们插件要有这个东西」：派生条目的 env 只留真读的两个键
+
+用户指着卡片上 Codex 的第二条凭据问：`SUB2API_API_KEY` 是什么、为什么插件要留它，要求「直接源头清理」。
+
+**实测原因**：那是用户原来 sub2api 配置里的**旧键名**。宿主 Codex 适配器只读 `OPENAI_BASE_URL` 与
+`OPENAI_API_KEY`，别的名字它看都不看；插件早先「整份照抄旧 env」的搬运方式，把旧键名一起抄进了
+`deck-codex.env`，于是卡片上多出一行没人读、也解释不了的东西。
+
+**修正**：
+
+- 造派生条目时**只写两个键**：`OPENAI_BASE_URL` + `OPENAI_API_KEY`（`server/codex-adopt.ts` 的接管路径
+  与 `server/orchestration.ts` 的卡片写入路径都改了；内建条目上的其它键留在原处，不动用户配置）。
+- 已写下的残渣：`pruneRedundantCodexEnv` 在读到客户端配置时顺手清掉。宿主的 provider 补丁是深合并
+  （`deepMerge`，`undefined` 跳过），**删不掉单个 env 键**；唯一真删的口径是 `removeProviders`，
+  而宿主先处理移除、再合并同一补丁里的新条目，所以「摘掉 + 写回干净形状」放在一个补丁里不会留空窗。
+  只删「名字像凭据、值又和 `OPENAI_API_KEY` 一模一样」的键；值不同、条目停用都不动。清理失败只记日志，
+  不挡读状态、也不挡建会话。
+
+**验证**：`npm run typecheck` 通过；`npm test` 1644 / 1644；已 `paseo plugin reload`（13:56:54 ready）。
+实测：`~/.paseo/config.json` 的 `deck-codex.env` 从三个键变成 `OPENAI_API_KEY` / `OPENAI_BASE_URL` 两个，
+模型清单与 `enabled: true` 保留；随后 `paseo run --provider codex/group/site8083` 建出的会话
+provider 仍是 `deck-codex`、回合返回 ok（会话已删除）。
+
+**没做的**：内建 `codex` 上那份 `SUB2API_API_KEY` 不动——那是用户自己的配置，卡片读的是派生条目、
+看不见它，也不生效；宿主没有「删单个 env 键」的口径，硬删要连内建 provider 整条摘掉，代价太大。
+
+## 「换个项目的新窗口就不显示 gpt-6」：模型清单一处配置、两边写
+
+用户截图对比：同一个 Codex 配置，A 窗口的模型选择器里有 `group/site8083` 与 `auto/gpt-6-astra`，
+换到另一个项目开新窗口，列表里只剩 `group/site8083`。
+
+**实测原因**（不是缓存，也不是配置没写进去）：
+
+- `~/.paseo/config.json` 里 `deck-codex.models` 两个都在、`codex.models` 只有 `group/site8083`；
+- 用 daemon 客户端读四个工作区的 `providers.snapshot`，每个工作区的 `deck-codex` 都是两个模型——
+  所以问题不在「按工作区缓存的快照过期」；
+- 宿主的模型选择器是**按 provider 条目各显示一份**：截图里那个列表标题是「Codex」（内建条目），
+  读的就是 `codex.models`；A 窗口那一次选的是「Deck Codex」（派生条目），读的是 `deck-codex.models`。
+
+一句话：一条配置分成了两份清单，选择器停在哪一行就显示哪一份。用户没理由理解这两层的区别。
+
+**修正**：
+
+- 保存模型清单时（`patchProviderConfig`）**两边都写**：派生条目可用时，同一份清单照写到内建 `codex`，
+  各自落在条目自己用的那把键上（`models` 是替换内置列表、`additionalModels` 是追加，搬错键等于写了个不生效的地方）；
+  照写没落地会在读回里给一句警告，不报「保存成功」了事（`server/orchestration.ts`）。
+  只删「派生条目改之前也有」的那些（用户面板里取消的），内建那一行用户自己在 Paseo 设置里加的模型留着
+  （`mirroredModelsOf`）——面板读的是派生条目，那些模型在面板上看不见，整份替换删掉就是替人做决定。
+- 读客户端页时顺手对齐（`mirrorCodexSiteModels`，`server/codex-adopt.ts`）：两份对不齐就以可用的派生条目为准
+  **只补不删**地照写一次（内建那行可能有用户自己加的模型；补用的是 `withMissingModels`），
+  用户不用为了「换个窗口也能看到」再保存一遍；顺序不同不算不一致，写不进去只提示、不挡读状态。
+  派生条目停用/没地址时不动内建条目的清单——那是用户明确留下的状态。
+- 老路径 `enableSite`（直写补丁、不经 `patchProviderConfig`）也补上同一次对齐，否则启用站点之后
+  「Codex」那一行仍是旧清单；清单按**来源条目自己那把键**取，`models` / `additionalModels` 两种形状都覆盖，
+  写完读回核对。显示名抽成 `CODEX_SITE_LABEL`，三处建/改派生条目共用。
+- 自愈只记「写进去了、读回还缺」这一种（宿主拒收）：写盘抛错、读不回来都是瞬时故障，不记忆，
+  下次读客户端页再试；用户重新保存模型时清空记忆（`forgetMirrorFailures`）。
+
+**验证**：`npm run typecheck` 通过；`npm test` 1666 / 1666 全绿（新增 3 条写入路径 + 7 条对齐用例
++ 2 条读状态用例 + 2 条启用站点用例 + 6 条清单合并单元用例 + 1 条「别家客户端带 OPENAI_BASE_URL」）。实机：重载插件前 `~/.paseo/config.json` 里
+`codex.models` 只有 `group/site8083`、`deck-codex.models` 两个都有；重载后调一次
+`deck.orchestration.state`，`codex.models` 变成 `group/site8083` + `auto/gpt-6-astra`，自愈生效。
+
+**没做的**：没有把「保存后自动刷新所有工作区的宿主快照」接进写入路径。实测四个工作区的快照都已经有这两个模型，
+触发不了用户报的这个现象；而且读宿主源码（`mutable-provider-config-owner` 订阅 `store.onApply` →
+`installGeneration` 会删掉变更 provider 在所有 target 上的缓存目录并重新 warm up）说明 provider 配置改动
+本来就会传到所有工作区，不需要手动刷新。`providers.refresh()`（不带 `cwd`）会去 warm up 所有工作区，
+日志里一次就跑了 33 秒，放在保存按钮后面是拿用户的等待换一个当前并不存在的问题。客户端页的「刷新宿主模型」仍在
+（只刷当前工作区）。

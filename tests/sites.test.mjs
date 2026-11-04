@@ -294,6 +294,70 @@ test("启用 Codex 站点：站点没填凭证时沿用它原本那把键上的�
   });
 });
 
+test("启用 Codex 站点：模型清单也补到内建那一行，换个项目的新窗口看到的一样", async () => {
+  await tempHome();
+  // 用户报的形状：站点那行有 gpt-6，内建那行还停在旧清单。
+  const paseo = fakePaseo({
+    providers: {
+      codex: { models: [{ id: "group/site8083", label: "group/site8083" }] },
+      "deck-codex": {
+        extends: "codex",
+        label: "Deck Codex",
+        enabled: true,
+        models: [
+          { id: "group/site8083", label: "group/site8083" },
+          { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" },
+        ],
+        env: { OPENAI_BASE_URL: "https://api.example.test/v1", OPENAI_API_KEY: "cred-x" },
+      },
+    },
+  });
+  await saveClientSite(paseo, {
+    provider: "codex",
+    site: { id: "main", baseUrl: "https://api.example.test/v1", credential: "cred-x" },
+  });
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+
+  assert.equal(enabled.ok, true);
+  assert.deepEqual(
+    paseo.disk().providers.codex.models.map((item) => item.id),
+    ["group/site8083", "auto/gpt-6-astra"],
+    "模型选择器里「Codex」那一行读的就是这一份",
+  );
+});
+
+test("启用 Codex 站点：清单落在 additionalModels 上时也照写到内建那一行", async () => {
+  await tempHome();
+  // 接管旧式配置正是这个形状：清单挂在 `additionalModels` 上（追加语义），不是 `models`。
+  const paseo = fakePaseo({
+    providers: {
+      codex: { additionalModels: [{ id: "group/site8083", label: "group/site8083" }] },
+      "deck-codex": {
+        extends: "codex",
+        label: "Deck Codex",
+        enabled: true,
+        additionalModels: [
+          { id: "group/site8083", label: "group/site8083" },
+          { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" },
+        ],
+        env: { OPENAI_BASE_URL: "https://api.example.test/v1", OPENAI_API_KEY: "cred-x" },
+      },
+    },
+  });
+  await saveClientSite(paseo, {
+    provider: "codex",
+    site: { id: "main", baseUrl: "https://api.example.test/v1", credential: "cred-x" },
+  });
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+
+  assert.equal(enabled.ok, true);
+  assert.deepEqual(
+    paseo.disk().providers.codex.additionalModels.map((item) => item.id),
+    ["group/site8083", "auto/gpt-6-astra"],
+  );
+  assert.equal(paseo.disk().providers.codex.models, undefined, "别往另一把键上乱写");
+});
+
 test("启用 Codex 站点：写进去了但读回没有这一条，就报失败，不谎报已生效", async () => {
   await tempHome();
   // 宿主收下补丁、什么都没存下来（不认这个字段时的样子）。

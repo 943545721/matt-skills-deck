@@ -12,6 +12,7 @@ import {
   typescriptSupported,
 } from "../server/hooks.ts";
 import { MCP_SERVER_NAME, MCP_TOOLS, PREAPPROVED_TOOL_NAMES } from "../server/mcp/tools.ts";
+import { resetAdoptAttemptsForTest } from "../server/codex-adopt.ts";
 
 /** 注入器是纯函数：不碰 daemon、不碰文件，所以可以直接拿一份配置试。 */
 
@@ -67,7 +68,7 @@ test("Codex 站点路由：派生条目没继承 codex 才算配置不完整；�
       routeCodexSiteProvider(request("codex/gpt-5-codex"), {
         "deck-codex": { extends: "claude", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } },
       }),
-    /派生 provider 配置不完整/,
+    /配置不完整（没继承 codex）/,
   );
   // 缺地址 / 地址不是字符串 / 被停用：都拿不出可用地址，当没配站点，普通 Codex 照常建。
   for (const leftover of [
@@ -128,6 +129,35 @@ test("agent.create 钩子：启用过 Codex 站点，真实创建请求改走派
     })),
   );
   assert.equal(out.config.provider, "deck-codex/gpt-5-codex", "钩子读到的配置要真的把 provider 换掉");
+});
+
+test("agent.create 钩子：旧式注入的地址当场接管，建会话直接走派生 provider", async () => {
+  resetAdoptAttemptsForTest();
+  const server = fakeServer();
+  registerHooks(server);
+  let config = { providers: { codex: { env: { OPENAI_BASE_URL: "http://127.0.0.1:3425", SUB2API_API_KEY: "cred-x" } } } };
+  const patches = [];
+  const paseo = {
+    config: {
+      get: async () => ({ config }),
+      patch: async (input) => {
+        patches.push(input);
+        const providers = { ...config.providers };
+        for (const [id, entry] of Object.entries(input.providers ?? {})) {
+          providers[id] = { ...(providers[id] ?? {}), ...entry };
+        }
+        config = { ...config, providers };
+        return { ok: true };
+      },
+    },
+  };
+  const out = await server.handlers["agent.create"](
+    { request: { config: { provider: "codex/gpt-5-codex", cwd: "/work/deck" } } },
+    { paseo, signal: new AbortController().signal },
+  );
+  assert.equal(out.config.provider, "deck-codex/gpt-5-codex", "用户配过的地址要真的用上，而不是拦住他");
+  assert.equal(patches.length, 1, "接管发生在建会话之前，一次就够");
+  assert.equal(patches[0].providers["deck-codex"].env.OPENAI_BASE_URL, "http://127.0.0.1:3425");
 });
 
 test("agent.create 钩子：读不到配置时拒绝创建 Codex 会话，不静默退回 ~/.codex 的地址", async () => {

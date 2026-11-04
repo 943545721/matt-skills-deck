@@ -5,7 +5,8 @@ import {
   type ProviderModelList,
 } from "../shared/orchestration-rpc.ts";
 import { record } from "./logs.ts";
-import { providerEntryOf, providersRawOf, type DaemonConfigView } from "./orchestration.ts";
+import type { DaemonConfigView } from "./orchestration.ts";
+import { providerEntryOf, providersRawOf } from "./provider-entry.ts";
 import { isListedClient } from "../shared/orchestration.ts";
 import { modelIdsOf, type ProviderSnapshotEntry } from "./provider-snapshot-view.ts";
 import { sessionErrorDetail } from "./session.ts";

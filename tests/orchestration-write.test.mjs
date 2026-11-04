@@ -338,15 +338,47 @@ test("Codex 还没建派生条目：第一次注入 env 就把它建出来，并
   const result = await patchProviderConfig(paseo, { provider: "codex", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } });
   assert.equal(result.ok, true);
   assert.deepEqual(paseo.disk().providers["deck-codex"], {
-    // `extends` / `label` 缺一样宿主都不认，所以建条目时一起写上。
+    // `extends` / `label` 缺一样宿主都不认，所以建条目时一起写上；
+    // `enabled` 也一样——建出来却停用着，等于用户填了地址又不生效。
     extends: "codex",
     label: "Deck Codex",
+    enabled: true,
     models: [{ id: "gpt-5-codex", label: "GPT-5 Codex", isDefault: true }],
     env: { OPENAI_BASE_URL: "https://api.example.test/v1" },
   });
   assert.deepEqual(paseo.disk().providers.codex, {
     models: [{ id: "gpt-5-codex", label: "GPT-5 Codex", isDefault: true }],
   }, "内建条目一个字都不动");
+});
+
+test("Codex 先存凭证、后存地址：凭证要跟着搬进派生条目，别让它留在没人读的条目上", async () => {
+  const paseo = fakePaseo({ providers: { codex: {} } });
+  const first = await patchProviderConfig(paseo, { provider: "codex", env: { OPENAI_API_KEY: "cred-x" } });
+  assert.equal(first.ok, true);
+  assert.deepEqual(paseo.disk().providers.codex.env, { OPENAI_API_KEY: "cred-x" }, "还没地址时凭证先落在内建条目上");
+
+  const second = await patchProviderConfig(paseo, { provider: "codex", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } });
+  assert.equal(second.ok, true);
+  const derived = paseo.disk().providers["deck-codex"];
+  assert.equal(derived.env.OPENAI_API_KEY, "cred-x", "先前那把凭证要跟过来，否则卡片上「凭据」会显示没配");
+  assert.equal(derived.env.OPENAI_BASE_URL, "https://api.example.test/v1");
+  assert.deepEqual(
+    Object.keys(derived.env).sort(),
+    ["OPENAI_API_KEY", "OPENAI_BASE_URL"],
+    "只带适配器真读的那两个键，别把内建条目上的其它键也抄过来",
+  );
+});
+
+test("Codex 换地址：内建条目上那条旧地址不会被抄进派生条目", async () => {
+  const paseo = fakePaseo({
+    providers: { codex: { env: { OPENAI_BASE_URL: "https://old.example.test/v1", OPENAI_API_KEY: "cred-x", SUB2API_API_KEY: "cred-y" } } },
+  });
+  const result = await patchProviderConfig(paseo, { provider: "codex", env: { OPENAI_BASE_URL: "https://new.example.test/v1" } });
+  assert.equal(result.ok, true);
+  const derived = paseo.disk().providers["deck-codex"];
+  assert.equal(derived.env.OPENAI_BASE_URL, "https://new.example.test/v1", "地址用这次写的");
+  assert.equal(derived.env.OPENAI_API_KEY, "cred-x", "凭证照搬");
+  assert.equal(derived.env.SUB2API_API_KEY, undefined, "别的键名不跟着搬：适配器不读它们，卡片上只会多一行看不懂的");
 });
 
 test("Codex 还没建派生条目：只改模型清单时不建条目，清单落回客户端自己的那一行", async () => {
@@ -418,7 +450,125 @@ test("Codex 有派生残条目（没地址）时改模型：写回内建条目�
   assert.deepEqual(paseo.disk().providers["deck-codex"], { extends: "codex", label: "Deck Codex" }, "残条目一个字不动");
 });
 
-test("Codex 有派生残条目（没继承 codex）时补地址：顺手把它修成可用的形状", async () => {
+test("Codex 站点生效时改模型：同一份清单照写到内建条目，换个窗口看到的模型一样", async () => {
+  // 宿主的模型选择器是按 provider 条目各显示一份的：卡片上「Codex」那行读内建条目。
+  // 只写派生条目，就会出现「这里看得到 gpt-6、换个项目的新窗口就没了」。
+  const paseo = fakePaseo(codexSiteConfig());
+  const result = await patchProviderConfig(paseo, { provider: "codex", models: ["gpt-5-codex", "auto/gpt-6-astra"] });
+  assert.equal(result.ok, true);
+  const expected = [
+    { id: "gpt-5-codex", label: "GPT-5 Codex" },
+    { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" },
+  ];
+  assert.deepEqual(paseo.disk().providers["deck-codex"].models, expected, "真正生效的那条");
+  assert.deepEqual(paseo.disk().providers.codex.models, expected, "选择器里「Codex」那行读的这条也要一致");
+  assert.deepEqual(result.warnings.filter((line) => line.includes("没写进")), []);
+});
+
+test("别家客户端带着 OPENAI_BASE_URL 过来：不顺手替它开开关，也不报 Codex 的失败", async () => {
+  // `addsAddress` 看的是 env 里有没有 `OPENAI_BASE_URL`，但那只对 Codex 有意义：
+  // Claude 带着这个键名过来时，不能把它当成「配了 Codex 站点」。
+  const paseo = fakePaseo({ providers: { claude: { env: { ANTHROPIC_BASE_URL: "https://a.test" } } } });
+  const result = await patchProviderConfig(paseo, { provider: "claude", env: { OPENAI_BASE_URL: "https://x.test" } });
+  assert.equal(result.ok, true);
+  assert.equal(paseo.disk().providers.claude.enabled, undefined, "没有替它拨开关");
+  assert.deepEqual(result.warnings.filter((line) => line.includes("deck-codex")), []);
+});
+
+test("Codex 站点生效时改模型：内建条目用 additionalModels 时照写到它自己那把键上，不删用户自己加的", async () => {
+  // `models` 与 `additionalModels` 语义不同（替换内置 / 追加）：搬到另一把上等于写了个不生效的地方。
+  // `gpt-x` 是用户自己在 Paseo 设置里给「Codex」那行加的，面板上根本看不见，不能顺手删掉。
+  const config = codexSiteConfig();
+  config.providers.codex = { label: "Codex", additionalModels: [{ id: "gpt-x", label: "GPT X" }] };
+  const paseo = fakePaseo(config);
+  const result = await patchProviderConfig(paseo, { provider: "codex", models: ["gpt-5-codex"] });
+  assert.equal(result.ok, true);
+  assert.deepEqual(paseo.disk().providers.codex.additionalModels, [
+    { id: "gpt-x", label: "GPT X" },
+    { id: "gpt-5-codex", label: "GPT-5 Codex" },
+  ]);
+  assert.equal(paseo.disk().providers.codex.models, undefined, "别往另一把键上乱写");
+  assert.deepEqual(paseo.disk().providers["deck-codex"].models, [{ id: "gpt-5-codex", label: "GPT-5 Codex" }]);
+});
+
+test("Codex 站点生效时取消勾选模型：内建那行跟着删，用户自己加的仍保留", async () => {
+  // 面板读的是派生条目：用户在面板里取消的模型（`auto/gpt-6-astra`）是插件自己照写过去的，
+  // 该从内建那行一起消失；`gpt-x` 不在派生条目上，是用户自己在 Paseo 设置里加的，留着。
+  const config = codexSiteConfig();
+  config.providers.codex.models = [
+    { id: "gpt-5-codex", label: "GPT-5 Codex" },
+    { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" },
+    { id: "gpt-x", label: "GPT X" },
+  ];
+  config.providers["deck-codex"].models = [
+    { id: "gpt-5-codex", label: "GPT-5 Codex" },
+    { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" },
+  ];
+  const paseo = fakePaseo(config);
+  const result = await patchProviderConfig(paseo, { provider: "codex", models: ["gpt-5-codex"] });
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    paseo.disk().providers.codex.models.map((item) => item.id),
+    ["gpt-5-codex", "gpt-x"],
+    "取消的模型两行都消失，用户自己加的留着",
+  );
+});
+
+test("Codex 站点生效时改模型：内建条目没写进去时给一句读回警告", async () => {
+  const live = codexSiteConfig();
+  const paseo = {
+    config: {
+      get: async () => ({ config: structuredClone(live) }),
+      // 宿主只收下了派生条目那份，内建条目的写入被丢掉。
+      patch: async (input) => {
+        const next = input.providers?.["deck-codex"]?.models;
+        if (next) live.providers["deck-codex"].models = structuredClone(next);
+        return { ok: true };
+      },
+    },
+  };
+  const result = await patchProviderConfig(paseo, { provider: "codex", models: ["gpt-5-codex", "auto/gpt-6-astra"] });
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.warnings.some((line) => line.includes("没写进 codex 那一条")),
+    `要提示选择器可能还是旧清单，实际警告：${result.warnings.join(" / ")}`,
+  );
+});
+
+test("Codex 保存地址、宿主却没收下派生条目：报失败，不报「保存成功」", async () => {
+  // 宿主收下补丁但没落到派生条目上（比如不认识这个 provider）：写盘说成功、建会话照样被拦，
+  // 这种假成功必须当场说破，否则用户在「保存成功」和「建不了会话」之间来回打转。
+  const paseo = {
+    config: {
+      get: async () => ({ config: { providers: { codex: {} } } }),
+      patch: async () => ({ ok: true }),
+    },
+  };
+  const result = await patchProviderConfig(paseo, { provider: "codex", env: { OPENAI_BASE_URL: "https://api.example.test/v1" } });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "config-failed");
+  assert.match(result.detail, /没把 deck-codex 存成能用的形状/);
+});
+
+test("Codex 清空地址：写进去就算数，不拿「派生条目不可用」报失败", async () => {
+  const paseo = fakePaseo({
+    providers: { "deck-codex": { extends: "codex", label: "Deck Codex", enabled: true, env: { OPENAI_BASE_URL: "https://api.example.test/v1" } } },
+  });
+  const result = await patchProviderConfig(paseo, { provider: "codex", env: { OPENAI_BASE_URL: "" } });
+  assert.equal(result.ok, true, "清空是有意的动作，读回不可用是意料之中");
+  assert.equal(paseo.disk().providers["deck-codex"].env.OPENAI_BASE_URL, "");
+});
+
+test("Codex 显式停用派生条目：别被「存地址就顺手启用」盖掉", async () => {
+  const paseo = fakePaseo({
+    providers: { "deck-codex": { extends: "codex", label: "Deck Codex", enabled: true, env: { OPENAI_BASE_URL: "https://old.example.test/v1" } } },
+  });
+  const result = await patchProviderConfig(paseo, { provider: "codex", enabled: false });
+  assert.equal(result.ok, true);
+  assert.equal(paseo.disk().providers["deck-codex"].enabled, false, "用户明确要关掉它");
+});
+
+test("Codex 有派生残条目（没继承 codex、还停用着）时补地址：顺手把它修成可用的形状", async () => {
   const paseo = fakePaseo({
     providers: {
       codex: { models: [{ id: "gpt-a", label: "GPT A" }] },
@@ -430,7 +580,9 @@ test("Codex 有派生残条目（没继承 codex）时补地址：顺手把它�
   assert.deepEqual(paseo.disk().providers["deck-codex"], {
     extends: "codex",
     label: "Deck Codex",
-    enabled: false,
+    // 用户在这条上存了地址，就是要它生效：残条目的 `enabled: false` 不能跟着留下来，
+    // 否则又是「填了地址却不生效」。调用方明确传 `enabled: false` 时才尊重停用。
+    enabled: true,
     models: [{ id: "gpt-a", label: "GPT A" }],
     env: { OPENAI_BASE_URL: "https://api.example.test/v1" },
   });

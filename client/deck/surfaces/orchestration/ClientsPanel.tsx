@@ -449,49 +449,6 @@ export function ClientsPanel({
             {open ? (
               <View style={{ paddingHorizontal: 14, paddingBottom: 10 }}>
                 {field(
-                  t("orch.field.name"),
-                  editingField === "name" ? (
-                    <>
-                      <TextInput
-                        accessibilityLabel={t("orch.field.name")}
-                        style={styles.input}
-                        value={draft}
-                        onChangeText={setDraft}
-                        placeholder={provider.id}
-                        placeholderTextColor={skin.colors.ink2}
-                        autoCapitalize="none"
-                      />
-                      <PixelButton skin={skin} mini label={t("orch.saveEnv")} disabled={busy || !draft.trim()} onPress={() => saveEdit(provider.id, "name")} />
-                      <PixelButton skin={skin} mini variant="ghost" label={t("orch.cancel")} onPress={cancelEdit} />
-                    </>
-                  ) : (
-                    <>
-                      <Text style={styles.value} numberOfLines={1}>
-                        {provider.label ?? provider.id}
-                      </Text>
-                      <PixelButton
-                        skin={skin}
-                        mini
-                        variant="ghost"
-                        label={t("orch.envEdit")}
-                        disabled={busy}
-                        onPress={() => startEdit(provider.id, "name", provider.label ?? "")}
-                      />
-                    </>
-                  ),
-                )}
-
-                {field(
-                  t("orch.field.id"),
-                  <>
-                    <Text style={styles.mono} selectable>
-                      {provider.id}
-                    </Text>
-                    {provider.extends ? <Text style={styles.dim}>{t("orch.extendsOf", { provider: provider.extends })}</Text> : null}
-                  </>,
-                )}
-
-                {field(
                   t("orch.field.baseUrl"),
                   editingField === `env:${keys.baseUrlKey}` ? (
                     <>
@@ -703,7 +660,12 @@ export function ClientsPanel({
                   style={styles.advancedToggle}
                   accessibilityRole="button"
                   accessibilityState={{ expanded: advanced }}
-                  onPress={() => setAdvancedId(advanced ? null : provider.id)}
+                  onPress={() => {
+                    // 折叠时把「改名」的编辑态一起收掉：输入框随「高级」消失，留着 editingField
+                    // 会让卡片看起来还在编辑一个看不见的字段。
+                    cancelEdit();
+                    setAdvancedId(advanced ? null : provider.id);
+                  }}
                 >
                   <Text style={styles.advancedHead}>
                     {advanced ? "⌄" : "›"} {t("orch.field.advanced")}
@@ -712,6 +674,53 @@ export function ClientsPanel({
 
                 {advanced ? (
                   <View style={styles.advancedBody}>
+                    {/*
+                      id 与「基于谁」是查配置、写路由时才要核对的东西，卡片头上已经印了名字，
+                      这里就不再重复一整行；改名称也从主区挪到这里（改名是低频动作）。
+                    */}
+                    <View style={styles.keyRow}>
+                      <Text style={styles.keyName}>{t("orch.field.id")}</Text>
+                      <Text style={styles.keyValue} selectable numberOfLines={1}>
+                        {provider.id}
+                      </Text>
+                      {provider.extends ? (
+                        <Text style={styles.dim} numberOfLines={1}>
+                          {t("orch.extendsOf", { provider: provider.extends })}
+                        </Text>
+                      ) : null}
+                      <View style={{ flex: 1 }} />
+                      {editingField === "name" ? null : (
+                        <PixelButton
+                          skin={skin}
+                          mini
+                          variant="ghost"
+                          label={t("orch.rename")}
+                          disabled={busy}
+                          onPress={() => startEdit(provider.id, "name", provider.label ?? "")}
+                        />
+                      )}
+                    </View>
+                    {editingField === "name" ? (
+                      <View style={styles.form}>
+                        <TextInput
+                          accessibilityLabel={t("orch.field.name")}
+                          style={styles.input}
+                          value={draft}
+                          onChangeText={setDraft}
+                          placeholder={provider.id}
+                          placeholderTextColor={skin.colors.ink2}
+                          autoCapitalize="none"
+                        />
+                        <PixelButton
+                          skin={skin}
+                          mini
+                          label={t("orch.saveEnv")}
+                          disabled={busy || !draft.trim()}
+                          onPress={() => saveEdit(provider.id, "name")}
+                        />
+                        <PixelButton skin={skin} mini variant="ghost" label={t("orch.cancel")} onPress={cancelEdit} />
+                      </View>
+                    ) : null}
                     <View style={styles.keys}>
                       {otherKeys.length === 0 ? <Text style={styles.dim}>{t("orch.noEnv")}</Text> : null}
                       {otherKeys.map((item) => {
