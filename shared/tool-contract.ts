@@ -12,6 +12,7 @@ import { z } from "zod";
 import { MAX_STAFF_ID_CHARS } from "./staff.ts";
 import { STAFF_REQUEST_TOOL_NAME } from "./staff-request.ts";
 import { REQUIREMENT_DISPATCH_TOOL_NAME } from "./requirement-split.ts";
+import { HANDOFF_TOOL_NAME } from "./handoff-to-dispatcher.ts";
 
 /** DSH 冻结的九个工具装配顺序（帮助文本与注册行都按它渲染）。 */
 export const DECK_TOOL_ORDER: readonly string[] = Object.freeze([
@@ -34,6 +35,7 @@ export const EXTENSION_TOOL_ORDER: readonly string[] = Object.freeze([
   "deck_next_steps",
   "deck_probe",
   "deck_handoff",
+  HANDOFF_TOOL_NAME,
   "deck_dispatch_plan",
   REQUIREMENT_DISPATCH_TOOL_NAME,
   STAFF_REQUEST_TOOL_NAME,
@@ -203,6 +205,7 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
       "Create one issue. kind is required: map / map-ticket / spec / spec-ticket / bug / issue. " +
       "map and spec are top-level containers; map-ticket hangs under a map (parentKey required) and must carry one wayfinder:<kind> label; spec-ticket hangs under a spec (parentKey required). " +
       "originalWords appends the maintainer's verbatim quote to the body; blockedBy writes dependency edges; idempotencyKey makes a retried batch safe. " +
+      "Once a requirement window is bound, only it may file a requirement ticket (kind=issue with the requirement label), and it may not file work tickets. The main and progress windows may not file tickets at all. " +
       "Requires user approval.",
     inputSchema: objectSchema(
       {
@@ -279,7 +282,7 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
 
   deck_map_plan_create: {
     description:
-      "Create a wayfinder map issue with destination, notes, decisions, fog and out-of-scope, plus its first route tickets (each labelled wayfinder:<kind>). Each ticket is created separately: a partial failure is reported per ticket and never rolled back silently. Requires user approval.",
+      "Create a wayfinder map issue with destination, notes, decisions, fog and out-of-scope, plus its first route tickets (each labelled wayfinder:<kind>). Map and route tickets count as work tickets: the main and progress windows are refused, and so is the requirement window (it files requirement tickets only). Each ticket is created separately: a partial failure is reported per ticket and never rolled back silently. Requires user approval.",
     inputSchema: objectSchema(
       {
         title: { type: "string", description: "Map issue title." },
@@ -361,7 +364,8 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
       "Change one issue: comment, labels, assignees, close, title, body, blockedBy, progress section, maintainer-words section; only the fields you pass are touched. " +
       "Passing false (or state:\"open\") reopens the issue. Closing a map or spec requires a comment in the same call and every child ticket must already be closed; a spec with no child tickets is not complete and cannot be closed. If the child list cannot be read in full, the close is refused. " +
       "blockedBy replaces the whole blocker set: this-repository refs go to native dependency edges, cross-repository refs (owner/repo#12 or projectKey#12) into the body's hidden `Blocked by:` section. " +
-      "originalWords is idempotent on the same text + source pair; bodies over 60 KB are refused. Requires user approval.",
+      "originalWords is idempotent on the same text + source pair; bodies over 60 KB are refused. " +
+      "Once a requirement window is bound, only it may patch a requirement ticket, and it may not patch work tickets. Requires user approval.",
     inputSchema: objectSchema(
       {
         key: { type: "string", description: "The issue to change (issue number, #12 accepted)." },
@@ -445,7 +449,8 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
 
   deck_issue_labels: {
     description:
-      "Replace the full label set of an issue (not a merge). Empty array clears all labels. Refuses when the current label set cannot be read in full, because replacing would silently drop the labels we never saw. Requires user approval.",
+      "Replace the full label set of an issue (not a merge). Empty array clears all labels. Refuses when the current label set cannot be read in full, because replacing would silently drop the labels we never saw. " +
+      "Once a requirement window is bound, only it may relabel a requirement ticket, and it may not relabel work tickets. Requires user approval.",
     inputSchema: objectSchema(
       {
         number: { type: "number", description: "Issue number." },
@@ -503,6 +508,37 @@ export const TOOL_SPECS: Readonly<Record<string, ToolSpec>> = Object.freeze({
         difficulty: { type: "string", enum: ["trivial", "normal", "hard", "critical"], description: "Difficulty you were dispatched with, if known." },
       },
       ["summary"],
+    ),
+  },
+
+  [HANDOFF_TOOL_NAME]: {
+    description:
+      "Hand settled work from the main window to the configured dispatch window: the requirement ticket number, a short summary, and the tasks to split. Writes one outbox item under .deck/dispatch-handoffs/pending/ and returns its id — it files no tickets, creates no sessions and never calls gh. Calling it requires a bound dispatcher (otherwise it is rejected); once written, the item survives that window being busy, unbound or replaced, and the relay delivers it to whatever dispatcher is bound when one is free. Only the configured main window may call it; the same content is idempotent (same handoffId, duplicate: true).",
+    inputSchema: objectSchema(
+      {
+        workspaceId: { type: "string", description: "Only needed when several workspaces share one board directory." },
+        requirementKey: { type: "number", description: "Requirement ticket number. Required: without a ticket there is no handoff." },
+        requirementRepoKey: { type: "string", description: "Repository holding the requirement ticket, when it differs from the task's own repo." },
+        summary: { type: "string", description: "What this batch of work solves, in one or two sentences. Required." },
+        tasks: {
+          type: "array",
+          description: "Tasks for the dispatcher to split and dispatch. At least one.",
+          items: objectSchema(
+            {
+              title: { type: "string", description: "Short title; the dispatcher may use it as the ticket title." },
+              prompt: { type: "string", description: "Full instruction for the execution window. Required." },
+              acceptance: { type: "string", description: "How the work is accepted." },
+              staff: { type: "string", description: "Roster card id to assign; omit to let the dispatcher pick by territory." },
+              repoKey: { type: "string", description: "Repository this task lands in; omit in a single-repo workspace." },
+              map: { type: "string", description: "Map this task works for, if any." },
+            },
+            ["prompt"],
+          ),
+        },
+        constraints: { type: "string", description: "Constraints the dispatcher must respect: files not to touch, conventions, deadlines." },
+        lang: { type: "string", enum: ["zh", "en"], description: "Language of the delivered message. Default zh." },
+      },
+      ["requirementKey", "summary", "tasks"],
     ),
   },
 

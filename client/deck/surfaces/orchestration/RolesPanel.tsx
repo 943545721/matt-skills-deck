@@ -30,7 +30,7 @@ import { StopSection, type StaffStopOutcome } from "./StopSection.tsx";
 /**
  * 角色 / 限制 / 地图预算。一屏只放三种东西：字段、列表行、数字。
  *
- * 三个固定窗口（主 / 派单 / 进度）各占一行：标题一行、`客户端/模型 · 状态 · 短 id`
+ * 四个固定窗口（主 / 需求 / 派单 / 进度）各占一行：标题一行、`客户端/模型 · 状态 · 短 id`
  * 一行，1px 线分隔，不套卡片框。窗口由插件建，身份提示词写进会话的 systemPrompt；
  * 「选已有会话」是建不出窗口时的兜底入口，不是主路径。
  *
@@ -41,6 +41,7 @@ import { StopSection, type StaffStopOutcome } from "./StopSection.tsx";
 
 const ROLE_META: Readonly<Record<FixedRole, { label: PanelKey; hint: PanelKey }>> = Object.freeze({
   main: { label: "orch.main", hint: "orch.mainHint" },
+  requirement: { label: "orch.requirement", hint: "orch.requirementHint" },
   dispatcher: { label: "orch.dispatcher", hint: "orch.dispatcherHint" },
   progress: { label: "orch.progress", hint: "orch.progressHint" },
 });

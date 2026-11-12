@@ -1,4 +1,4 @@
-%% matt-skills-deck · 需求 → 地图 → 派单 → 回传
+%% matt-skills-deck · 需求 → 地图 → 交接 → 派单 → 回传
 %% 与 docs/dispatch-flow.html 的六个视图一一对应，改一处就改另一处。
 
 %% === 1 三种票 ===
@@ -17,34 +17,44 @@ flowchart LR
 flowchart TB
     subgraph 人
         A1["选派单窗口"] --> A1R["只写 .deck/orchestration.json<br/>不建会话、不发消息"]
-        A2["建需求票"] --> A2R["一张 requirement 票"]
+        A2["建需求票"] --> A2R["一张 requirement 票<br/>定稿后带 deck:定稿"]
         A3["确认需求 / 建地图"] --> A3R["复制 /wayfinder 提示词，agent 调 deck_map_plan_create"]
+        A4["面板派单台 / 按区派单"] --> A4R["人工派单：不带会话身份<br/>放行 + 一条 warning"]
     end
     subgraph 会话里的 agent
-        B1["deck_dispatch_plan"] --> B1R["providerSpec + prompt + 拒绝清单"]
-        B2["宿主 create_agent"] --> B2R["子会话挂宿主下"]
+        B0["主窗口 deck_handoff_to_dispatcher"] --> B0R["写 .deck/dispatch-handoffs/pending/<br/>不建票、不建会话；relay 送到派单窗口"]
+        B0A["需求窗口 deck_issue_create / deck_issue_patch"] --> B0AR["只建需求票，不建工作票（含地图）<br/>不改文件、不派活<br/>其他会话写需求票、主 / 进度窗口建票被拒<br/>建票 / 显式换正文时正文有「## 影响面」即当场解析，写坏即拒"]
+        B1["派单窗口 deck_dispatch_plan"] --> B1R["入口门：只有绑定的派单窗口能调<br/>providerSpec + prompt + 拒绝清单"]
+        B1R -.->|"票面写坏：bad-impact / missing-impact / …"| BN["条子 → .deck/window-notes/pending/<br/>relay 在下次回合结束按当前绑定递进需求窗口<br/>没绑留着，5 次送不成移 failed/"]
+        B2["宿主 create_agent"] --> B2R["执行窗口挂宿主下<br/>创建门只放派单窗口与执行会话"]
         B3["deck_issue_report"] --> B3R["写本机台账（时间线的会话行）"]
     end
     subgraph 插件钩子
-        C1["agent.turn_ended"] --> C1R["handoff 落盘 + 发给父窗口"]
+        C1["agent.created"] --> C1R["创建门：主 / 需求 / 进度窗口直接开的子会话当场归档并通知"]
+        C2["agent.permission_requested"] --> C2R["执行门：主 / 需求 / 派单 / 进度窗口改文件被拒"]
+        C3["agent.turn_ended"] --> C3R["handoff 落盘 + 发给父窗口 + 抄送进度窗口"]
     end
     A1R --> B1
+    B0R --> B1
     B1R --> B2
 
 %% === 3 端到端 ===
 sequenceDiagram
     participant H as 人
     participant P as 面板
-    participant A as 派单会话 agent
-    participant K as 插件 MCP
-    participant S as 宿主 / 子会话
+    participant M as 主沟通窗口 agent
+    participant A as 派单窗口 agent
+    participant K as 插件（MCP / RPC / relay）
+    participant S as 宿主 / 执行窗口
     H->>P: 1 聊清楚需求与边界
     H->>P: 2 建需求票（六节 + requirement）
-    H->>A: 3 粘贴 /wayfinder 提示词
-    A->>K: 3b deck_map_plan_create → 地图票 + 首批路线票
-    A->>K: 4 deck_dispatch_plan（tasks / map / depth）
+    H->>M: 3 方案定稿，把票号交给主窗口
+    M->>K: 3b deck_handoff_to_dispatcher（票号 + 任务 + 验收）
+    K-->>M: handoffId（同一份内容重复交只算一次）
+    K->>A: 3c relay 投递交接件（忙则排队，送成功才移出 pending）
+    A->>K: 4 deck_dispatch_plan（入口门：只有绑定的派单窗口能调）
     K-->>A: providerSpec + tasks[].prompt + rejected[]
-    A->>S: 5 create_agent（每条 task 一个子会话）
+    A->>S: 5 create_agent（每条 task 一个执行窗口）
     S->>S: 6 按票干活，写 handoff
     S-->>A: turn_ended 回传（同一轮只报一次）
     A->>K: 7 向上汇报 / 收尾
@@ -52,32 +62,49 @@ sequenceDiagram
 
 %% === 4 派单闸门 ===
 flowchart TB
-    IN["tasks[{key, prompt, difficulty, map?}]<br/>+ map + depth + dispatchId"] --> CFG
-    CFG["读 .deck/orchestration.json<br/>roles / routing / profiles<br/>maxDepth · maxChildren · mapBudgets · reportOnFinish"] --> GATE
+    IN["调用者（PASEO_AGENT_ID）+ workspaceId<br/>tasks[{key, prompt, requirementKey, difficulty, map?}]<br/>+ map + depth + dispatchId"] --> CALLER
+    CALLER{"入口门 A：调用者是绑定的派单窗口？"} -->|"否：主窗口"| RA["main-cannot-dispatch<br/>指引改用 deck_handoff_to_dispatcher"]
+    CALLER -->|"否：需求窗口"| RA2["requirement-cannot-dispatch<br/>需求窗口只建票，不派活"]
+    CALLER -->|"否：进度窗口 / 其他会话 / 身份不明"| RB["progress-cannot-dispatch<br/>caller-not-dispatcher · caller-unknown"]
+    CALLER -->|"是（面板人工派单不带身份：放行 + warning）"| CFG
+    CFG["读 .deck/orchestration.json<br/>roles / routing / profiles<br/>maxDepth · maxChildren · mapBudgets · reportOnFinish"] --> TICKET
     CFG -->|"读不出"| F1["settings-unreadable"]
     CFG -->|"文件坏了"| F2["settings-corrupt（不回落默认值）"]
-    GATE{"逐条过闸"} -->|拒| REJ["empty-prompt · duplicate-key · too-many-children<br/>depth-exceeded · map-budget-exhausted · route-unavailable"]
+    TICKET{"票门 E：每条任务挂需求票且已定稿？"} -->|"没票 / 读不出 / 未定稿"| REJ0["no-requirement · requirement-unreadable<br/>requirement-not-finalized"]
+    TICKET -->|"通过"| GATE
+    GATE{"计划闸：逐条过"} -->|拒| REJ["empty-prompt · duplicate-key · too-many-children<br/>depth-exceeded · map-budget-exhausted · route-unavailable<br/>ticket-failed（链条上票建不出来）"]
     GATE -->|放行| OUT["providerSpec + modeId + labels + idempotencyKey<br/>+ prompt（抬头 + 正文），warnings 写借档与预算边界"]
     DEPTH["层数链：主 0 → 子 1 → 孙 2 → 曾孙 3<br/>到上限那层拒绝，不夹到上限硬派"] --- GATE
     SEM["MCP 传调用者自己的层（主 = 0）<br/>RPC 传子会话的层（≥ 1）"] --- DEPTH
 
-%% === 5 回传链 ===
+%% === 5 回传链与窗口硬门 ===
 flowchart LR
-    END["子会话 turn_ended"] --> REP["TurnReporter"]
+    END["执行窗口 turn_ended"] --> REP["TurnReporter"]
     REP -->|"reportOnFinish=false"| SKIP["跳过（记 disabled）"]
-    REP -->|"按 turnId 去重"| PARENT["发给父窗口"]
+    REP -->|"按 turnId 去重<br/>对方在忙就排队，空闲后补送"| PARENT["发给父窗口"]
+    PARENT -->|"成功后抄送<br/>进度窗口≠收件人时才发"| COPY["抄送进度窗口【进度】（摘要）<br/>主窗口不再收常规副本"]
     PARENT -->|"父窗口已归档 / 发送失败"| MAIN["改送主沟通窗口<br/>回执标 rerouted: true"]
+    MAIN -->|"改送成功后同样抄送<br/>进度窗口≠主窗口时才发"| PROG["进度窗口【进度】"]
     MAIN -->|"也失败"| WARN["记 warn，不静默丢"]
     REP -.->|"始终"| FILE[".deck/handoffs/ 落盘"]
+    WAIT["子会话权限确认<br/>只弹在它自己窗口"] -->|"等满 45 秒未 resolved"| NOTICE["给主沟通窗口发【等你确认】"]
+    WAIT -->|"已点掉"| CLEAR["清掉计时器，不发"]
+    CREATE["agent.created<br/>创建门 C"] -->|"父 = 主 / 需求 / 进度窗口"| ARCH["归档新会话 + 通知父窗口"]
+    CREATE -->|"父 = 派单窗口 / 执行会话 / 角色窗口 / 无父会话"| PASS["放行"]
+    PERM["agent.permission_requested<br/>执行门 D"] -->|"主 / 需求 / 派单 / 进度窗口：write · edit · 改文件 shell"| DENY["deny + 说清该谁做"]
+    PERM -->|"读 / 搜 / 跑测试 / MCP 工具 / 执行窗口"| ALLOW["放行"]
+    PERM -->|"gh / glab 改票"| TICKET2["让给票闸（只拒一次）"]
+    CREATE -.->|"配置读不出 / 工作区歧义"| PASSW["放行 + warn"]
+    PERM -.->|"配置读不出 / 工作区歧义"| PASSW
 
-%% === 6 现状缺口 ===
+%% === 6 现状与缺口 ===
 flowchart TB
-    G1["deck.orchestration.dispatch"] --> G1R["已实现、已注册，客户端无调用方"]
-    G2["地图并发预算硬拦（runningByMapOf）"] --> G2R["只活在没人调用的 RPC 里"]
-    G3["MCP deck_dispatch_plan"] --> G3R["只按本批算，数不到宿主已开的，写进 warnings"]
-    G4["面板·编排页"] --> G4R["角色 / 限制 / 预算，没有派单按钮"]
-    G5["地图页 开始/推进（SessionSheet）"] --> G5R["建一个会话 + 填提示词，不是派单"]
-    G5R --- G6["需求票侧没有反向边：只能反查地图正文"]
-    G6 --> G6R["被注释与反查顶替，见 shared/derived.ts"]
-    G7["client/deck/IssueModal.tsx"] --> G7R["全仓库无引用（死代码）"]
-    G1R --- G2R
+    G1["入口门 A · 票门 E · 创建门 C · 执行门 D"] --> G1R["已实现：MCP、RPC 与面板两条派单入口都过同一套闸"]
+    G2["面板·编排页"] --> G2R["派单台按「先建票、再建会话」派单；定稿需求票上另有「按区派单」"]
+    G3["MCP deck_dispatch_plan 的预算"] --> G3R["只按本批算，数不到宿主已开的，写进 warnings"]
+    G4["执行门 D 的 shell 分类"] --> G4R["按命令文本认形状：curl / gh alias / stdin 脚本认不出，是护栏不是沙箱"]
+    G5["交接投递"] --> G5R["至少一次投递，靠 handoffId 去重；连续五次失败移入 failed/"]
+    G6["地图页 开始/推进（SessionSheet）"] --> G6R["建一个会话 + 填提示词，不是派单"]
+    G6R --- G7["需求票侧没有反向边：只能反查地图正文"]
+    G7 --> G7R["被注释与反查顶替，见 shared/derived.ts"]
+    G8["client/deck/IssueModal.tsx"] --> G8R["全仓库无引用（死代码）"]

@@ -16,10 +16,10 @@ const candidateSchema = z.object({
   name: z.string(),
   kind: z.enum(["manager", "worker"]),
   duty: z.string(),
-  /** 相对工作区根的路径前缀；空数组 = 整片。 */
-  paths: z.array(z.string()),
+  /** 相对工作区根的路径前缀；至少一条，`.` 表示整片。空数组是没配，不是整片。 */
+  paths: z.array(z.string()).min(1),
   /** 凭什么这么分：文件或目录。 */
-  evidence: z.array(z.string()),
+  evidence: z.array(z.string()).min(1),
 });
 
 export const STAFF_SCAN_FAILURE_REASONS = [

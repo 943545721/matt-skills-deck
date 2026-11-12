@@ -417,7 +417,7 @@ async function withRoles(t, role) {
   return dir;
 }
 
-test("配了进度窗口时，主投递成功后抄送一份【进度】，只带票号和结论摘要", async (t) => {
+test("配了进度窗口时，主投递成功后只抄送一份【进度】，不再往主窗口抄", async (t) => {
   const dir = await withRoles(t, {
     mainAgentId: "agent-main",
     dispatcherAgentId: "agent-parent",
@@ -432,7 +432,7 @@ test("配了进度窗口时，主投递成功后抄送一份【进度】，只�
   assert.equal(result.ok, true);
   assert.equal(result.reported, true);
   assert.equal(result.parentAgentId, "agent-parent");
-  assert.equal(paseo.sent.length, 2, "主投递一次，进度抄送一次");
+  assert.equal(paseo.sent.length, 2, "主投递一次，进度窗口抄一份；主窗口不再收常规抄送");
   assert.equal(paseo.sent[0].id, "agent-parent");
   assert.equal(paseo.sent[1].id, "agent-progress");
   assert.deepEqual(paseo.sent[1].options, { activeTurnBehavior: "steer" });
@@ -442,6 +442,32 @@ test("配了进度窗口时，主投递成功后抄送一份【进度】，只�
   // 抄送是摘要，不是把整份回传再抄一遍
   assert.doesNotMatch(paseo.sent[1].text, /【子会话回传】/);
   assert.ok(paseo.sent[1].text.length < paseo.sent[0].text.length);
+});
+
+test("主窗口不再收到常规【汇报】：风险与下一步只留在给上一级的回传里", async (t) => {
+  const dir = await withRoles(t, {
+    mainAgentId: "agent-main",
+    dispatcherAgentId: "agent-parent",
+    progressAgentId: "agent-progress",
+  });
+  const written = await writeChildHandoff(dir, {
+    agentId: "agent-child",
+    status: "completed",
+    summary: "三段整理完毕",
+    blocking: ["服务端校验还没落地"],
+    nextSteps: ["等 #46 合并"],
+  });
+  assert.equal(written.ok, true);
+  const paseo = fakePaseo();
+  await new TurnReporter().report(paseo, {
+    agent: agent({ cwd: dir, workspaceId: "ws1" }),
+    outcome: completed,
+    turnId: "turn-1",
+  });
+  assert.equal(paseo.sent.some((item) => item.id === "agent-main"), false, "主窗口不该再收到这条回传的副本");
+  // 风险与下一步并没有丢：它们仍在给上一级的那份回传里。
+  assert.match(paseo.sent[0].text, /服务端校验还没落地/);
+  assert.match(paseo.sent[0].text, /等 #46 合并/);
 });
 
 test("进度窗口就是上一级时不重复发", async (t) => {
@@ -460,7 +486,7 @@ test("进度窗口就是上一级时不重复发", async (t) => {
   assert.equal(paseo.sent[0].id, "agent-parent");
 });
 
-test("进度窗口就是主窗口时照常抄送：主窗口本来就没收到这次回传", async (t) => {
+test("进度窗口就是主窗口时照常抄送：它现在是进度汇总的落点，收【进度】", async (t) => {
   const dir = await withRoles(t, {
     mainAgentId: "agent-progress",
     dispatcherAgentId: "agent-parent",
@@ -474,9 +500,10 @@ test("进度窗口就是主窗口时照常抄送：主窗口本来就没收到�
   });
   assert.equal(result.reported, true);
   assert.deepEqual(paseo.sent.map((item) => item.id), ["agent-parent", "agent-progress"]);
+  assert.match(paseo.sent[1].text, /^【进度】/, "同一个窗口同时是主窗口和进度窗口时，按进度窗口收摘要");
 });
 
-test("抄送进度窗口失败只记日志，主投递仍返回成功", async (t) => {
+test("进度窗口抄送失败不影响主投递，仍返回成功", async (t) => {
   const dir = await withRoles(t, {
     mainAgentId: "agent-main",
     dispatcherAgentId: "agent-parent",
@@ -493,11 +520,10 @@ test("抄送进度窗口失败只记日志，主投递仍返回成功", async (t
   assert.equal(result.ok, true, "旁听窗口发不出去不能把主投递算成失败");
   assert.equal(result.reported, true);
   assert.equal(result.parentAgentId, "agent-parent");
-  assert.equal(paseo.sent.length, 1);
-  assert.equal(paseo.sent[0].id, "agent-parent");
+  assert.deepEqual(paseo.sent.map((item) => item.id), ["agent-parent"]);
 });
 
-test("同一回合重放时，主投递与进度抄送都只发一次", async (t) => {
+test("同一回合重放时，主投递与抄送都只发一次", async (t) => {
   const dir = await withRoles(t, {
     mainAgentId: "agent-main",
     dispatcherAgentId: "agent-parent",

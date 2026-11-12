@@ -17,6 +17,7 @@ import {
   normalizeStaffPath,
   type StaffKind,
 } from "./staff.ts";
+import { pathWithinPrefix } from "./staff-guard.ts";
 
 /** 扫描结果落在 `.deck/` 下的文件名。扫描会话按这个名字写，服务端按这个名字读。 */
 export const STAFF_SCAN_FILE = "staff-scan.json";
@@ -36,7 +37,11 @@ export interface StaffScanCandidate {
   kind: StaffKind;
   /** 职责提示词；空串表示扫描没给出，采纳时不写系统提示。 */
   duty: string;
-  /** 领地路径前缀，已归一、去重、封顶；空数组 = 整片。 */
+  /**
+   * 领地路径前缀，已归一、去重、封顶。空 = 没配，`.` = 整片。
+   *
+   * 必填：空数组不会出现在候选里，没写领地的候选在解析时就被丢掉（见 `parseStaffScan`）。
+   */
   paths: string[];
   /** 凭什么这么分：文件或目录，逐条展示给人看。 */
   evidence: string[];
@@ -66,6 +71,10 @@ function stringList(value: unknown, cap: number, limit: number): string[] {
  *
  * `pathExists` 由调用方注入（服务端查盘、测试给假值）：领地是名册派活的依据，
  * 一个盘上不存在的路径等于把活派进空气里，所以整条丢掉，而不是悄悄留一张空领地卡。
+ *
+ * 领地必填：没写领地（归一后为空）的候选不是「管整片」，是「没说清管哪片」——丢掉。
+ * 整片要显式写成 `.`。同时，候选得拿出至少一条**落在自己领地里**的依据：
+ * 领地是可以被派活的承诺，不是模型顺手编的一片目录。
  */
 export function parseStaffScan(
   raw: unknown,
@@ -83,19 +92,22 @@ export function parseStaffScan(
   const candidates: StaffScanCandidate[] = [];
   const seen = new Set<string>();
   let dropped = 0;
+  /** 丢一条候选并说明原因：条数进最后的汇总，不静默。 */
+  const drop = (message: string): void => {
+    dropped += 1;
+    warnings.push(message);
+  };
 
   record.candidates.forEach((item, index) => {
     const at = `第 ${index + 1} 条候选`;
     if (!item || typeof item !== "object") {
-      dropped += 1;
-      warnings.push(`${at}不是对象，已丢弃`);
+      drop(`${at}不是对象，已丢弃`);
       return;
     }
     const card = item as Record<string, unknown>;
     const name = text(card.name).slice(0, MAX_STAFF_NAME_CHARS);
     if (!name) {
-      dropped += 1;
-      warnings.push(`${at}没有名字，已丢弃（没名字的卡在群里点不到）`);
+      drop(`${at}没有名字，已丢弃（没名字的卡在群里点不到）`);
       return;
     }
 
@@ -114,14 +126,16 @@ export function parseStaffScan(
       if (paths.length >= MAX_STAFF_PATHS) break;
     }
     if (escapes) {
-      dropped += 1;
-      warnings.push(`「${name}」的领地指到了工作区外面（含 ..），整条丢弃`);
+      drop(`「${name}」的领地指到了工作区外面（含 ..），整条丢弃`);
+      return;
+    }
+    if (!paths.length) {
+      drop(`「${name}」没有说管哪片（领地是派活的依据），整条丢弃`);
       return;
     }
     const missing = paths.filter((one) => !pathExists(one));
     if (missing.length) {
-      dropped += 1;
-      warnings.push(
+      drop(
         `「${name}」声称的领地 ${missing.join("、")} 在工作区里不存在，整条丢弃（领地是派活的依据，不能是编的）`,
       );
       return;
@@ -129,12 +143,24 @@ export function parseStaffScan(
 
     const duty = text(card.duty).slice(0, MAX_STAFF_DUTY_CHARS);
     const evidence = stringList(card.evidence, MAX_EVIDENCE, MAX_EVIDENCE_CHARS);
+    if (!evidence.length) {
+      drop(`「${name}」没给出任何依据，说不清凭什么管这片，整条丢弃`);
+      return;
+    }
+    // 领地覆盖用归属算法同一把尺子（`pathWithinPrefix`），不另写一套比较：
+    // `.` 归一成空前缀，什么都算在里面；`web/` 不会吞掉 `web-admin/`。
+    if (!evidence.some((one) => paths.some((prefix) => pathWithinPrefix(one, prefix)))) {
+      drop(
+        `「${name}」的依据 ${evidence.join("、")} 都不在它说的领地 ${paths.join("、")} 里，整条丢弃（领地不是编的）`,
+      );
+      return;
+    }
     // 身份只认这两个词；不认识就按员工——与名册缺省一致，不会凭空多出一个经理。
     const kind: StaffKind = text(card.kind) === "manager" ? "manager" : "worker";
 
     const key = `${name}\u0000${paths.join(",")}`;
     if (seen.has(key)) {
-      warnings.push(`「${name}」（${paths.join("、") || "整片"}）重复出现，已合并成一条`);
+      warnings.push(`「${name}」（${paths.join("、")}）重复出现，已合并成一条`);
       return;
     }
     seen.add(key);

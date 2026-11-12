@@ -92,8 +92,8 @@ function fakePaseo({ id = "agent-new", snapshots = [], createError, archiveError
 
 const contextOf = (paseo) => ({ paseo });
 
-test("窗口契约：role 只认 main / dispatcher / progress", () => {
-  for (const role of ["main", "dispatcher", "progress"]) {
+test("窗口契约：role 只认 main / requirement / dispatcher / progress", () => {
+  for (const role of ["main", "requirement", "dispatcher", "progress"]) {
     const parsed = orchestrationWindowRpc.input.safeParse({ workspaceDir: "/repo", workspaceId: WS, role });
     assert.equal(parsed.success, true, `${role} 应该被接受`);
   }

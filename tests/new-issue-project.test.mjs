@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { after, test } from "node:test";
 import { fakeGh } from "./helpers/fake-gh.mjs";
 import { findTool } from "../server/mcp/tools.ts";
-import { createIssueHandler } from "../server/rpc/issues.ts";
+import { createIssueHandler, setIssueLabelsHandler } from "../server/rpc/issues.ts";
 import { projectForRepo, resolveIssueProjectScope } from "../server/mcp/project-scope.ts";
 
 /**
@@ -334,4 +334,65 @@ test("面板建票：没有 v2 清单时传 project 要明说按不了，不能�
   const plain = await createIssueHandler({ workspaceDir: ws, title: "老样子", labels: ["bug"] });
   assert.equal(plain.ok, true);
   assert.deepEqual(plain.labels, ["bug"]);
+});
+
+test("面板建票：正文里的影响面表写坏 → 拒绝，不建这张票", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace();
+  // 面板允许直接粘正文，写坏的表不该等到定稿按钮或派单窗口才发现。
+  const refused = await createIssueHandler({
+    workspaceDir: ws,
+    title: "需求：表头写坏",
+    body: "## 影响面\n| 区 | 依据 | 结论 | 核的人 |\n|---|---|---|---|",
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, "invalid");
+  assert.match(refused.detail, /区 \/ 仓库/);
+
+  // 规则没写错的时候照建：这张闸不该挡住正常正文。
+  const created = await createIssueHandler({
+    workspaceDir: ws,
+    title: "需求：表头写对",
+    body: "## 影响面\n| 区 / 仓库 | 依据 | 结论 | 核的人 |\n|---|---|---|---|\n| 当前工作区 | 需求票本身 | 要动 | 单区，免核 |",
+  });
+  assert.equal(created.ok, true);
+});
+
+/* ----------------------------------------------------- 定稿标签（服务端复核） */
+
+test("面板补定稿标签：正文这刻不合规就不给打，不拿按钮那一刻的缓存说了算", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace();
+  const created = await createIssueHandler({
+    workspaceDir: ws,
+    title: "需求：结论写歪了",
+    labels: ["requirement"],
+    body: "## 影响面\n| 区 / 仓库 | 依据 | 结论 | 核的人 |\n|---|---|---|---|\n| 当前工作区 | 需求票本身 | 动一下 | 单区，免核 |",
+  });
+  assert.equal(created.ok, true);
+
+  // 按钮与这次调用之间正文可能变了 / 缓存可能旧：服务端按现在的正文重算一遍。
+  const refused = await setIssueLabelsHandler({
+    workspaceDir: ws,
+    number: created.number,
+    labels: ["requirement", "deck:定稿"],
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.reason, "invalid");
+  assert.match(refused.detail, /结论/);
+  assert.match(refused.detail, /没定稿/);
+  assert.equal((await deckIssueFile(ws, created.number)).includes("deck:定稿"), false);
+
+  // 正文改对了就放行：这道复核只挡不合规的正文，不挡正常定稿。
+  const fixed = await createIssueHandler({
+    workspaceDir: ws,
+    title: "需求：结论写对了",
+    labels: ["requirement"],
+    body: "## 影响面\n| 区 / 仓库 | 依据 | 结论 | 核的人 |\n|---|---|---|---|\n| 当前工作区 | 需求票本身 | 要动 | 单区，免核 |",
+  });
+  assert.equal(fixed.ok, true);
+  const accepted = await setIssueLabelsHandler({
+    workspaceDir: ws,
+    number: fixed.number,
+    labels: ["requirement", "deck:定稿"],
+  });
+  assert.equal(accepted.ok, true);
 });

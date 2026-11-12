@@ -117,7 +117,7 @@ test("刷新 handler：工作区透传给宿主，刷新后的模型清单透传
     { workspaceDir: "/tmp/ws" },
     refreshContext(
       [
-        { provider: "claude", status: "ready", models: [{ id: "m1" }, { id: "m2" }] },
+        { provider: "claude", status: "ready", models: [{ id: "m1", contextWindowMaxTokens: 96000 }, { id: "m2" }] },
         { provider: "codex", status: "ready", models: [{ id: "x" }] },
       ],
       calls,
@@ -126,7 +126,7 @@ test("刷新 handler：工作区透传给宿主，刷新后的模型清单透传
 
   assert.equal(result.ok, true);
   assert.deepEqual(result.providers, [
-    { id: "claude", models: ["m1", "m2"] },
+    { id: "claude", models: ["m1", "m2"], modelCapabilities: [{ id: "m1", contextWindowMaxTokens: 96000 }] },
     { id: "codex", models: ["x"] },
   ]);
   assert.deepEqual(calls, [["refresh", { cwd: "/tmp/ws" }], ["snapshot", { cwd: "/tmp/ws" }]]);

@@ -27,6 +27,11 @@ export interface ProviderConfigView {
   additionalModels?: Array<string | ProviderModelItemView>;
   /** 替换内置列表：有这把键就说明这个客户端不用追加模式。 */
   models?: Array<string | ProviderModelItemView>;
+  /**
+   * 替换启动命令（`argv[0]` 是二进制，其余是参数）。插件只往 Codex 这一条里补
+   * `-c model_catalog_json=…`，用户原有的可执行文件与参数保留。
+   */
+  command?: string[];
 }
 
 /** 只看 providers 那一块时需要的形状：宿主的线上视图在根级，磁盘形状在 `agents.providers`。 */

@@ -17,6 +17,7 @@ import {
   clientProfileSchema,
   clientTargetSchema,
   difficultySchema,
+  identityGapSchema,
   orchestrationSettingsSchema,
   providerStateRowSchema,
   routeResolutionSchema,
@@ -44,6 +45,7 @@ export type SiteRow = z.infer<typeof siteRowSchema>;
 export type ThinkingChoice = z.infer<typeof thinkingOptionSchema>;
 export type AgentRow = z.infer<typeof agentRowSchema>;
 export type TreeNode = z.infer<typeof treeNodeSchema>;
+export type IdentityGap = z.infer<typeof identityGapSchema>;
 export type RouteResolution = z.infer<typeof routeResolutionSchema>;
 
 /** 一档难度的路由现状：配了什么、解析出什么、是不是借来的。 */
@@ -210,6 +212,7 @@ export type LimitsPatch = {
 /** 一行的角色槽位补丁：`undefined` 不动，`null` 清掉。 */
 export type RolesPatch = {
   mainAgentId?: string | null;
+  requirementAgentId?: string | null;
   dispatcherAgentId?: string | null;
   progressAgentId?: string | null;
   /**

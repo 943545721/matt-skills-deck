@@ -17,6 +17,8 @@ export interface ProviderSnapshotEntry {
   error?: string;
   models?: Array<{
     id?: string;
+    contextWindowMaxTokens?: number;
+    label?: string;
     thinkingOptions?: unknown;
     defaultThinkingOptionId?: unknown;
   }>;

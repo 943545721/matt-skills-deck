@@ -15,6 +15,7 @@
  * `false` 时直接铺。两种取值下算出来的票面与批次完全相同，区别只在 `run` 是否动手。
  */
 
+import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import {
   IMPACT_HEADING,
@@ -42,7 +43,7 @@ import {
   type DispatchTask,
   type OrchestrationSettings,
 } from "../shared/orchestration.ts";
-import { rosterOf, type StaffCard } from "../shared/staff.ts";
+import { rosterOf, staffWithoutTerritory, type StaffCard } from "../shared/staff.ts";
 import { guardCreateTicket } from "../shared/split-guard.ts";
 import type { ProviderConfigSource } from "./provider-entry.ts";
 import { requirementLabelsOf } from "./requirement-read.ts";
@@ -120,7 +121,9 @@ export type RequirementDispatchRejectReason =
   | "no-workspace"
   | "settings-unreadable"
   | "settings-corrupt"
-  | "no-dispatcher";
+  | "no-dispatcher"
+  /** 名册里有卡没写领地：整批拒绝，先补齐再派。 */
+  | "staff-territory-missing";
 
 export type RequirementDispatchPlan =
   | {
@@ -380,13 +383,21 @@ export async function requirementWorkspacesOf(input: {
     // 整张需求退化成只在当前区铺票。目录拿得到就顺手把仓库键并进别名。
     const dir = text(input.workspaceDirs?.get(id));
     const repos = dir ? (await writableRepoKeys(dir)).keys : [];
-    const aliases = [id, ...(input.workspaceAliases?.get(id) ?? []), ...repos]
+    // 仓库键带 owner 前缀（`943545721/kxhyapp.com-saas`），影响面却常写成工作区相对的
+    // 仓库名那一段（`kxhyapp.com-saas/src/...`）：把末段也并进别名，按路径首段对得上。
+    const repoNames = repos.map((repo) => {
+      const parts = repo.split("/").filter(Boolean);
+      return parts.length > 1 ? parts[parts.length - 1] ?? repo : repo;
+    });
+    const aliases = [id, ...(input.workspaceAliases?.get(id) ?? []), ...repos, ...repoNames]
       .map((alias) => text(alias).toLowerCase())
       .filter(Boolean);
-    const hit = areas.find((area) => aliases.some((alias) => sameArea(area, alias)));
-    if (hit) {
-      matchedName.set(id, hit);
-      matchedAreas.add(hit);
+    // 一个工作区常会对应多行影响面（同一仓库的多个区）：命中要全部记下，
+    // 只记第一条会把其余行误判成「对不上工作区」，进而整张跨区需求被拒。
+    const hits = areas.filter((area) => aliases.some((alias) => sameArea(area, alias)));
+    if (hits.length) {
+      matchedName.set(id, hits[0] ?? id);
+      for (const hit of hits) matchedAreas.add(hit);
     }
   }
   const named = ids.filter((id) => matchedName.has(id));
@@ -539,6 +550,51 @@ function planBatchesOf(input: {
   return { ok: true, batches };
 }
 
+/**
+ * 派单前的领地闸：名册里只要有一张卡没写领地，整批拒绝。
+ *
+ * 判据与岗位页横幅共用 `staffWithoutTerritory`。这里不改归属算法：空的 `paths`
+ * 在归属里仍按「整片」算（`.` 与它等价，规格写明的决策），但派单不允许把「没写」
+ * 当成「管全部」——先补齐再派，这是产品要的强制重组。
+ *
+ * 放在拆票之后：需求没定稿、影响面写坏这类更前面的问题先报；拆票能过之后，
+ * 再看名册能不能真的把活派出去。
+ */
+function missingTerritoryFailure(
+  resolved: readonly ResolvedWorkspace[],
+): RequirementDispatchFailure | null {
+  const missing: Array<{ readonly card: StaffCard; readonly workspace: string }> = [];
+  // 名册属于**目录**，不属于 workspaceId：同一个目录在宿主里会攒出好几个 id
+  // （见 `rosterOf` 的注释）。按目录去重，同一张卡才不会换来一个 id 就被数成两张。
+  // 反过来不能按裸 id 去重：不同项目完全可能都有 `frontend`，那样后读到的会盖掉
+  // 前一张——前一张缺领地、后一张写了 `.`，闸就悄悄放行了。
+  const seenDirs = new Set<string>();
+  // 多工作区时在提示里带上工作区，否则同名同 id 的两张卡分不清该补哪一张。
+  const withWorkspace = resolved.length > 1;
+  for (const workspace of resolved) {
+    const dir = path.resolve(workspace.input.workspaceDir);
+    if (seenDirs.has(dir)) continue;
+    seenDirs.add(dir);
+    const label = workspace.split.name?.trim() || workspace.split.workspaceId;
+    for (const card of staffWithoutTerritory(workspace.split.roster)) {
+      missing.push({ card, workspace: label });
+    }
+  }
+  if (!missing.length) return null;
+  const names = missing
+    .map(({ card, workspace }) =>
+      withWorkspace ? `「${card.name}」（${card.id}，${workspace}）` : `「${card.name}」（${card.id}）`,
+    )
+    .join("、");
+  return {
+    ok: false,
+    reason: "staff-territory-missing",
+    detail:
+      `有 ${missing.length} 张卡缺领地：${names}。补齐前不能派单：` +
+      "每张卡至少写一条工作区里存在的路径，或填 . 表示整片。",
+  };
+}
+
 /** 纯计划：读设置、拆票、把每区票变成该区自己的派单任务；不写票、不开会话。 */
 export async function planRequirementDispatch(input: RequirementDispatchInput): Promise<RequirementDispatchPlan> {
   const number = input.requirement.number;
@@ -562,6 +618,10 @@ export async function planRequirementDispatch(input: RequirementDispatchInput): 
     confirmRequirementSplit: confirmationOf(input, resolved.resolved),
   });
   if (!split.ok) return split;
+
+  // 拆票过了才判名册：缺领地的卡会让整批停下来，先报根因，不再往下算派单计划。
+  const territory = missingTerritoryFailure(resolved.resolved);
+  if (territory) return territory;
 
   const warnings: string[] = [];
   const planned = planBatchesOf({
@@ -682,6 +742,7 @@ async function dispatchBatchTasks(
   workspaceDir: string,
   batch: RequirementDispatchBatchPlan,
   tasks: readonly DispatchTask[],
+  requirementLabels: readonly string[],
   lang: "zh" | "en" | undefined,
 ) {
   if (!tasks.length) return null;
@@ -700,6 +761,8 @@ async function dispatchBatchTasks(
       ...(task.requirementKey ? { requirementKey: task.requirementKey } : {}),
       ...(task.requirementRepoKey ? { requirementRepoKey: task.requirementRepoKey } : {}),
       ...(typeof task.requirementBody === "string" ? { requirementBody: task.requirementBody } : {}),
+      // 需求刚在本进程里读过并核过定稿：把标签一起带下去，执行层的票门不再重读。
+      requirementLabels,
     })),
     depth: 1,
     dispatchId: batch.dispatchId,
@@ -721,7 +784,14 @@ async function runOneBatch(input: {
     number: input.number,
     requirementLabels: input.requirementLabels,
   });
-  const dispatched = await dispatchBatchTasks(input.paseo, workspace.workspaceDir, batch, dispatchable, input.lang);
+  const dispatched = await dispatchBatchTasks(
+    input.paseo,
+    workspace.workspaceDir,
+    batch,
+    dispatchable,
+    input.requirementLabels,
+    input.lang,
+  );
   const base = {
     workspaceId: batch.workspaceId,
     workspaceName: batch.workspaceName,

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { patchProviderConfig, saveProfile } from "../server/orchestration.ts";
 import { routeCodexSiteProvider } from "../server/hooks.ts";
@@ -148,6 +151,96 @@ test("模型清单：替换模式下清空要拒绝，否则这个客户端一�
   assert.equal(result.ok, false);
   assert.equal(result.reason, "invalid");
   assert.equal(paseo.patches.length, 0);
+});
+
+test("Claude 保存模型：当前模型的接口窗口写进 env", async () => {
+  const config = baseConfig();
+  config.providers.claude.env.ANTHROPIC_MODEL = "current";
+  const paseo = fakePaseo(config);
+  const result = await patchProviderConfig(paseo, {
+    provider: "claude",
+    models: ["small", "current"],
+    modelDefinitions: [
+      { id: "small", label: "Small", contextWindowMaxTokens: 64000 },
+      { id: "current", label: "Current", contextWindowMaxTokens: 96000 },
+    ],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(paseo.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "96000");
+  assert.ok(result.applied.includes("env.CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
+  assert.equal(paseo.disk().providers.claude.env.ANTHROPIC_API_KEY, "sk-ant-existing-key-9999");
+  assert.deepEqual(paseo.patches[0].providers.claude.env, {
+    ANTHROPIC_API_KEY: "sk-ant-existing-key-9999",
+    EXISTING_FLAG: "1",
+    ANTHROPIC_MODEL: "current",
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS: "96000",
+  }, "env 落盘整块替换，实际提交的补丁必须带齐原键");
+  assert.equal(result.warnings.some((line) => line.includes("CLAUDE_CODE_MAX_CONTEXT_TOKENS") && line.includes("已有的")), false, "新同步的键不能算成用户原有的键");
+  assert.equal(result.warnings.some((line) => line.includes("CLAUDE_CODE_MAX_CONTEXT_TOKENS") && line.includes("读回不一致")), false);
+});
+
+test("Claude 保存模型：宿主没存下同步的窗口时读回要告警", async () => {
+  const config = baseConfig();
+  const paseo = {
+    config: {
+      get: async () => ({ config: structuredClone(config) }),
+      patch: async () => ({ ok: true }),
+    },
+  };
+  const result = await patchProviderConfig(paseo, {
+    provider: "claude",
+    models: ["current"],
+    modelDefinitions: [{ id: "current", label: "Current", contextWindowMaxTokens: 96000 }],
+  });
+  assert.equal(result.ok, true);
+  assert.ok(result.warnings.some((line) => line.includes("CLAUDE_CODE_MAX_CONTEXT_TOKENS") && line.includes("读回不一致")));
+});
+
+test("Claude 保存模型：当前模型没窗口时取最小值；没有窗口时保留用户写的 env", async () => {
+  const config = baseConfig();
+  config.providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = "user-written";
+  const paseo = fakePaseo(config);
+  await patchProviderConfig(paseo, {
+    provider: "claude",
+    models: ["large", "small"],
+    modelDefinitions: [
+      { id: "large", label: "Large", contextWindowMaxTokens: 256000 },
+      { id: "small", label: "Small", contextWindowMaxTokens: 32000 },
+    ],
+  });
+  assert.equal(paseo.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "32000");
+
+  await patchProviderConfig(paseo, { provider: "claude", models: ["no-window"], modelDefinitions: [{ id: "no-window", label: "No window" }] });
+  assert.equal(paseo.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "32000", "没窗口不能删除旧值");
+
+  const manual = fakePaseo(baseConfig());
+  await patchProviderConfig(manual, {
+    provider: "claude",
+    models: ["no-window"],
+    modelDefinitions: [{ id: "no-window", label: "No window" }],
+  });
+  assert.equal(manual.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined, "没窗口不能新增");
+});
+
+test("Claude 保存注入：只换 ANTHROPIC_MODEL 也同步对应窗口", async () => {
+  const config = baseConfig();
+  config.providers.claude.env.ANTHROPIC_MODEL = "large";
+  config.providers.claude.additionalModels = [
+    { id: "large", label: "Large", contextWindowMaxTokens: 256000 },
+    { id: "small", label: "Small", contextWindowMaxTokens: 48000 },
+  ];
+  const paseo = fakePaseo(config);
+  const result = await patchProviderConfig(paseo, { provider: "claude", env: { ANTHROPIC_MODEL: "small" } });
+  assert.equal(result.ok, true);
+  assert.equal(paseo.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "48000");
+});
+
+test("Claude 保存注入：没有窗口的模型不新增 env", async () => {
+  const paseo = fakePaseo(baseConfig());
+  const result = await patchProviderConfig(paseo, { provider: "claude", env: { ANTHROPIC_MODEL: "sonnet-x" } });
+  assert.equal(result.ok, true);
+  assert.equal(paseo.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
+  assert.equal(result.applied.includes("env.CLAUDE_CODE_MAX_CONTEXT_TOKENS"), false);
 });
 
 test("写入口：插件不支持的客户端一律拒绝，不落一份没人读的配置", async () => {
@@ -586,4 +679,448 @@ test("Codex 有派生残条目（没继承 codex、还停用着）时补地址�
     models: [{ id: "gpt-a", label: "GPT A" }],
     env: { OPENAI_BASE_URL: "https://api.example.test/v1" },
   });
+});
+
+/* ------------------------------------------------ 模型窗口 → Codex 模型目录 */
+
+/** 目录读写的假实现：只记下「写了什么、写到哪」，不碰真实 codex 与文件系统。 */
+function fakeCatalogDeps() {
+  const written = [];
+  return {
+    written,
+    deps: {
+      readBundled: async () => ({
+        models: [
+          {
+            slug: "gpt-6-astra",
+            display_name: "GPT-6-Astra",
+            context_window: 272000,
+            max_context_window: 872000,
+            effective_context_window_percent: 95,
+            base_instructions: "你是编码 agent",
+          },
+        ],
+      }),
+      writeFile: async (target, content) => {
+        written.push({ target, content });
+      },
+      catalogPath: () => "/tmp/codex-home/deck-model-catalog.json",
+    },
+  };
+}
+
+test("Codex 保存模型：接口报的窗口写进模型目录，并把目录指给派生条目", async () => {
+  const paseo = fakePaseo(codexSiteConfig());
+  const { written, deps } = fakeCatalogDeps();
+  const result = await patchProviderConfig(
+    paseo,
+    {
+      provider: "codex",
+      models: ["group/site8083"],
+      modelDefinitions: [{ id: "group/site8083", label: "codex-gpt模型", contextWindowMaxTokens: 128000 }],
+    },
+    deps,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(written.length, 1, "接口报过窗口，就该写一次目录文件");
+  const entry = JSON.parse(written[0].content).models.find((item) => item.slug === "group/site8083");
+  assert.equal(entry.context_window, 128000, "会话的窗口要按接口走，不是 Codex 的默认 258k");
+  // 宿主对 Codex 的 `options` 是 strict 校验（多一把键就抛错、会话建不起来），
+  // 所以目录只能走启动命令：把 `-c model_catalog_json=…` 接在派生条目的 command 上。
+  assert.deepEqual(
+    paseo.disk().providers["deck-codex"].command,
+    ["codex", "-c", 'model_catalog_json="/tmp/codex-home/deck-model-catalog.json"'],
+    "目录路径要落到真正生效的派生条目的启动命令上",
+  );
+  assert.ok(result.applied.includes("command"));
+});
+
+test("Codex 保存模型：接口没报窗口时不写目录、也不动启动命令（不指一个不存在的文件）", async () => {
+  const paseo = fakePaseo(codexSiteConfig());
+  const { written, deps } = fakeCatalogDeps();
+  const result = await patchProviderConfig(
+    paseo,
+    { provider: "codex", models: ["gpt-5-codex"] },
+    deps,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(written.length, 0);
+  assert.equal(paseo.disk().providers["deck-codex"].command, undefined);
+  assert.deepEqual(result.warnings.filter((line) => line.includes("模型目录")), []);
+});
+
+test("Codex 保存模型：目录没写成只告警，不把整笔保存判失败", async () => {
+  const paseo = fakePaseo(codexSiteConfig());
+  const result = await patchProviderConfig(
+    paseo,
+    {
+      provider: "codex",
+      models: ["group/site8083"],
+      modelDefinitions: [{ id: "group/site8083", label: "组", contextWindowMaxTokens: 128000 }],
+    },
+    {
+      readBundled: async () => {
+        throw new Error("spawn codex ENOENT");
+      },
+    },
+  );
+  assert.equal(result.ok, true, "模型清单已经存好了，目录写不进不能整笔回滚");
+  assert.equal(paseo.disk().providers["deck-codex"].command, undefined);
+  assert.ok(
+    result.warnings.some((line) => line.includes("Codex 模型目录没写成")),
+    "要让用户知道这批模型仍然按默认窗口跑",
+  );
+});
+
+test("Codex 保存模型：重复保存不会把 `-c` 越叠越多，用户原来的命令前缀保住", async () => {
+  const base = codexSiteConfig();
+  base.providers["deck-codex"].command = ["/usr/local/bin/codex", "--profile", "site"];
+  const paseo = fakePaseo(base);
+  const { deps } = fakeCatalogDeps();
+  const save = () =>
+    patchProviderConfig(
+      paseo,
+      {
+        provider: "codex",
+        models: ["group/site8083"],
+        modelDefinitions: [{ id: "group/site8083", label: "组", contextWindowMaxTokens: 128000 }],
+      },
+      deps,
+    );
+  await save();
+  await save();
+  const command = paseo.disk().providers["deck-codex"].command;
+  assert.deepEqual(command, [
+    "/usr/local/bin/codex",
+    "--profile",
+    "site",
+    "-c",
+    'model_catalog_json="/tmp/codex-home/deck-model-catalog.json"',
+  ]);
+});
+
+test("Codex 保存模型：地址还没配时，明确告诉用户窗口暂时用不上", async () => {
+  const paseo = fakePaseo({ providers: { codex: { models: [{ id: "gpt-5-codex", label: "GPT-5 Codex" }] } } });
+  const { deps } = fakeCatalogDeps();
+  const result = await patchProviderConfig(
+    paseo,
+    {
+      provider: "codex",
+      models: ["group/site8083"],
+      modelDefinitions: [{ id: "group/site8083", label: "组", contextWindowMaxTokens: 128000 }],
+    },
+    deps,
+  );
+  assert.equal(result.ok, true);
+  assert.ok(
+    result.warnings.some((line) => line.includes("还没配接入地址")),
+    "没地址时清单落在内建那一行，得说明窗口暂时用不上",
+  );
+});
+
+/* ------------------------- 宿主裁掉窗口之后：从工作区缓存补回来 */
+
+async function windowWorkspace(t) {
+  const dir = await mkdtemp(join(tmpdir(), "deck-window-write-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, ".deck"), { recursive: true });
+  return dir;
+}
+
+async function writeWindowCache(dir, provider, baseUrl, models) {
+  await writeFile(
+    join(dir, ".deck", "model-windows.json"),
+    JSON.stringify({ version: 1, providers: { [provider]: { baseUrl, models } } }),
+    "utf8",
+  );
+}
+
+test("Codex 保存模型：宿主配置里没有窗口时，用工作区缓存重建目录（含原生模型）", async (t) => {
+  const dir = await windowWorkspace(t);
+  await writeWindowCache(dir, "codex", "https://api.example.test/v1", [
+    { id: "group/site8083", contextWindowMaxTokens: 128000 },
+    { id: "auto/gpt-6-astra", contextWindowMaxTokens: 128000 },
+  ]);
+  const paseo = fakePaseo(codexSiteConfig());
+  const { written, deps } = fakeCatalogDeps();
+  // 模拟「宿主保存过一次、窗口已被裁掉」：这次提交的模型定义只有 id / label。
+  const result = await patchProviderConfig(
+    paseo,
+    {
+      provider: "codex",
+      workspaceDir: dir,
+      models: ["group/site8083", "auto/gpt-6-astra"],
+      modelDefinitions: [
+        { id: "group/site8083", label: "codex-gpt模型" },
+        { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" },
+      ],
+    },
+    deps,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(written.length, 1, "缓存里有窗口，就该写目录文件");
+  const models = JSON.parse(written[0].content).models;
+  assert.equal(models.find((item) => item.slug === "group/site8083")?.context_window, 128000);
+  assert.equal(models.find((item) => item.slug === "auto/gpt-6-astra")?.context_window, 128000);
+  assert.equal(
+    models.find((item) => item.slug === "gpt-6-astra")?.context_window,
+    272000,
+    "Codex 原生模型照旧按它自己的窗口留在目录里",
+  );
+});
+
+test("Codex 保存模型：缓存地址与当前接口不一致时不套旧窗口、不写目录", async (t) => {
+  const dir = await windowWorkspace(t);
+  await writeWindowCache(dir, "codex", "https://old.example.test/v1", [
+    { id: "group/site8083", contextWindowMaxTokens: 128000 },
+  ]);
+  const paseo = fakePaseo(codexSiteConfig());
+  const { written, deps } = fakeCatalogDeps();
+  const result = await patchProviderConfig(
+    paseo,
+    {
+      provider: "codex",
+      workspaceDir: dir,
+      models: ["group/site8083"],
+      modelDefinitions: [{ id: "group/site8083", label: "codex-gpt模型" }],
+    },
+    deps,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(written.length, 0, "换了接口就不能拿旧接口的上限去压缩");
+  assert.equal(paseo.disk().providers["deck-codex"].command, undefined);
+});
+
+test("Codex 换接口：新地址没有窗口时摘掉旧目录，不让会话继续按旧上限压缩", async (t) => {
+  const dir = await windowWorkspace(t);
+  const config = codexSiteConfig();
+  config.providers["deck-codex"].command = ["codex", "-c", 'model_catalog_json="/old-home/deck-model-catalog.json"'];
+  const paseo = fakePaseo(config);
+  const { written, deps } = fakeCatalogDeps();
+  const result = await patchProviderConfig(
+    paseo,
+    {
+      provider: "codex",
+      workspaceDir: dir,
+      env: { OPENAI_BASE_URL: "https://new.example.test/v1" },
+    },
+    deps,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(written.length, 0, "没有窗口就不写新目录");
+  assert.deepEqual(paseo.disk().providers["deck-codex"].command, ["codex"], "旧目录参数要摘掉");
+  assert.ok(
+    result.warnings.some((line) => line.includes("去掉上一接口的模型目录")),
+    "摘掉旧目录要说明原因",
+  );
+});
+
+test("Codex 换接口：目录这次没写成，旧目录照样要摘掉", async (t) => {
+  // 只在「新地址没窗口」时摘，等于承认「写失败」时旧目录继续生效：
+  // 新地址上的同名模型会按上一接口的上限压缩，告警却还写着「按内置默认窗口算」。
+  const dir = await windowWorkspace(t);
+  await writeWindowCache(dir, "codex", "https://new.example.test/v1", [
+    { id: "group/site8083", contextWindowMaxTokens: 128000 },
+  ]);
+  const config = codexSiteConfig();
+  config.providers["deck-codex"].command = ["codex", "-c", 'model_catalog_json="/old-home/deck-model-catalog.json"'];
+  const paseo = fakePaseo(config);
+  const result = await patchProviderConfig(
+    paseo,
+    {
+      provider: "codex",
+      workspaceDir: dir,
+      env: { OPENAI_BASE_URL: "https://new.example.test/v1" },
+      models: ["group/site8083"],
+      modelDefinitions: [{ id: "group/site8083", label: "组" }],
+    },
+    {
+      readBundled: async () => {
+        throw new Error("spawn codex ENOENT");
+      },
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    paseo.disk().providers["deck-codex"].command,
+    ["codex"],
+    "新地址的目录没写成，上一接口的目录就不能继续挂在启动命令上",
+  );
+  assert.ok(result.warnings.some((line) => line.includes("去掉上一接口的模型目录")));
+  assert.ok(result.warnings.some((line) => line.includes("Codex 模型目录没写成")));
+  assert.equal(
+    result.warnings.some((line) => line.includes("还没拿到模型窗口")),
+    false,
+    "缓存里明明有窗口，只是没写成：不能说成「新地址还没窗口」",
+  );
+});
+
+test("Codex 换接口：新地址有缓存时按新窗口重建目录", async (t) => {
+  const dir = await windowWorkspace(t);
+  await writeWindowCache(dir, "codex", "https://new.example.test/v1", [
+    { id: "gpt-5-codex", contextWindowMaxTokens: 128000 },
+  ]);
+  const config = codexSiteConfig();
+  config.providers["deck-codex"].command = ["codex", "-c", 'model_catalog_json="/old-home/deck-model-catalog.json"'];
+  const paseo = fakePaseo(config);
+  const { written, deps } = fakeCatalogDeps();
+  const result = await patchProviderConfig(
+    paseo,
+    {
+      provider: "codex",
+      workspaceDir: dir,
+      env: { OPENAI_BASE_URL: "https://new.example.test/v1" },
+    },
+    deps,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(written.length, 1);
+  const entry = JSON.parse(written[0].content).models.find((model) => model.slug === "gpt-5-codex");
+  assert.equal(entry.context_window, 128000);
+});
+
+test("Claude 保存注入：配置里没有窗口时，用工作区缓存同步当前模型窗口", async (t) => {
+  const dir = await windowWorkspace(t);
+  await writeWindowCache(dir, "claude", "https://api.example.test/v1", [
+    { id: "current", contextWindowMaxTokens: 128000 },
+  ]);
+  const config = baseConfig();
+  config.providers.claude.env.ANTHROPIC_BASE_URL = "https://api.example.test/v1";
+  config.providers.claude.env.ANTHROPIC_MODEL = "current";
+  config.providers.claude.additionalModels = [{ id: "current", label: "Current" }];
+  const paseo = fakePaseo(config);
+  const result = await patchProviderConfig(paseo, {
+    provider: "claude",
+    workspaceDir: dir,
+    env: { EXISTING_FLAG: "2" },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(
+    paseo.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS,
+    "128000",
+    "宿主不返回窗口也要按接口那次数算",
+  );
+  assert.ok(result.applied.includes("env.CLAUDE_CODE_MAX_CONTEXT_TOKENS"));
+});
+
+/** 旧接口上拉到的模型定义，界面上点「保存模型」时会原样带回来。 */
+function claudeSiteConfig() {
+  return {
+    providers: {
+      claude: {
+        env: {
+          ANTHROPIC_BASE_URL: "https://old.example.test/v1",
+          ANTHROPIC_AUTH_TOKEN: "tok",
+          ANTHROPIC_MODEL: "current",
+        },
+        additionalModels: [{ id: "current", label: "Current" }],
+      },
+    },
+  };
+}
+
+test("换接口的同一笔保存：旧接口带回来的窗口不跟过去，旧上限也一并去掉", async (t) => {
+  const dir = await windowWorkspace(t);
+  // 只有旧地址的缓存：它不该被拿来给新地址用。
+  await writeWindowCache(dir, "claude", "https://old.example.test/v1", [
+    { id: "current", contextWindowMaxTokens: 128000 },
+  ]);
+  const config = claudeSiteConfig();
+  // 上一接口写下的上限还留在 env 里。
+  config.providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = "200000";
+  const paseo = fakePaseo(config);
+  const result = await patchProviderConfig(paseo, {
+    provider: "claude",
+    workspaceDir: dir,
+    env: { ANTHROPIC_BASE_URL: "https://new.example.test/v1" },
+    models: ["current"],
+    modelDefinitions: [{ id: "current", label: "Current", contextWindowMaxTokens: 128000 }],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(paseo.disk().providers.claude.additionalModels[0].contextWindowMaxTokens, undefined);
+  // 宿主落盘时 env 是整块替换：补丁里不带这个键，旧值才会被清掉。
+  const envPatch = paseo.patches.at(-1).providers.claude.env;
+  assert.equal(envPatch.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
+  assert.ok(
+    result.warnings.some((line) => line.includes("CLAUDE_CODE_MAX_CONTEXT_TOKENS")),
+    "去掉旧上限要说一声，别让用户以为还按 200000 在跑",
+  );
+});
+
+test("换接口的同一笔保存：新地址有缓存时用新缓存的窗口，不用旧接口那份", async (t) => {
+  const dir = await windowWorkspace(t);
+  await writeWindowCache(dir, "claude", "https://new.example.test/v1", [
+    { id: "current", contextWindowMaxTokens: 96000 },
+  ]);
+  const paseo = fakePaseo(claudeSiteConfig());
+  const result = await patchProviderConfig(paseo, {
+    provider: "claude",
+    workspaceDir: dir,
+    env: { ANTHROPIC_BASE_URL: "https://new.example.test/v1" },
+    models: ["current"],
+    modelDefinitions: [{ id: "current", label: "Current", contextWindowMaxTokens: 128000 }],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(paseo.disk().providers.claude.additionalModels[0].contextWindowMaxTokens, 96000);
+  assert.equal(paseo.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "96000");
+});
+
+test("这次拉到的窗口比缓存新：用本次定义，不让旧缓存盖回去", async (t) => {
+  const dir = await windowWorkspace(t);
+  // 上一次缓存写失败时，文件会停在旧值；这次接口已经报 64000 了。
+  await writeWindowCache(dir, "claude", "https://old.example.test/v1", [
+    { id: "current", contextWindowMaxTokens: 200000 },
+  ]);
+  const paseo = fakePaseo(claudeSiteConfig());
+  const result = await patchProviderConfig(paseo, {
+    provider: "claude",
+    workspaceDir: dir,
+    models: ["current"],
+    modelDefinitions: [{ id: "current", label: "Current", contextWindowMaxTokens: 64000 }],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(paseo.disk().providers.claude.additionalModels[0].contextWindowMaxTokens, 64000);
+  assert.equal(paseo.disk().providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "64000");
+});
+
+test("地址键不止一个时，按客户端真正读的那把判断换没换接口", async (t) => {
+  const dir = await windowWorkspace(t);
+  await writeWindowCache(dir, "claude", "https://old.example.test/v1", [
+    { id: "current", contextWindowMaxTokens: 128000 },
+  ]);
+  const config = claudeSiteConfig();
+  // 派生/历史配置里可能还有别的地址键，而且排在前面。
+  config.providers.claude.env = {
+    ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock.example.test",
+    ...config.providers.claude.env,
+  };
+  const paseo = fakePaseo(config);
+  const result = await patchProviderConfig(paseo, {
+    provider: "claude",
+    workspaceDir: dir,
+    env: { ANTHROPIC_BASE_URL: "https://new.example.test/v1" },
+    models: ["current"],
+    modelDefinitions: [{ id: "current", label: "Current", contextWindowMaxTokens: 128000 }],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(
+    paseo.disk().providers.claude.additionalModels[0].contextWindowMaxTokens,
+    undefined,
+    "ANTHROPIC_BASE_URL 变了，旧接口的窗口不能跟过来",
+  );
+  assert.equal(paseo.patches.at(-1).providers.claude.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
+});
+
+test("Claude 保存模型不会被当成 Codex：不出现 Codex 专属的告警", async () => {
+  const paseo = fakePaseo(claudeSiteConfig());
+  const result = await patchProviderConfig(paseo, {
+    provider: "claude",
+    models: ["current"],
+    modelDefinitions: [{ id: "current", label: "Current", contextWindowMaxTokens: 128000 }],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(
+    result.warnings.some((line) => line.includes("Codex")),
+    false,
+  );
 });

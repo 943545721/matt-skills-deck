@@ -358,6 +358,107 @@ test("启用 Codex 站点：清单落在 additionalModels 上时也照写到内�
   assert.equal(paseo.disk().providers.codex.models, undefined, "别往另一把键上乱写");
 });
 
+test("启用 Codex 站点：宿主配置里窗口已被裁掉时，用工作区缓存把窗口补回模型目录", async () => {
+  const home = await tempHome();
+  const workspace = path.join(home, "workspace");
+  await mkdir(path.join(workspace, ".deck"), { recursive: true });
+  // 宿主保存模型时会裁掉 `contextWindowMaxTokens`：配置里只有 id / label。
+  const paseo = fakePaseo({
+    providers: {
+      codex: {
+        models: [
+          { id: "group/site8083", label: "group/site8083" },
+          { id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" },
+        ],
+      },
+    },
+  });
+  const baseUrl = "https://api.example.test/v1";
+  await writeFile(
+    path.join(workspace, ".deck", "model-windows.json"),
+    JSON.stringify({
+      version: 1,
+      providers: {
+        codex: {
+          baseUrl,
+          models: [
+            { id: "group/site8083", contextWindowMaxTokens: 128000 },
+            { id: "auto/gpt-6-astra", contextWindowMaxTokens: 128000 },
+          ],
+        },
+      },
+    }),
+    "utf8",
+  );
+
+  // 先存站点，再启用；缓存是「之前从接口拉到的那一份」，地址与站点一致。
+  await saveClientSite(paseo, { provider: "codex", site: { id: "main", baseUrl, credential: "cred-x" } });
+
+  const written = [];
+  const enabled = await saveClientSite(
+    paseo,
+    { provider: "codex", enableId: "main", workspaceDir: workspace },
+    {
+      readBundled: async () => ({
+        models: [{ slug: "gpt-5-codex", display_name: "GPT-5 Codex", context_window: 272000 }],
+      }),
+      writeFile: async (target, content) => {
+        written.push({ target, content });
+      },
+      catalogPath: () => path.join(home, "deck-model-catalog.json"),
+    },
+  );
+  assert.equal(enabled.ok, true);
+
+  assert.equal(written.length, 1, "有窗口才写目录");
+  const catalog = JSON.parse(written[0].content);
+  const entry = (slug) => catalog.models.find((model) => model.slug === slug);
+  assert.equal(entry("group/site8083").context_window, 128000);
+  assert.equal(entry("auto/gpt-6-astra").context_window, 128000);
+  assert.equal(entry("gpt-5-codex").context_window, 272000, "原生模型照旧保留");
+});
+
+test("启用 Codex 站点：换到另一条地址且新地址没有窗口时，摘掉上一接口的模型目录", async () => {
+  const home = await tempHome();
+  const oldCatalog = path.join(home, "old-catalog.json");
+  const paseo = fakePaseo({
+    providers: {
+      codex: { models: [{ id: "group/site8083", label: "group/site8083" }] },
+      "deck-codex": {
+        extends: "codex",
+        label: "Deck Codex",
+        enabled: true,
+        models: [{ id: "group/site8083", label: "group/site8083" }],
+        env: { OPENAI_BASE_URL: "https://old.example.test/v1", OPENAI_API_KEY: "cred-x" },
+        command: ["codex", "-c", `model_catalog_json="${oldCatalog}"`],
+      },
+    },
+  });
+  await saveClientSite(paseo, {
+    provider: "codex",
+    site: { id: "new", baseUrl: "https://new.example.test/v1", credential: "cred-x" },
+  });
+  const written = [];
+  const enabled = await saveClientSite(
+    paseo,
+    { provider: "codex", enableId: "new" },
+    {
+      readBundled: async () => ({ models: [{ slug: "gpt-5-codex", context_window: 272000 }] }),
+      writeFile: async (target, content) => {
+        written.push({ target, content });
+      },
+      catalogPath: () => path.join(home, "new-catalog.json"),
+    },
+  );
+  assert.equal(enabled.ok, true);
+  assert.equal(written.length, 0, "没有窗口就不写新目录");
+  assert.deepEqual(paseo.disk().providers["deck-codex"].command, ["codex"]);
+  assert.ok(
+    enabled.warnings.some((line) => line.includes("去掉上一接口的模型目录")),
+    "摘掉旧目录要说明原因",
+  );
+});
+
 test("启用 Codex 站点：写进去了但读回没有这一条，就报失败，不谎报已生效", async () => {
   await tempHome();
   // 宿主收下补丁、什么都没存下来（不认这个字段时的样子）。
@@ -424,7 +525,13 @@ test("站点没填凭证：只换地址，客户端的凭证原样保留", async
   assert.equal(paseo.disk().providers.claude.env.ANTHROPIC_BASE_URL, "https://c.test");
   assert.equal(paseo.disk().providers.claude.env.ANTHROPIC_AUTH_TOKEN, "tok-main-1234", "凭证没被清空");
   assert.equal(enabled.enabledSiteId, "inherit");
-  assert.deepEqual(enabled.warnings, [], "凭证在，不该有「会起不来」的警告");
+  // 启用站点现在会把补丁自己的告警一起带上来（换接口摘旧值、窗口缓存读不出来之类），
+  // 那两句「对之后新建的会话生效」属于通用说明；这里要钉的是别报「会起不来」。
+  assert.equal(
+    enabled.warnings.some((line) => line.includes("客户端起的会话会被接口拒绝")),
+    false,
+    "凭证在，不该有「会起不来」的警告",
+  );
 });
 
 test("删站点：只删记录，宿主配置不动", async () => {

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>matt-skills-deck · 需求 → 地图 → 派单 → 回传</title>
+<title>matt-skills-deck · 需求 → 地图 → 交接 → 派单 → 回传</title>
 <style>
   :root{
     --bg:#1c201e; --card:#222724; --line:#333b37; --ink:#e6eae7; --dim:#9aa39d; --acc:#e3b341;
@@ -85,8 +85,8 @@
 </svg>
 
 <header>
-  <h1>matt-skills-deck · 需求 → 地图 → 派单 → 回传</h1>
-  <p>六张图回答一件事：谁在哪一步动手，插件在哪一步只是配置。点上面六个页签切换；断网可看，单文件，无外部依赖。</p>
+  <h1>matt-skills-deck · 需求 → 地图 → 交接 → 派单 → 回传</h1>
+  <p>六张图回答一件事：谁在哪一步动手，插件在哪一步只是配置、哪一步会直接拒绝。点上面六个页签切换；断网可看，单文件，无外部依赖。</p>
 </header>
 
 <!-- 六个页签开关。放在 body 顶层（不是 nav 里）：main 要能通过 `~` 选到它们。 -->
@@ -102,8 +102,8 @@
   <label for="v2">2 谁触发什么</label>
   <label for="v3">3 端到端</label>
   <label for="v4">4 派单闸门</label>
-  <label for="v5">5 回传链</label>
-  <label for="v6">6 现状缺口</label>
+  <label for="v5">5 回传与硬门</label>
+  <label for="v6">6 现状与缺口</label>
 </nav>
 
 <main>
@@ -178,60 +178,80 @@
 
 <!-- ============ 2 谁触发什么 ============ -->
 <section id="s2">
-  <h2>2 谁触发什么：选窗口不等于派单</h2>
-  <p class="note">这张表是这次疑问的正面答案——「派单窗口」只是署名与路由的默认值，它自己不触发任何动作。</p>
+  <h2>2 谁触发什么：主窗口交接，派单窗口派活</h2>
+  <p class="note">绑定的派单窗口现在是唯一的派单入口：主窗口只能交接，进度窗口只旁听，执行窗口只干活。面板人工派单是例外，放行但要说明。</p>
 
   <figure>
     <table>
       <tr><th>动作</th><th>谁做</th><th>入口</th><th>结果 / 边界</th></tr>
       <tr>
         <td>选「派单窗口」</td><td>人</td><td>面板 · 编排 · 角色</td>
-        <td>只写 <code>.deck/orchestration.json</code> 的 <code>dispatcherAgentId</code>：署名、难度路由、配额按它算。不建会话，不发消息。</td>
+        <td>只写 <code>.deck/orchestration.json</code> 的 <code>dispatcherAgentId</code>：署名、难度路由、配额按它算。它是唯一有权派单的会话；不建会话，不发消息。</td>
       </tr>
       <tr>
         <td>建需求票</td><td>人</td><td>面板 · 新建票 → 需求</td>
-        <td>一张 <code>requirement</code> 票，六节骨架；备注原样附在最后，不塞进某个小节假装已经想清楚。</td>
+        <td>一张 <code>requirement</code> 票，六节骨架；定稿后带 <code>deck:定稿</code>，派单前必须定稿。</td>
       </tr>
       <tr>
-        <td>确认需求、建地图</td><td>人 + agent</td><td>复制 <code>/wayfinder</code> 提示词到会话；agent 调 <code>deck_map_plan_create</code></td>
-        <td>建出地图票 + 首批路线票。插件不能替你开会话，所以提示词只产出文本、由你粘。</td>
+        <td>在会话里建 / 改需求票</td><td>需求窗口 agent</td>
+        <td>MCP <code>deck_issue_create</code> / <code>deck_issue_patch</code> / <code>deck_issue_labels</code></td>
+        <td>绑定了需求窗口后，它是唯一能写需求票的会话；它自己也只写需求票，不建工作票、不改文件、不派活、不开执行会话。正文里出现「## 影响面」就当场解析：表头 / 分隔行 / 列数写坏直接拒、一个字节都不落盘，已定稿的票还要整张核（数据行、结论、核的人）。</td>
       </tr>
       <tr>
-        <td>派单：算计划</td><td>agent</td><td>MCP <code>deck_dispatch_plan</code></td>
-        <td>按难度选 providerSpec、拼抬头、跑闸门；返回 tasks[].prompt 与 rejected[]。不建会话。</td>
+        <td>派单因票面被拒</td><td>插件 relay · 需求窗口 agent</td><td><code>.deck/window-notes/pending/</code></td>
+        <td><code>bad-impact</code> / <code>missing-impact</code> / <code>empty-impact</code> / <code>unknown-workspace</code> 这类「票面写坏」的拒绝，插件把原因写成一张条子；relay 在工作区下一次回合结束时按当时绑定递进需求窗口，没绑就留在队列里等它建出来，绑了但不在线时对同一个收件人按次重试（间隔至少一分钟；换绑到另一个窗口或新窗口建出来时立刻补送），累计 5 次没送成才移进 <code>failed/</code>。拒绝信息只说条子去了哪（已排队 / 还排着队 / 已送过 / 之前失败过），不把「已入队」说成「已送达」——用户不用复制粘贴转述。</td>
+      </tr>
+      <tr>
+        <td>确认需求、建地图</td><td>人 + 派单窗口 agent</td><td>复制 <code>/wayfinder</code> 提示词到派单窗口；agent 调 <code>deck_map_plan_create</code></td>
+        <td>建出地图票 + 首批路线票；地图与路线票都算工作票，主窗口、需求窗口、进度窗口调这个工具会被拒。插件不能替你开会话，所以提示词只产出文本、由你粘。</td>
+      </tr>
+      <tr>
+        <td>交接</td><td>主沟通窗口 agent</td><td>MCP <code>deck_handoff_to_dispatcher</code></td>
+        <td>写 <code>.deck/dispatch-handoffs/pending/</code> 的交接件：不建票、不建会话、不碰 <code>gh</code>；同一份内容重复交只算一次，派单窗口忙时排队。</td>
+      </tr>
+      <tr>
+        <td>派单：算计划</td><td>派单窗口 agent</td><td>MCP <code>deck_dispatch_plan</code> / <code>deck_requirement_dispatch</code></td>
+        <td>入口门只认绑定的派单窗口：主窗口、需求窗口、进度窗口与其他会话被拒并给出下一步。按难度选 providerSpec、拼抬头、跑票门与计划闸。</td>
       </tr>
       <tr>
         <td>真正建子会话</td><td>agent</td><td>宿主 <code>create_agent</code></td>
-        <td>父子关系、通知、权限都归宿主；插件只把标签与抬头写好。</td>
+        <td>父子关系、通知、权限都归宿主；创建门会把主 / 需求 / 进度窗口直接开的子会话当场归档并通知父窗口。</td>
+      </tr>
+      <tr>
+        <td>面板人工派单</td><td>人</td><td>编排页派单台 / 需求票「按区派单」</td>
+        <td>走 RPC，不带会话身份：放行并在回执里说明是人工操作；同样过票门、预算与仓库校验。</td>
       </tr>
       <tr>
         <td>记「谁接手了」</td><td>agent</td><td>MCP <code>deck_issue_report</code></td>
         <td>写本机台账（attach / progress / release），票面时间线的「会话」行就来自这里。</td>
       </tr>
       <tr>
-        <td>回传结果</td><td>插件</td><td>子会话 <code>agent.turn_ended</code> 钩子</td>
-        <td>handoff 落盘成文件，同一轮只报一次，父窗口不在就改送主沟通窗口。</td>
+        <td>回传结果</td><td>插件</td><td>执行窗口 <code>agent.turn_ended</code> 钩子</td>
+        <td>handoff 落盘成文件，同一轮只报一次；父窗口之外另抄一份【进度】给进度窗口（主窗口不再收常规副本），父窗口不在就改送主沟通窗口。</td>
       </tr>
     </table>
-    <figcaption>判定口径：只有行里出现「宿主 create_agent」的，才是真的派出去了。</figcaption>
+    <figcaption>判定口径：只有行里出现「宿主 create_agent」的，才是真的派出去了；交接只是把活送进派单窗口。</figcaption>
   </figure>
 
-  <details><summary>ASCII 版</summary><pre>动作                 谁        入口                              结果 / 边界
-选「派单窗口」       人        面板·编排·角色                    只写配置：署名/路由/配额，不派单
-建需求票             人        面板·新建票→需求                  一张 requirement 票（六节骨架）
-确认需求 / 建地图    人+agent  复制 /wayfinder 提示词 + MCP      地图票 + 首批路线票
-派单（算计划）       agent     MCP deck_dispatch_plan            出 providerSpec + prompt + 拒绝清单
-真正建子会话         agent     宿主 create_agent                 子会话挂宿主下，带 deck 子会话标
-记「谁接手」         agent     MCP deck_issue_report             写本机台账（时间线的会话行）
-回传结果             插件      子会话 turn_ended 钩子            handoff 落盘 + 发给父窗口
+  <details><summary>ASCII 版</summary><pre>动作                 谁          入口                              结果 / 边界
+选「派单窗口」       人          面板·编排·角色                    只写配置：唯一有权派单的会话
+建需求票             人          面板·新建票→需求                  一张 requirement 票；定稿后才可派
+建 / 改需求票        需求窗口    MCP deck_issue_create / patch     只写需求票；其他会话写需求票被拒
+确认需求 / 建地图    人+派单窗口 复制 /wayfinder 提示词 + MCP      地图票 + 首批路线票；主 / 需求 / 进度窗口被拒
+交接                 主窗口      MCP deck_handoff_to_dispatcher    写 outbox；不建票、不建会话；重复交幂等
+派单（算计划）       派单窗口    MCP deck_dispatch_plan            入口门 + 票门；出 providerSpec + 拒绝清单
+真正建子会话         agent       宿主 create_agent                 创建门：主 / 需求 / 进度窗口开的会话被归档
+面板人工派单         人          编排页派单台 / 按区派单           RPC 无身份：放行 + warning，同样过闸
+记「谁接手」         agent       MCP deck_issue_report             写本机台账（时间线的会话行）
+回传结果             插件        执行窗口 turn_ended 钩子          handoff 落盘 + 发给父窗口，抄送进度窗口
 
-一句话：绑定派单窗口 ≠ 派单；派单 = 会话里的 agent 调工具 + 宿主建会话。</pre></details>
+一句话：主窗口交接，派单窗口派活，执行窗口干活；面板人工派单是唯一的无身份例外。</pre></details>
 </section>
 
 <!-- ============ 3 端到端 ============ -->
 <section id="s3">
-  <h2>3 端到端：从聊需求到子会话交活</h2>
-  <p class="note">八步，每一格写清是谁的动作。前三步全在人这边，第四步才开始进插件。</p>
+  <h2>3 端到端：从聊需求到执行窗口交活</h2>
+  <p class="note">主窗口先把方案交接给派单窗口，派单窗口再调工具派人；执行窗口干完活，回传沿原路爬回来。每一格都写清是谁的动作。</p>
 
   <figure>
     <svg viewBox="0 0 940 430" role="img" aria-label="从沟通需求到子会话回传的八步流程">
@@ -253,17 +273,17 @@
       <text x="10" y="234" font-size="10.5">/wayfinder 或手动建图</text>
       <text x="10" y="250" font-size="10.5" class="dim">此时才有路线与子票</text>
 
-      <text x="245" y="14" font-size="11" class="dim">派单会话（agent）</text>
+      <text x="245" y="14" font-size="11" class="dim">派单窗口（agent）</text>
 
       <rect class="boxa" x="245" y="112" width="205" height="62"/>
-      <text x="255" y="130" font-size="11.5" class="acc">4 调 deck_dispatch_plan</text>
-      <text x="255" y="148" font-size="10.5">tasks + map + depth</text>
-      <text x="255" y="164" font-size="10.5" class="dim">闸门在这里，拒就带原因</text>
+      <text x="255" y="130" font-size="11.5" class="acc">4 派单窗口调工具</text>
+      <text x="255" y="148" font-size="10.5">deck_dispatch_plan</text>
+      <text x="255" y="164" font-size="10.5" class="dim">入口门 + 票门，拒就带原因</text>
 
       <rect class="boxa" x="245" y="198" width="205" height="62"/>
-      <text x="255" y="216" font-size="11.5" class="acc">5 调宿主 create_agent</text>
+      <text x="255" y="216" font-size="11.5" class="acc">5 宿主 create_agent</text>
       <text x="255" y="234" font-size="10.5">providerSpec 原样用</text>
-      <text x="255" y="250" font-size="10.5" class="dim">每条 task 一个子会话</text>
+      <text x="255" y="250" font-size="10.5" class="dim">每条 task 一个执行窗口</text>
 
       <text x="490" y="14" font-size="11" class="dim">插件（MCP / RPC）</text>
 
@@ -308,40 +328,43 @@
       <path class="la" d="M837 112 V93" marker-end="url(#arrow)"/>
       <path class="la" d="M592 198 V178" marker-end="url(#arrow)"/>
 
-      <text x="0" y="296" font-size="11" class="dim">关键点：3 → 4 之间有一条硬门槛——地图不存在时，这次派单没有 map 可挂、也没有预算可数。</text>
-      <text x="0" y="316" font-size="11">所以「先沟通、先确认、先建图」不是流程洁癖，是数据前提。</text>
-      <text x="0" y="344" font-size="11" class="dim">1–3 可以完全在会话外完成（人自己建票）；4–6 只能由会话里的 agent 发起；7–8 由插件钩子接手。</text>
+      <text x="0" y="278" font-size="11" class="acc">3b 主窗口交接：deck_handoff_to_dispatcher → .deck/dispatch-handoffs/pending/</text>
+      <text x="0" y="296" font-size="11" class="dim">关键点：3b → 4 之间由 relay 投递，派单窗口忙就排队；地图不存在时这次派单没有 map 可挂、也没有预算可数。</text>
+      <text x="0" y="316" font-size="11">所以「先沟通、先确认、先建图、再交接」不是流程洁癖，是数据前提。</text>
+      <text x="0" y="344" font-size="11" class="dim">1–3 可以完全在会话外完成（人自己建票）；3b–6 只能由主窗口 / 派单窗口里的 agent 发起；7–8 由插件钩子接手。</text>
     </svg>
     <figcaption>第 4 步的闸门细节见下一张图；第 5 步之后的一切都不归插件管。</figcaption>
   </figure>
 
-  <details><summary>ASCII 版（时序）</summary><pre>人          面板          派单会话(agent)        插件(MCP)            宿主/子会话
-│            │                 │                    │                    │
-├ 1 聊清楚 ──▶│                 │                    │                    │
-├ 2 建需求票 ▶│                 │                    │                    │
-├ 3 复制 /wayfinder 提示词 ─────▶│                    │                    │
-│            │                 ├ 3b deck_map_plan_create ─▶│ 建地图+首批票  │
-│            │                 ├ 4  deck_dispatch_plan ──▶│ 闸门→计划      │
-│            │                 │◀──── tasks[].prompt ─────┤                    │
-│            │                 ├ 5  create_agent ─────────────────────────▶│
-│            │                 │                    │                    ├ 6 干活
-│            │                 │◀──────────── 回传 ─────────┤◀─ turn_ended ─┤
-│            │                 ├ 7 向上汇报 / 收尾 ─▶│                    │
-│            │                 └ 8 评论 / 关票 / 台账 ─▶ 票面留痕          │</pre></details>
+  <details><summary>ASCII 版（时序）</summary><pre>人        面板      主窗口(agent)    派单窗口(agent)      插件(MCP/RPC/relay)   宿主/执行窗口
+│          │             │                 │                    │                  │
+├ 1 聊清楚▶│             │                 │                    │                  │
+├ 2 建票 ─▶│             │                 │                    │                  │
+├ 3 定稿，把票号交给主窗口 ▶              │                    │                  │
+│          │             ├ 3b deck_handoff_to_dispatcher ────▶│ 写 outbox        │
+│          │             │◀─── handoffId（重复交只算一次）─────┤                  │
+│          │             │                 │◀─ relay 投递（忙则排队）─────────────┤
+│          │             │                 ├ 4 deck_dispatch_plan ─▶ 入口门+票门  │
+│          │             │                 │◀── tasks[].prompt ────┤              │
+│          │             │                 ├ 5 create_agent ─────────────────────▶│
+│          │             │                 │                    │              6 干活
+│          │             │                 │◀──────── 回传 ────────┤◀─ turn_ended ─┤
+│          │             │                 ├ 7 向上汇报 / 收尾 ───▶│              │
+│          │             │                 └ 8 评论 / 关票 / 台账 ─▶ 票面留痕     │</pre></details>
 </section>
 
 <!-- ============ 4 派单闸门 ============ -->
 <section id="s4">
-  <h2>4 派单闸门：一份配置，六种拒绝，一条层数链</h2>
-  <p class="note">所有拦截都发生在「算计划」这一步，且拒绝时一定说清是哪一条——不夹到上限硬派，也不悄悄降档。</p>
+  <h2>4 派单闸门：入口门、票门、计划闸，一条层数链</h2>
+  <p class="note">入口门先判「谁在派」，票门再判「有没有挂票、定没定稿」，计划闸最后判提示词、重复键、层数与预算。拒绝时一定说清是哪一条——不夹到上限硬派，也不悄悄降档。</p>
 
   <figure>
-    <svg viewBox="0 0 940 330" role="img" aria-label="派单闸门：输入、配置、六种拒绝、放行产物">
+    <svg viewBox="0 0 940 460" role="img" aria-label="派单闸门：入口门、票门、计划闸与层数链">
       <text x="0" y="14" font-size="11" class="dim">输入</text>
       <rect class="box" x="0" y="26" width="200" height="86"/>
-      <text x="10" y="46" font-size="11" class="acc">tasks[]</text>
-      <text x="10" y="64" font-size="10.5">key / prompt / difficulty</text>
-      <text x="10" y="80" font-size="10.5" class="dim">map（替哪张图干活）</text>
+      <text x="10" y="46" font-size="11" class="acc">调用者 + tasks[]</text>
+      <text x="10" y="64" font-size="10.5">key / prompt / requirementKey</text>
+      <text x="10" y="80" font-size="10.5" class="dim">difficulty · map（替哪张图干活）</text>
       <text x="10" y="98" font-size="10.5" class="dim">depth（自己第几层）</text>
 
       <text x="240" y="14" font-size="11" class="dim">配置来源</text>
@@ -351,48 +374,68 @@
       <text x="250" y="80" font-size="10.5" class="dim">maxDepth · maxChildren</text>
       <text x="250" y="98" font-size="10.5" class="dim">mapBudgets[] · reportOnFinish</text>
 
-      <text x="500" y="14" font-size="11" class="dim">闸门：六种拒绝（都说清为什么）</text>
-      <rect class="box" x="500" y="26" width="250" height="150"/>
-      <text x="510" y="46" font-size="10.5">empty-prompt</text>
-      <text x="510" y="66" font-size="10.5">duplicate-key</text>
-      <text x="510" y="86" font-size="10.5">too-many-children</text>
-      <text x="510" y="106" font-size="10.5">depth-exceeded</text>
-      <text x="510" y="126" font-size="10.5">map-budget-exhausted</text>
-      <text x="510" y="146" font-size="10.5">route-unavailable</text>
-      <text x="510" y="166" font-size="10" class="dim">读不出 / 文件坏了：直接失败，不回落默认值</text>
+      <text x="500" y="14" font-size="11" class="dim">三道闸（都说清为什么）</text>
+      <rect class="box" x="500" y="26" width="250" height="240"/>
+      <text x="510" y="46" font-size="10.5" class="acc">入口门 A：只有绑定的派单窗口能派</text>
+      <text x="510" y="64" font-size="9.5">caller-unknown</text>
+      <text x="510" y="80" font-size="9.5">main-cannot-dispatch</text>
+      <text x="510" y="96" font-size="9.5">requirement-cannot-dispatch</text>
+      <text x="510" y="112" font-size="9.5">progress-cannot-dispatch</text>
+      <text x="510" y="128" font-size="9.5">caller-not-dispatcher</text>
+      <text x="510" y="150" font-size="10.5" class="acc">票门 E：每条任务挂需求票且已定稿</text>
+      <text x="510" y="168" font-size="9.5">no-requirement · requirement-unreadable</text>
+      <text x="510" y="184" font-size="9.5">requirement-not-finalized</text>
+      <text x="510" y="206" font-size="10.5" class="acc">计划闸：逐条过</text>
+      <text x="510" y="222" font-size="9.5">empty-prompt · duplicate-key · too-many-children</text>
+      <text x="510" y="236" font-size="9.5">depth-exceeded · map-budget-exhausted</text>
+      <text x="510" y="250" font-size="9.5">route-unavailable · ticket-failed</text>
 
       <text x="790" y="14" font-size="11" class="dim">放行产物</text>
-      <rect class="boxa" x="790" y="26" width="150" height="150"/>
+      <rect class="boxa" x="790" y="26" width="150" height="240"/>
       <text x="800" y="46" font-size="10.5" class="acc">providerSpec</text>
       <text x="800" y="66" font-size="10.5">modeId</text>
       <text x="800" y="86" font-size="10.5">labels（含 map）</text>
       <text x="800" y="106" font-size="10.5">idempotencyKey</text>
       <text x="800" y="126" font-size="10.5">prompt（抬头+正文）</text>
-      <text x="800" y="146" font-size="10" class="dim">warnings：借档 / 预算边界</text>
+      <text x="800" y="152" font-size="10" class="dim">warnings：借档 / 预算边界</text>
+      <text x="800" y="176" font-size="10" class="dim">读不出 / 文件坏了：直接失败，</text>
+      <text x="800" y="192" font-size="10" class="dim">不回落默认值派单</text>
+      <text x="800" y="216" font-size="10" class="dim">面板人工派单：放行 + warning</text>
 
       <path class="la" d="M200 70 H235" marker-end="url(#arrow)"/>
       <path class="la" d="M460 70 H495" marker-end="url(#arrow)"/>
-      <path class="la" d="M750 100 H785" marker-end="url(#arrow)"/>
-      <text x="753" y="92" font-size="9.5" class="acc">过闸</text>
+      <path class="la" d="M750 136 H785" marker-end="url(#arrow)"/>
+      <text x="753" y="128" font-size="9.5" class="acc">过闸</text>
 
-      <text x="0" y="212" font-size="11" class="dim">层数链（maxDepth 默认 3，1–6 可调）</text>
-      <text x="0" y="236" font-size="12">主沟通窗口 0 ──▶ 子会话 1 ──▶ 孙会话 2 ──▶ 曾孙 3</text>
-      <text x="0" y="258" font-size="11" class="dim">             到上限那一层不能再派：拒绝，而不是夹到上限放行（夹完返回值与真实层数就对不上了）</text>
+      <text x="0" y="290" font-size="11" class="dim">层数链（maxDepth 默认 3，1–6 可调）</text>
+      <text x="0" y="314" font-size="12">主沟通窗口 0 ──▶ 子会话 1 ──▶ 孙会话 2 ──▶ 曾孙 3</text>
+      <text x="0" y="336" font-size="11" class="dim">             到上限那一层不能再派：拒绝，而不是夹到上限放行（夹完返回值与真实层数就对不上了）</text>
 
-      <text x="0" y="288" font-size="11" class="dim">两个入口的 depth 语义不同，别混：</text>
-      <text x="0" y="308" font-size="11">MCP <tspan class="dim">deck_dispatch_plan</tspan> 传「调用者自己」的层（主窗口 = 0）；RPC <tspan class="dim">dispatch</tspan> 传「子会话」的层（≥ 1）。两处都换算成子会话层再判定。</text>
+      <text x="0" y="372" font-size="11" class="dim">两个入口的 depth 语义不同，别混：</text>
+      <text x="0" y="392" font-size="11">MCP <tspan class="dim">deck_dispatch_plan</tspan> 传「调用者自己」的层（主窗口 = 0）；RPC <tspan class="dim">dispatch</tspan> 传「子会话」的层（≥ 1）。两处都换算成子会话层再判定。</text>
+      <text x="0" y="420" font-size="11" class="dim">面板人工派单不带会话身份：入口门放行并记一条 warning；票门、预算与仓库校验照跑，不因为是人工操作就跳过。</text>
     </svg>
     <figcaption>地图并发的三个数：单次最多派几个（全局）· 地图预算（按图）· 层数（纵向）。</figcaption>
   </figure>
 
-  <details><summary>ASCII 版</summary><pre>输入 tasks[{key, prompt, difficulty, map?}] + map + depth + dispatchId
+  <details><summary>ASCII 版</summary><pre>输入 调用者(PASEO_AGENT_ID) + workspaceId + tasks[{key, prompt, requirementKey, difficulty, map?}] + map + depth + dispatchId
+        │
+        ▼ 入口门 A：调用者是绑定的派单窗口？
+   caller-unknown · main-cannot-dispatch（→ deck_handoff_to_dispatcher）
+   requirement-cannot-dispatch（需求窗口只建票，不派活）
+   progress-cannot-dispatch · caller-not-dispatcher
+   面板人工派单不带身份 → 放行 + warning
         │
         ▼ 读 .deck/orchestration.json
    读不出 → settings-unreadable      文件坏了 → settings-corrupt（都不许回落默认值派单）
         │
-        ▼ 逐条过闸
+        ▼ 票门 E：每条任务挂需求票且已定稿？
+   no-requirement · requirement-unreadable · requirement-not-finalized
+        │
+        ▼ 计划闸：逐条过
    empty-prompt · duplicate-key · too-many-children
    depth-exceeded · map-budget-exhausted · route-unavailable
+   ticket-failed（链条上票建不出来）
         │
         ├── 拒 → rejected[{key, reason, detail}]
         └── 放 → providerSpec + modeId + labels + idempotencyKey + prompt（抬头 + 正文）
@@ -403,8 +446,11 @@
 
 <!-- ============ 5 回传链 ============ -->
 <section id="s5">
-  <h2>5 回传链：子会话结束后结果往哪走</h2>
-  <p class="note">插件在这里只做三件事：落盘、去重、找一个还活着的窗口。找不到就是改送，不改写结论。</p>
+  <h2>5 回传与硬门：结果往哪走，谁能开谁、谁能改文件</h2>
+  <p class="note">回传这部分插件只做三件事：落盘、去重、找一个还活着的窗口。找不到就是改送，不改写结论。
+    递送前先看目标忙不忙：正在跑活就排队，等这一轮 <code>turn_ended</code> 再送；卡在确认框上也算忙，
+    归档或关掉的窗口直接丢掉队列。回合结束才谈回传；卡在回合中间的权限确认另有一条计时器盯着，见本页末尾。
+    创建门与执行门是另外两条硬门：它们不看提示词，直接在宿主事件上拦。</p>
 
   <figure>
     <svg viewBox="0 0 940 300" role="img" aria-label="回传链：子会话结束到父窗口或主沟通窗口">
@@ -428,6 +474,11 @@
       <text x="510" y="170" font-size="10.5">改送主沟通窗口</text>
       <text x="510" y="186" font-size="10.5" class="dim">回执标 rerouted: true</text>
 
+      <rect class="box" x="240" y="150" width="200" height="60"/>
+      <text x="250" y="170" font-size="11.5" class="acc">抄送进度窗口</text>
+      <text x="250" y="188" font-size="10.5">【进度】谁 · 哪张票 · 结论</text>
+      <text x="250" y="204" font-size="10.5" class="dim">主窗口不再收常规副本</text>
+
       <rect class="box" x="760" y="60" width="180" height="66"/>
       <text x="770" y="80" font-size="11.5" class="acc">落盘</text>
       <text x="770" y="98" font-size="10.5">.deck/handoffs/</text>
@@ -436,10 +487,12 @@
       <path class="la" d="M180 93 H235" marker-end="url(#arrow)"/>
       <path class="la" d="M440 84 C470 84, 470 49, 495 49" marker-end="url(#arrow)"/>
       <path class="la" d="M440 102 C470 102, 470 165, 495 165" marker-end="url(#arrow)"/>
+      <path class="la" d="M340 126 V145" marker-end="url(#arrow)"/>
       <path class="ln" d="M440 120 C560 200, 700 150, 760 120" marker-end="url(#arrowDim)"/>
 
       <text x="0" y="230" font-size="11" class="dim">两条都没成：写一条 warn 进日志，不静默丢。</text>
       <text x="0" y="252" font-size="11">父窗口和子窗口共用同一套：孙辈的回传也是先到父、再由父往上报，层数就是这么串起来的。</text>
+      <text x="0" y="276" font-size="11" class="dim">权限确认不走回传：子会话的请求只弹在它自己窗口，等满 45 秒未点 → 主沟通窗口收到【等你确认】；点掉就清计时器。</text>
 
     </svg>
     <figcaption>「上一层是谁」不靠猜：标签写在派单那一刻，回执里带着它。</figcaption>
@@ -451,39 +504,95 @@
 TurnReporter
    ├ reportOnFinish = false → 跳过（记 disabled）
    ├ 按 turnId 去重：同一轮只报一次
+   ├ 递给父窗口前先看忙闲
+   │    正在跑活 / 卡在确认框 → 排队，等 turn_ended 再送
+   │    归档或关闭 → 丢掉队列
    ├ 发给父窗口
+   │    成功后另抄一份【进度】给进度窗口（谁 · 哪张票 · 结论）
+   │    进度就是父窗口时不重复发；主窗口不再收常规副本
    │    父窗口已归档 / 发送失败 → 改送主沟通窗口，回执标 rerouted: true
    │                                两条都失败 → 记 warn，不静默丢
-   └ handoff 文件留在 .deck/handoffs/（父窗口收尾时读得到）</pre></details>
+   └ handoff 文件留在 .deck/handoffs/（父窗口收尾时读得到）
+
+权限确认（回合中间，不是回传）
+   子会话 permission_requested（有 parentAgentId）
+   ├ 45 秒内 permission_resolved → 清掉计时器，不发
+   └ 等满 45 秒还没点 → 主沟通窗口收到【等你确认】：哪一支、在等哪种确认</pre></details>
+
+  <h3>窗口硬门：创建门 C、执行门 D 与写票闸</h3>
+  <figure>
+    <table>
+      <tr><th>门</th><th>触发</th><th>拦住</th><th>放行</th></tr>
+      <tr>
+        <td>创建门 C</td><td><code>agent.created</code></td>
+        <td>父会话是主窗口、需求窗口或进度窗口（且不是派单窗口）时直接开出的子会话：当场归档，并通知父窗口改走交接 / 派单。</td>
+        <td>派单窗口开的执行会话、本身就是角色窗口的新会话、没有父会话的面板手工会话、主窗口与派单窗口是同一个会话。配置读不出或分不清会话属于哪片：放行 + warn。</td>
+      </tr>
+      <tr>
+        <td>执行门 D</td><td><code>agent.permission_requested</code></td>
+        <td>主窗口 / 需求窗口 / 派单窗口 / 进度窗口的 <code>write</code>、<code>edit</code> 与会改文件的 shell（重定向、<code>tee</code>、<code>rm</code>/<code>mv</code>/<code>cp</code>、<code>sed -i</code>、<code>git commit/checkout/...</code>、装包与构建命令等）。</td>
+        <td>读、搜、跑测试、调 MCP 工具与执行窗口的一切动作；<code>gh</code> / <code>glab</code> 让给票闸，只拒一次。配置读不出或分不清会话属于哪片：放行 + warn，不动自动放行。</td>
+      </tr>
+      <tr>
+        <td>写票闸</td><td>MCP <code>deck_issue_create</code> / <code>deck_issue_patch</code> / <code>deck_issue_labels</code> / <code>deck_map_plan_create</code></td>
+        <td>非需求窗口写需求票（包括给工作票补 <code>requirement</code> 标签）；需求窗口写工作票（地图与路线票也算）或把需求票改成工作票；主窗口 / 进度窗口建票。</td>
+        <td>需求窗口写需求票、派单窗口建 / 改工作票与地图、执行会话改自己的工作票；没绑定需求窗口或身份不明时放行，并在 stderr 留一行。</td>
+      </tr>
+    </table>
+    <figcaption>三道门都在宿主事件或 MCP 入口上直接判定；提示词里写「不要改代码」「不要建票」只是话，不是闸。</figcaption>
+  </figure>
+
+  <details><summary>ASCII 版（三道门）</summary><pre>创建门 C  agent.created
+   ├ 父 = 主窗口 / 需求窗口 / 进度窗口，且子会话不是角色窗口 → archive() + 通知父窗口
+   ├ 父 = 派单窗口 / 执行会话 / 没有父会话 → 放行
+   └ 配置读不出 / 工作区歧义 → 放行 + warn
+
+执行门 D  agent.permission_requested
+   ├ 主 / 需求 / 派单 / 进度窗口：write · edit · 改文件 shell → deny + 说清该谁做
+   ├ 读 / 搜 / 跑测试 / MCP 工具 / 执行窗口 → 放行
+   ├ gh / glab 改票 → 让给票闸（不重复拒）
+   └ 配置读不出 / 工作区歧义 → 放行 + warn
+
+写票闸  deck_issue_create / patch / labels / deck_map_plan_create
+   ├ 非需求窗口写需求票（含给工作票补 requirement 标签）→ 拒
+   ├ 需求窗口写工作票（含地图与路线票）/ 把需求票改成工作票 → 拒
+   ├ 主窗口 / 进度窗口建票 → 拒
+   ├ 需求窗口写需求票、派单窗口建改工作票与地图、执行会话改自己的工作票 → 放行
+   └ 没绑定需求窗口 / 身份不明 → 放行 + stderr 一行</pre></details>
 </section>
 
 <!-- ============ 6 现状缺口 ============ -->
 <section id="s6">
-  <h2>6 现状缺口：图纸和代码不一样的地方</h2>
-  <p class="note">这一页只写查得到的事实，不写「本来应该」。有缺口就照实标。</p>
+  <h2>6 现状与缺口：哪些已经接上，哪些还差一截</h2>
+  <p class="note">这一页只写查得到的事实，不写「本来应该」。已经接上的写「已接上」，还差的照实标。</p>
 
   <figure>
     <table>
       <tr><th>东西</th><th>现在的状态</th><th>指到哪</th></tr>
       <tr>
-        <td><code>deck.orchestration.dispatch</code></td>
-        <td class="gap">已实现、已注册，但客户端没有任何调用方</td>
-        <td><code>server/rpc/orchestration.ts</code>、<code>server/rpc/register.ts</code></td>
-      </tr>
-      <tr>
-        <td>地图并发预算的「按宿主已开子会话硬拦」</td>
-        <td class="gap">只在上面那条没人调用的 RPC 里生效</td>
-        <td><code>server/orchestration.ts</code> 的 <code>runningByMapOf</code></td>
-      </tr>
-      <tr>
-        <td>MCP <code>deck_dispatch_plan</code> 的预算</td>
-        <td>只按<strong>本批</strong>算，数不到宿主上已经开着几个；在 <code>warnings</code> 里明说</td>
-        <td><code>server/mcp/tools.ts</code></td>
+        <td>入口门 A · 票门 E · 创建门 C · 执行门 D</td>
+        <td>已实现：MCP、RPC 与面板两条派单入口共用同一套闸</td>
+        <td><code>server/mcp/tools.ts</code>、<code>server/orchestration.ts</code>、<code>server/hooks.ts</code>、<code>server/execution-gate.ts</code></td>
       </tr>
       <tr>
         <td>面板「编排」页</td>
-        <td>只有角色 / 限制 / 地图预算，<span class="gap">没有派单按钮</span></td>
-        <td><code>client/deck/surfaces/orchestration/</code></td>
+        <td>有<strong>派单台</strong>：按「先建票、再建会话」派一条任务；定稿需求票上另有「按区派单」，第一次点只出清单</td>
+        <td><code>client/deck/surfaces/orchestration/DispatchPanel.tsx</code>、<code>client/deck/panel/RequirementDispatchButton.tsx</code></td>
+      </tr>
+      <tr>
+        <td><code>deck.orchestration.dispatch</code> 的预算硬拦</td>
+        <td>RPC 由面板两条入口调用，按宿主上已开的子会话逐条拒绝；<strong>MCP 那条入口仍只按本批算</strong></td>
+        <td><code>server/orchestration.ts</code> 的 <code>runningByMapOf</code>、<code>server/mcp/tools.ts</code></td>
+      </tr>
+      <tr>
+        <td>执行门 D 的 shell 分类</td>
+        <td class="gap">按命令文本认形状，不是沙箱：<code>curl</code> 直连 API、<code>gh alias</code>、从 stdin 喂脚本的写法认不出</td>
+        <td><code>shared/execution-guard.ts</code></td>
+      </tr>
+      <tr>
+        <td>交接投递</td>
+        <td>至少一次投递：靠 <code>handoffId</code> 去重，派单窗口忙时排队，连续五次失败移入 <code>failed/</code> 并记日志</td>
+        <td><code>server/dispatch-handoff-relay.ts</code></td>
       </tr>
       <tr>
         <td>地图页「开始 / 推进」</td>
@@ -502,17 +611,19 @@ TurnReporter
       </tr>
       <tr>
         <td><code>client/deck/IssueModal.tsx</code></td>
-        <td class="gap">505 行，全仓库没有任何引用（死代码）</td>
+        <td class="gap">全仓库没有任何引用（死代码）</td>
         <td>grep <code>IssueModal</code> 只有定义处</td>
       </tr>
     </table>
-    <figcaption>前四条合起来就是一句话：派单目前没有面板入口，预算的硬拦还没有生效路径。</figcaption>
+    <figcaption>硬门已接上；还差的是 MCP 侧数不到宿主已开会话、shell 分类认不出所有写法，以及地图页那条单会话入口。</figcaption>
   </figure>
 
-  <details><summary>ASCII 版</summary><pre>deck.orchestration.dispatch  ── 已实现（按宿主已开子会话硬拦预算）── ✗ 没有调用方
-地图并发预算硬拦            ── 只活在上面那条没人调用的 RPC 里
+  <details><summary>ASCII 版</summary><pre>入口门 A / 票门 E / 创建门 C / 执行门 D ── 已实现：MCP、RPC、面板两条入口共用
+面板·编排页                 ── 有派单台 + 需求票「按区派单」
+RPC dispatch 的预算硬拦     ── 面板调用时按宿主已开子会话逐条拒
 MCP deck_dispatch_plan      ── 只按本批算，数不到宿主已开的，写进 warnings
-面板·编排页                 ── 角色 / 限制 / 地图预算，没有派单按钮
+执行门 D 的 shell 分类      ── 按命令文本认形状；curl / alias / stdin 脚本认不出
+交接投递                    ── 至少一次投递，handoffId 去重，五次失败进 failed/
 地图页 开始/推进            ── SessionSheet：建一个会话 + 填提示词，不是派单
 新建需求票                  ── 只有六节正文 + /wayfinder 提示词
 需求票 → 地图票             ── 只有正文一行 Derived from: #N，需求侧反查，板上不缩进
@@ -523,8 +634,10 @@ client/deck/IssueModal.tsx  ── 无引用（死代码）</pre></details>
 
 <footer>
   事实来源：<code>shared/orchestration.ts</code> · <code>server/orchestration.ts</code> · <code>server/mcp/tools.ts</code> ·
-  <code>server/report.ts</code> · <code>server/hooks.ts</code> · <code>shared/requirement.ts</code> ·
-  <code>shared/work-route.ts</code> · <code>client/deck/surfaces/orchestration/</code> · <code>client/deck/session/SessionSheet.tsx</code><br>
+  <code>server/report.ts</code> · <code>server/hooks.ts</code> · <code>server/execution-gate.ts</code> ·
+  <code>server/dispatch-handoff-relay.ts</code> · <code>shared/window-gates.ts</code> · <code>shared/execution-guard.ts</code> ·
+  <code>shared/requirement.ts</code> · <code>shared/work-route.ts</code> · <code>client/deck/surfaces/orchestration/</code> ·
+  <code>client/deck/panel/RequirementDispatchButton.tsx</code> · <code>client/deck/session/SessionSheet.tsx</code><br>
   图上每条结论都能在以上文件里指到具体函数；标「缺口」的地方是代码与设计意图不一致，尚未修。
 </footer>
 

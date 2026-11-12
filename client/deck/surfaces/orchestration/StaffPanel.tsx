@@ -6,16 +6,22 @@ import {
   MAX_STAFF_CONCURRENCY,
   MAX_STAFF_DUTY_CHARS,
   MAX_STAFF_NAME_CHARS,
-  MAX_STAFF_PATHS,
-  newStaffId,
-  normalizeStaffPath,
   type StaffCard,
-  type StaffKind,
 } from "../../../../shared/staff.ts";
 import type { PanelKey } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelButton } from "../../pixel.tsx";
 import { adoptScanCandidates } from "./scan-model.ts";
+import {
+  canSaveStaffDraft,
+  isTerritoryMissing,
+  staffCardFromDraft,
+  staffDraftFromCard,
+  staffDraftForNew,
+  territoryBannerText,
+  territoryText,
+  type StaffDraft,
+} from "./staff-draft.ts";
 import { StaffScan } from "./StaffScan.tsx";
 import type { DeckLang } from "../../../../shared/requirement.ts";
 import type { StaffScanCandidate } from "../../../../shared/staff-scan.ts";
@@ -29,71 +35,13 @@ import { OrchSection, OrchStepper, rowDivider } from "./parts.tsx";
  * 改 id 等于把履历拦腰截断。所以界面上根本不提供编辑入口，只在新建时生成一次。
  *
  * 与这一页其它设置一样，没有单独的「保存名册」按钮：每次增/改/删都整份写回，
- * 服务端再归一一次。表单里只做能提前说清的检查（名字非空、id 不重复），
- * 归一化的边界仍以服务端为准。
+ * 服务端再归一一次。表单里只做能提前说清的检查（名字非空、领地非空），
+ * 目录是否真实存在只能由服务端判，归一化的边界也以服务端为准。
+ *
+ * 领地的两种写法只在保存时确定：开关打开写 `["."]`（整片），关掉必须至少一条路径。
+ * 空 `paths` 是「没配」，不会再被显示成整片。
  */
 
-type Draft = {
-  id: string;
-  name: string;
-  kind: StaffKind;
-  duty: string;
-  /** 空串 = 不选档案，按难度路由。 */
-  profileId: string;
-  /** 一行一个路径，保存时再拆。 */
-  pathsText: string;
-  maxConcurrent: number;
-};
-
-function draftFromCard(card: StaffCard): Draft {
-  return {
-    id: card.id,
-    name: card.name,
-    kind: card.kind === "manager" ? "manager" : "worker",
-    duty: card.duty ?? "",
-    profileId: card.profileId ?? "",
-    pathsText: (card.paths ?? []).join("\n"),
-    maxConcurrent: card.maxConcurrent ?? 1,
-  };
-}
-
-function draftForNew(taken: readonly string[]): Draft {
-  return {
-    id: newStaffId(taken),
-    name: "",
-    kind: "worker",
-    duty: "",
-    profileId: "",
-    pathsText: "",
-    maxConcurrent: 1,
-  };
-}
-
-/** 一行一个路径：去 `./` 与前导 `/`、折叠结尾 `/`、去重、封顶。 */
-function pathsOf(value: string): string[] {
-  const out: string[] = [];
-  for (const line of value.split(/\r?\n/)) {
-    const path = normalizeStaffPath(line);
-    if (path && !out.includes(path)) out.push(path);
-    if (out.length >= MAX_STAFF_PATHS) break;
-  }
-  return out;
-}
-
-function cardFrom(draft: Draft): StaffCard {
-  const duty = draft.duty.trim();
-  const profileId = draft.profileId.trim();
-  const paths = pathsOf(draft.pathsText);
-  return {
-    id: draft.id,
-    name: draft.name.trim().slice(0, MAX_STAFF_NAME_CHARS),
-    kind: draft.kind,
-    ...(duty ? { duty: duty.slice(0, MAX_STAFF_DUTY_CHARS) } : {}),
-    ...(profileId ? { profileId } : {}),
-    ...(paths.length ? { paths } : {}),
-    maxConcurrent: Math.min(MAX_STAFF_CONCURRENCY, Math.max(1, Math.round(draft.maxConcurrent))),
-  };
-}
 
 type StaffStyles = ReturnType<typeof useStaffStyles>;
 
@@ -116,6 +64,13 @@ function useStaffStyles(skin: PixelSkin) {
       workerTag: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
       duty: { color: skin.colors.ink, fontSize: 11, lineHeight: 16, fontFamily: skin.mono.fontFamily },
       meta: { color: skin.colors.ink2, fontSize: 11, lineHeight: 16, fontFamily: skin.mono.fontFamily },
+      /** 领地独占一行：整页只有它是绿的，扫一眼就知道谁管哪片。 */
+      territory: {
+        color: skin.colors.ok,
+        fontSize: 11,
+        lineHeight: 16,
+        fontFamily: skin.mono.fontFamily,
+      },
       actions: { flexDirection: "row" as const, alignItems: "center" as const, gap: 4 },
       spacer: { flex: 1 },
       addRow: {
@@ -143,6 +98,19 @@ function useStaffStyles(skin: PixelSkin) {
       multiline: { minHeight: 64, textAlignVertical: "top" as const },
       pathsInput: { minHeight: 54, textAlignVertical: "top" as const },
       saveRow: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
+      /** 缺领地横幅：沿用编排页提醒的 1px 竖线，不用 PixelBanner 的整块底色。 */
+      territoryNotice: {
+        borderLeftWidth: 1,
+        borderLeftColor: skin.colors.warn,
+        paddingLeft: 8,
+        paddingVertical: 2,
+      },
+      territoryNoticeText: {
+        color: skin.colors.ink,
+        fontSize: 11,
+        lineHeight: 16,
+        fontFamily: skin.mono.fontFamily,
+      },
       warn: skin.error,
     }),
     [skin],
@@ -181,16 +149,18 @@ function StaffEditor({
   skin: PixelSkin;
   t(key: PanelKey, vars?: Record<string, string | number>): string;
   styles: StaffStyles;
-  draft: Draft;
+  draft: StaffDraft;
   profiles: ClientProfile[];
   creating: boolean;
   busy: boolean;
-  onChange(patch: Partial<Draft>): void;
+  onChange(patch: Partial<StaffDraft>): void;
   onSave(): void;
   onCancel(): void;
 }) {
   const profileMissing =
     Boolean(draft.profileId) && !profiles.some((profile) => profile.id === draft.profileId);
+  // 领地缺了就得一直说，不能等名字补完才提示。
+  const territoryMissing = isTerritoryMissing(draft);
   return (
     <View style={styles.editor}>
       <Text style={styles.meta}>
@@ -279,17 +249,39 @@ function StaffEditor({
       </Field>
 
       <Field styles={styles} label={t("orch.staffPaths")}>
+        <View style={styles.chips}>
+          <PixelButton
+            skin={skin}
+            mini
+            variant="tab"
+            active={draft.wholeTerritory}
+            label={t("orch.staffWholeTerritoryToggle")}
+            accessibilityLabel={t("orch.staffWholeTerritoryToggle")}
+            disabled={busy}
+            onPress={() => onChange({ wholeTerritory: !draft.wholeTerritory })}
+          />
+        </View>
         <TextInput
           accessibilityLabel={t("orch.staffPaths")}
           style={[skin.input, styles.pathsInput]}
-          value={draft.pathsText}
+          // 打开整片时输入框显示空白与「整片」，不把旧路径和当前状态摆在一起；
+          // 关掉开关再恢复草稿里留着的内容，用户不用重填。
+          value={draft.wholeTerritory ? "" : draft.pathsText}
           onChangeText={(pathsText) => onChange({ pathsText })}
-          placeholder={t("orch.staffPathsPlaceholder")}
+          placeholder={
+            draft.wholeTerritory ? t("orch.staffWholeTerritory") : t("orch.staffPathsPlaceholder")
+          }
           placeholderTextColor={skin.colors.ink2}
-          editable={!busy}
+          editable={!busy && !draft.wholeTerritory}
           multiline
         />
-        <Text style={styles.hint}>{t("orch.staffPathsHint")}</Text>
+        <Text style={!draft.wholeTerritory && territoryMissing ? styles.warn : styles.hint}>
+          {draft.wholeTerritory
+            ? t("orch.staffWholeTerritoryHint")
+            : territoryMissing
+              ? t("orch.staffPathsRequired")
+              : t("orch.staffPathsHint")}
+        </Text>
       </Field>
 
       <View style={styles.field}>
@@ -311,7 +303,7 @@ function StaffEditor({
           skin={skin}
           mini
           label={creating ? t("orch.staffCreate") : t("orch.staffSave")}
-          disabled={busy || !draft.name.trim()}
+          disabled={busy || !canSaveStaffDraft(draft)}
           onPress={onSave}
         />
         <PixelButton
@@ -355,29 +347,31 @@ export function StaffPanel({
   onSave(mutate: StaffMutation): Promise<boolean>;
 }) {
   const styles = useStaffStyles(skin);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [draft, setDraft] = useState<StaffDraft | null>(null);
   const [editingExisting, setEditingExisting] = useState(false);
   /** 上一次采纳的结果（加了几张、跳过几条）：扫岗面板里就地写一行，不再弹 toast。 */
   const [adoptNote, setAdoptNote] = useState<string | null>(null);
   const settingsBusy = Boolean(busy);
   const full = cards.length >= MAX_STAFF_CARDS;
+  /** 名册缺领地就拦派单：横幅列清是哪几张，没有缺项时整块不出现。 */
+  const territoryBanner = territoryBannerText(cards, t);
 
   const beginCreate = () => {
     setEditingExisting(false);
-    setDraft(draftForNew(cards.map((card) => card.id)));
+    setDraft(staffDraftForNew(cards.map((card) => card.id)));
   };
 
   const beginEdit = (card: StaffCard) => {
     setEditingExisting(true);
-    setDraft(draftFromCard(card));
+    setDraft(staffDraftFromCard(card));
   };
 
-  const changeDraft = (patch: Partial<Draft>) =>
+  const changeDraft = (patch: Partial<StaffDraft>) =>
     setDraft((current) => (current ? { ...current, ...patch } : current));
 
   const save = async () => {
-    if (!draft || settingsBusy || !draft.name.trim()) return;
-    const card = cardFrom(draft);
+    if (!draft || settingsBusy || !canSaveStaffDraft(draft)) return;
+    const card = staffCardFromDraft(draft);
     const mutate: StaffMutation = editingExisting
       ? (current) => current.map((item) => (item.id === card.id ? card : item))
       : (current) => [...current, card];
@@ -438,6 +432,11 @@ export function StaffPanel({
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={{ paddingBottom: 16 }}>
+      {territoryBanner ? (
+        <View style={styles.territoryNotice}>
+          <Text style={styles.territoryNoticeText}>{territoryBanner}</Text>
+        </View>
+      ) : null}
       <OrchSection
         skin={skin}
         title={t("orch.staff")}
@@ -449,6 +448,9 @@ export function StaffPanel({
         {cards.map((card, index) => {
           const active = Boolean(draft && editingExisting && draft.id === card.id);
           const duty = card.duty?.trim();
+          // 空领地显示成「没配」，不再冒充整片：这两种状态在派单时不是一回事。
+          const territory =
+            territoryText(card.paths, t("orch.staffWholeTerritory")) || t("orch.staffNoTerritory");
           return (
             <View key={card.id} style={[styles.row, rowDivider(skin, index === 0)]}>
               <View style={styles.head}>
@@ -484,10 +486,10 @@ export function StaffPanel({
               </Text>
               <Text style={styles.meta} numberOfLines={1}>
                 {t("orch.staffProfileValue", { profile: profileOf(card) })} ·{" "}
-                {t("orch.staffTerritoryValue", {
-                  paths: card.paths?.length ? card.paths.join(" · ") : t("orch.staffWholeTerritory"),
-                })}{" "}
-                · {t("orch.staffConcurrencyTag", { n: card.maxConcurrent ?? 1 })}
+                {t("orch.staffConcurrencyTag", { n: card.maxConcurrent ?? 1 })}
+              </Text>
+              <Text style={styles.territory} numberOfLines={1}>
+                {t("orch.staffTerritoryValue", { paths: territory })}
               </Text>
               {active && draft ? (
                 <StaffEditor

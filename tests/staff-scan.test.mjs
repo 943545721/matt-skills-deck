@@ -27,8 +27,7 @@ test("一份正常的扫描结果：原样收下，kind 缺省按员工", () => 
   const parsed = parseStaffScan({
     candidates: [
       candidate(),
-      candidate({ name: "后端", kind: "manager", paths: ["server"], evidence: [] }),
-      candidate({ name: "文档", paths: [], duty: "" }),
+      candidate({ name: "后端", kind: "manager", paths: ["server"], evidence: ["server/rpc/agent.ts"] }),
     ],
   });
   assert.equal(parsed.ok, true);
@@ -37,7 +36,6 @@ test("一份正常的扫描结果：原样收下，kind 缺省按员工", () => 
     [
       ["前端", "worker", ["src/web"]],
       ["后端", "manager", ["server"]],
-      ["文档", "worker", []],
     ],
   );
   assert.deepEqual(parsed.warnings, []);
@@ -88,6 +86,62 @@ test("领地指到工作区外面（..）：整条丢掉", () => {
   assert.match(parsed.warnings[0], /工作区外面/);
 });
 
+test("没写领地：整条丢掉，不默认成整片", () => {
+  const parsed = parseStaffScan({
+    candidates: [candidate({ paths: [] }), candidate({ name: "空路径", paths: ["./"] })],
+  });
+  assert.deepEqual(parsed.candidates, []);
+  assert.match(parsed.warnings[0], /没有说管哪片/);
+  assert.match(parsed.warnings.at(-1), /另有 2 条候选没能收下/);
+});
+
+test("`.` 表示整片：收下，任何依据都算在领地里", () => {
+  const parsed = parseStaffScan({ candidates: [candidate({ paths: ["."], evidence: ["AGENTS.md"] })] });
+  assert.deepEqual(parsed.candidates.map((item) => item.paths), [["."]]);
+  assert.deepEqual(parsed.warnings, []);
+});
+
+test("没有依据：说不清凭什么管这片，整条丢掉", () => {
+  const parsed = parseStaffScan({ candidates: [candidate({ evidence: [] })] });
+  assert.deepEqual(parsed.candidates, []);
+  assert.match(parsed.warnings[0], /没给出任何依据/);
+});
+
+test("整片也不能没有依据：`.` 不把空依据顺带放行", () => {
+  const parsed = parseStaffScan({ candidates: [candidate({ paths: ["."], evidence: [] })] });
+  assert.deepEqual(parsed.candidates, []);
+  assert.match(parsed.warnings[0], /没给出任何依据/);
+});
+
+test("依据一条都不在领地里：整条丢掉", () => {
+  const parsed = parseStaffScan({
+    candidates: [candidate({ paths: ["src/web"], evidence: ["server/rpc/agent.ts", "AGENTS.md"] })],
+  });
+  assert.deepEqual(parsed.candidates, []);
+  assert.match(parsed.warnings[0], /都不在它说的领地/);
+});
+
+test("领地按目录边界匹配：web 不收 web-admin 的依据", () => {
+  const parsed = parseStaffScan({
+    candidates: [candidate({ paths: ["web"], evidence: ["web-admin/app.ts"] })],
+  });
+  assert.deepEqual(parsed.candidates, []);
+});
+
+test("坏候选只丢自己，合格候选照常收下，丢弃条数进汇总", () => {
+  const parsed = parseStaffScan({
+    candidates: [
+      candidate({ name: "没说管哪片", paths: [] }),
+      candidate({ name: "依据在外", paths: ["src/web"], evidence: ["server/rpc/agent.ts"] }),
+      candidate({ name: "后端", paths: ["server"], evidence: ["server/rpc/agent.ts"] }),
+    ],
+  });
+  assert.deepEqual(parsed.candidates.map((item) => item.name), ["后端"]);
+  assert.match(parsed.warnings[0], /没有说管哪片/);
+  assert.match(parsed.warnings[1], /都不在它说的领地/);
+  assert.match(parsed.warnings.at(-1), /另有 2 条候选没能收下/);
+});
+
 test("职责过长就截断，不把一整篇散文塞进系统提示", () => {
   const parsed = parseStaffScan({ candidates: [candidate({ duty: "啊".repeat(5000) })] });
   assert.equal(parsed.candidates[0].duty.length, MAX_STAFF_DUTY_CHARS);
@@ -101,7 +155,7 @@ test("同名同领地的重复候选合并成一条，连点两次不会长出�
 
 test("候选太多只留前 12 条，并明说还有没收下的", () => {
   const many = Array.from({ length: MAX_STAFF_SCAN_CANDIDATES + 3 }, (_, index) =>
-    candidate({ name: `岗 ${index}`, paths: [`dir-${index}`] }),
+    candidate({ name: `岗 ${index}`, paths: [`dir-${index}`], evidence: [`dir-${index}/x.ts`] }),
   );
   const parsed = parseStaffScan({ candidates: many });
   assert.equal(parsed.candidates.length, MAX_STAFF_SCAN_CANDIDATES);
@@ -110,7 +164,7 @@ test("候选太多只留前 12 条，并明说还有没收下的", () => {
 
 test("依据只留前几条，且不重复", () => {
   const parsed = parseStaffScan({
-    candidates: [candidate({ evidence: ["a", "a", "b", "c", "d", "e", "f", "g"] })],
+    candidates: [candidate({ paths: ["a"], evidence: ["a", "a", "b", "c", "d", "e", "f", "g"] })],
   });
   assert.deepEqual(parsed.candidates[0].evidence, ["a", "b", "c", "d", "e", "f"]);
 });
@@ -223,13 +277,24 @@ test("简报带上现有名册，免得扫出同一片领地", () => {
   const brief = buildScanBrief(
     {
       workspaceDir: "/w/demo",
-      cards: [{ id: "staff-aaaaaa", name: "前端", kind: "manager", paths: ["src/web"], maxConcurrent: 1 }],
+      cards: [
+        { id: "staff-aaaaaa", name: "前端", kind: "manager", paths: ["src/web"], maxConcurrent: 1 },
+        { id: "staff-bbbbbb", name: "全栈", kind: "worker", paths: ["."], maxConcurrent: 1 },
+        { id: "staff-cccccc", name: "旧卡", kind: "worker", paths: [], maxConcurrent: 1 },
+      ],
     },
     { dirs: [{ name: "src", children: ["web/"] }], files: ["package.json"], ci: [], warnings: [] },
   );
   assert.match(brief, /前端/);
   assert.match(brief, /staff-aaaaaa/);
   assert.match(brief, /src\/web/);
+  assert.match(brief, /全栈（staff-bbbbbb，员工）领地：整片/);
+  // 旧数据的空领地是「没配」，不能读成整片，否则等于告诉扫描整片已有主。
+  assert.match(brief, /旧卡（staff-cccccc，员工）领地：（没配）/);
+  assert.match(brief, /确实存在/);
+  assert.match(brief, /只有整个工作区确实是一个模块时才写「\.」/);
+  assert.match(brief, /至少一条要落在领地里/);
+  assert.equal(brief.includes("留空 = 整片"), false);
   assert.match(brief, /\.deck\/staff-scan\.json/);
   assert.match(brief, /project-survey/);
 });
@@ -240,7 +305,11 @@ test("英文简报写英文规矩，且同样指定落盘文件", () => {
     { dirs: [], files: [], ci: [], warnings: [] },
   );
   assert.match(brief, /Staff scan brief/);
+  assert.match(brief, /directories relative to the workspace root that really exist/);
+  assert.match(brief, /write "\." only when the whole workspace really is one module/);
+  assert.match(brief, /at least one must fall inside a territory/);
   assert.match(brief, /\.deck\/staff-scan\.json/);
   assert.match(brief, /roster is still empty/);
+  assert.equal(brief.includes("empty = whole workspace"), false);
   assert.equal(brief.includes("名册还是空的"), false);
 });

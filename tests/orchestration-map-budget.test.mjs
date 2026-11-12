@@ -5,6 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { writeOrchestration } from "../server/orchestration-store.ts";
 import { runDispatch } from "../server/orchestration.ts";
+import { createLocalIssue } from "../server/tracker/local.ts";
 import {
   DECK_MAP_LABEL,
   MAX_MAP_CONCURRENCY,
@@ -203,6 +204,17 @@ const BASE = {
   reportOnFinish: true,
 };
 
+/** 执行层现在也查票门：能派的任务必须先挂一张已定稿的需求。 */
+async function finalizedRequirement(dir) {
+  const issue = await createLocalIssue(dir, {
+    title: "需求：地图预算",
+    body: "六节谈完了",
+    labels: ["requirement", "deck:定稿"],
+  });
+  assert.equal(issue.ok, true);
+  return issue.number;
+}
+
 const child = (id, map, status) => ({
   id,
   workspaceId: "ws-1",
@@ -212,11 +224,12 @@ const child = (id, map, status) => ({
 
 test("执行层：宿主上已经开着两个，预算 2 时这次一条也派不出去，并说清为什么", async () => {
   const dir = await workspaceWith({ ...BASE, mapBudgets: [{ map: "#2", concurrency: 2 }] });
+  const requirement = await finalizedRequirement(dir);
   const paseo = fakePaseo({ agents: [child("a", "#2", "running"), child("b", "#2", "idle")] });
   const result = await runDispatch(paseo, {
     workspaceId: "ws-1",
     workspaceDir: dir,
-    tasks: [task("t1")],
+    tasks: [task("t1", { requirementKey: requirement })],
     map: "#2",
     depth: 1,
   });
@@ -230,6 +243,7 @@ test("执行层：宿主上已经开着两个，预算 2 时这次一条也派�
 
 test("执行层：已关闭的子会话不占名额；开着的不带地图标也不占", async () => {
   const dir = await workspaceWith({ ...BASE, mapBudgets: [{ map: "#2", concurrency: 2 }] });
+  const requirement = await finalizedRequirement(dir);
   const paseo = fakePaseo({
     agents: [
       child("a", "#2", "closed"),
@@ -240,7 +254,7 @@ test("执行层：已关闭的子会话不占名额；开着的不带地图标�
   const result = await runDispatch(paseo, {
     workspaceId: "ws-1",
     workspaceDir: dir,
-    tasks: [task("t1")],
+    tasks: [task("t1", { requirementKey: requirement })],
     map: "#2",
     depth: 1,
   });
@@ -255,6 +269,7 @@ test("执行层：已关闭的子会话不占名额；开着的不带地图标�
 
 test("执行层：读不到会话清单时明说「这次只按本批算」，不装作拦住了", async () => {
   const dir = await workspaceWith({ ...BASE, mapBudgets: [{ map: "#2", concurrency: 1 }] });
+  const requirement = await finalizedRequirement(dir);
   const paseo = fakePaseo();
   paseo.agents.list = async () => {
     throw new Error("agents.list 挂了");
@@ -262,7 +277,7 @@ test("执行层：读不到会话清单时明说「这次只按本批算」，�
   const result = await runDispatch(paseo, {
     workspaceId: "ws-1",
     workspaceDir: dir,
-    tasks: [task("t1")],
+    tasks: [task("t1", { requirementKey: requirement })],
     map: "#2",
     depth: 1,
   });
@@ -273,11 +288,12 @@ test("执行层：读不到会话清单时明说「这次只按本批算」，�
 
 test("执行层：配了预算却没说是哪张地图的票，要说出来", async () => {
   const dir = await workspaceWith({ ...BASE, mapBudgets: [{ map: "#2", concurrency: 1 }] });
+  const requirement = await finalizedRequirement(dir);
   const paseo = fakePaseo();
   const result = await runDispatch(paseo, {
     workspaceId: "ws-1",
     workspaceDir: dir,
-    tasks: [task("t1")],
+    tasks: [task("t1", { requirementKey: requirement })],
     depth: 1,
   });
   assert.equal(result.ok, true);

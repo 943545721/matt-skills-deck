@@ -1,15 +1,15 @@
 # 议题跟踪器：GitHub
 
-这个仓库的议题与规格说明都以 GitHub 议题的形式存放。所有操作都用 `gh` CLI。
+这个仓库的议题与规格说明都以 GitHub 议题的形式存放。**读**用 `gh`；**写**（建票、改票、评论、打标签、关闭）一律走插件的 `deck_*` 工具——插件的票闸会在 shell 权限上直接拒掉 `gh` / `glab` 的写命令，绕不过去。
 
 ## 约定
 
-- **创建议题**：`gh issue create --title "..." --body "..."`。多行正文用 heredoc。
-- **读取议题**：`gh issue view <number> --comments`，用 `jq` 过滤评论，同时取出标签。
-- **列出议题**：`gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'`，配合合适的 `--label` 和 `--state` 过滤条件。
-- **给议题写评论**：`gh issue comment <number> --body "..."`
-- **加标签 / 去标签**：`gh issue edit <number> --add-label "..."` / `--remove-label "..."`
-- **关闭**：`gh issue close <number> --comment "..."`
+- **创建议题**：`deck_issue_create`（`kind` 必填；`requirementKey`、`parentKey`、`blockedBy` 由工具校验）。多行正文直接写进 `body`。
+- **读取议题**：`gh issue view <number> --comments` 照常可用；要正文、标签、评论一起拿，用 `deck_issue_get`。
+- **列出议题**：`gh issue list --state open --json number,title,body,labels --jq '…'` 或 `deck_issue_list`。
+- **给议题写评论**：`deck_issue_comment`。
+- **加标签 / 去标签**：`deck_issue_labels`（整组替换）或 `deck_issue_patch` 的 `addLabels` / `removeLabels`。
+- **关闭**：`deck_issue_patch`（`key` + `close: true`，可同时带 `comment`）。
 
 从 `git remote -v` 推断仓库；在克隆目录里运行时，`gh` 会自动完成这件事。
 
@@ -37,9 +37,9 @@ GitHub 的议题和 PR 共用一套编号，所以光写一个 `#42` 可能指�
 
 供 `/wayfinder` 使用。**地图**是一个议题，**子**议题就是工单。
 
-- **地图**：一个打了 `wayfinder:map` 标签的议题，正文里放 Notes、Decisions so far 和战争迷雾这些内容。`gh issue create --label wayfinder:map`。
-- **子工单**：一条作为 GitHub 子议题（sub-issue）与地图关联的议题（对 sub-issues 端点调用 `gh api`）。子议题功能没开启时，把子工单加进地图正文里的任务列表，并在子工单正文最上面写 `Part of #<map>`。标签：`wayfinder:<type>`（`research`/`prototype`/`grilling`/`task`）。一旦认领，工单会指派给负责推进的开发者。
-- **阻塞**：用 GitHub 的**原生议题依赖关系**，这是规范表示，在界面上看得见。加一条边：`gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`，其中 `<blocker-db-id>` 是阻塞项的**数据库数字 id**（`gh api repos/<owner>/<repo>/issues/<n> --jq .id`，_不是_ `#number`，也不是 `node_id`）。GitHub 会在 `issue_dependencies_summary.blocked_by` 里报告当前仍打开的阻塞项（这是实际生效的门）。依赖功能不可用时，回退成在子工单正文最上面写一行 `Blocked by: #<n>, #<n>`。所有阻塞项都关闭时，工单才算解除阻塞。
-- **前沿查询**：列出地图下所有打开的子议题（`gh issue list --state open`，范围限定在地图的子议题 / 任务列表），去掉有打开阻塞项的（`issue_dependencies_summary.blocked_by > 0`，或 `Blocked by` 行里还有打开的议题）或已有指派的；按地图顺序最先的胜出。
-- **认领**：`gh issue edit <n> --add-assignee @me`，这是本次会话的第一次写入。
-- **解决**：`gh issue comment <n> --body "<answer>"`，然后 `gh issue close <n>`，再把一条上下文指针（要点 + 链接）追加到地图的 Decisions so far 段。
+- **地图**：一个打了 `wayfinder:map` 标签的议题，正文里放 Notes、Decisions so far 和战争迷雾这些内容。用 `deck_map_plan_create` 连地图与首批路线票一起建。
+- **子工单**：用 `deck_issue_create` 的 `kind: "map-ticket"` + `parentKey: <地图号>`，标签写 `wayfinder:<type>`（`research`/`prototype`/`grilling`/`task`）——工具会写成原生父子关系。一旦认领，工单会指派给负责推进的开发者。
+- **阻塞**：用 `deck_map_link` 写 `blockedBy`（或建票时直接带 `blockedBy`），工具会落成 GitHub 的原生依赖边。依赖功能不可用时，回退成在子工单正文最上面写一行 `Blocked by: #<n>, #<n>`。所有阻塞项都关闭时，工单才算解除阻塞。
+- **前沿查询**：`deck_map_snapshot`（`frontierOnly: true`）或 `deck_next_steps`，返回的就是「打开、未认领、阻塞项已关」的票。
+- **认领**：`deck_issue_patch` 写 `assignees`，这是本次会话的第一次写入。
+- **解决**：`deck_issue_comment` 写答案，再用 `deck_issue_patch` 关闭；最后把一条上下文指针（要点 + 链接）追加到地图的 Decisions so far 段（`deck_issue_patch` 改地图正文）。

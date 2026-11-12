@@ -17,6 +17,7 @@ import { usePanelText } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelBanner, PixelButton, usePixel } from "../../pixel.tsx";
 import { OrchSection, rowDivider } from "./parts.tsx";
+import { territoryLines } from "./staff-draft.ts";
 
 /**
  * 协调收件箱。
@@ -157,7 +158,8 @@ function useInboxStyles(skin: PixelSkin) {
       who: { flex: 1, color: skin.colors.ink, fontSize: 12, fontFamily: skin.mono.fontFamily },
       time: { color: skin.colors.ink2, fontSize: 10, fontFamily: skin.mono.fontFamily },
       body: { color: skin.colors.ink, fontSize: 11, lineHeight: 16, fontFamily: skin.mono.fontFamily },
-      path: { color: skin.colors.ink2, fontSize: 11, fontFamily: skin.mono.fontFamily },
+      /** 路径行与岗位领地同一种绿，版式不变。 */
+      path: { color: skin.colors.ok, fontSize: 11, fontFamily: skin.mono.fontFamily },
       actions: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 4, paddingTop: 2 },
       targetLine: { flexDirection: "row" as const, flexWrap: "wrap" as const, alignItems: "center" as const, gap: 4 },
       toolbar: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6 },
@@ -186,7 +188,7 @@ export function InboxPanel({
   workspaceId: string;
   workspaceDir: string;
 }) {
-  const { zh } = usePanelText();
+  const { zh, t } = usePanelText();
   const copy = zh ? ZH : EN;
   const skin = usePixel(theme);
   const styles = useInboxStyles(skin);
@@ -305,8 +307,10 @@ export function InboxPanel({
               <Text style={styles.who} numberOfLines={2}>{whoLine(row, copy)}</Text>
 
               <Text style={styles.body} numberOfLines={3}>{row.taskSummary}</Text>
-              {row.paths.map((path) => (
-                <Text key={path} style={styles.path} numberOfLines={1}>{path}</Text>
+              {territoryLines(row.paths).map((line, lineIndex) => (
+                <Text key={`${line.path}#${lineIndex}`} style={styles.path} numberOfLines={1}>
+                  {line.whole ? t("orch.staffWholeTerritory") : line.path}
+                </Text>
               ))}
               {row.need ? <Text style={styles.hint}>{fill(copy.needLine, { value: row.need })}</Text> : null}
               {row.field ? <Text style={styles.hint}>{fill(copy.fieldLine, { value: row.field })}</Text> : null}

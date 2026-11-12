@@ -3,10 +3,12 @@ import { test } from "node:test";
 import {
   ACCEPTANCE_RECORD_PREFIX,
   DECK_FINALIZE_LABEL,
+  finalizeProblem,
   IMPACT_COLUMNS,
   IMPACT_HEADING,
   impactChainProblem,
   impactRowProblem,
+  impactSectionProblem,
   isFinalized,
   needsManualImpactTable,
   normalizeRequirementKey,
@@ -275,6 +277,28 @@ test("requirementKey 接受数字、#号与字符串；空值不收", () => {
   assert.equal(normalizeRequirementKey(""), null);
   assert.equal(normalizeRequirementKey("abc"), null);
   assert.equal(normalizeRequirementKey(undefined), null);
+});
+
+test("impactSectionProblem 只看结构：没写这一节放行，写坏就报", () => {
+  assert.equal(impactSectionProblem(""), null);
+  assert.equal(impactSectionProblem("## 问题\n没有影响面。"), null);
+  // 结构对、数据行还没填：写票过程中允许，按「未写完」处理。
+  assert.equal(impactSectionProblem([IMPACT_HEADING, "| 区 / 仓库 | 依据 | 结论 | 核的人 |", "|---|---|---|---|"].join("\n")), null);
+  // 写坏的三种：列名不对、多插一列、缺分隔行。
+  assert.match(impactSectionProblem("## 影响面\n| 区 | 依据 | 结论 | 核的人 |\n|---|---|---|---|"), /区 \/ 仓库/);
+  assert.match(
+    impactSectionProblem("## 影响面\n| 区 / 仓库 | 仓库 | 依据 | 结论 | 核验人 |\n|---|---|---|---|---|"),
+    /第 2 列应该是「依据」/,
+  );
+  assert.match(impactSectionProblem("## 影响面\n| 区 / 仓库 | 依据 | 结论 | 核的人 |"), /分隔行/);
+});
+
+test("finalizeProblem：单区没写这一节放行，跨区没写就拒，定稿要求每行都核过", () => {
+  assert.equal(finalizeProblem("## 目标\n只改后端", ["kxhyapp.com"]), null);
+  assert.match(finalizeProblem("## 目标\n只改后端", ["a", "b"]) ?? "", /影响面/);
+  assert.equal(finalizeProblem("## 影响面\n| 区 / 仓库 | 依据 | 结论 | 核的人 |\n|---|---|---|---|", ["a", "b"]), "影响面表没有数据行：每个要动的区至少占一行。");
+  assert.equal(finalizeProblem(TABLE, ["kxhyapp.com", "kxhyapp.com-saas"]), null);
+  assert.match(finalizeProblem(TABLE.replace("| 要动 |", "| 动一下 |"), ["kxhyapp.com"]), /结论/);
 });
 
 test("isFinalized 只认 deck:定稿（大小写不敏感）", () => {

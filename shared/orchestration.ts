@@ -124,6 +124,8 @@ export interface WorkspaceRoles {
   workspaceId: string;
   /** 主窗口：跟用户探讨方案的地方；回传链条的终点。 */
   mainAgentId?: string;
+  /** 需求窗口：唯一允许建需求票的地方；不建工作票、不派活。 */
+  requirementAgentId?: string;
   /** 派单窗口：接定稿方案、拆活、派子会话的地方。可以与主窗口是同一个。 */
   dispatcherAgentId?: string;
   /** 进度窗口：只收进度抄送的地方；没配就不抄送。 */
@@ -136,9 +138,10 @@ export interface WorkspaceRoles {
 
 /** 角色 → 槽位字段。客户端与服务端都从这里取，别处不再各写一份映射。 */
 export const ROLE_AGENT_FIELD: Readonly<
-  Record<FixedRole, "mainAgentId" | "dispatcherAgentId" | "progressAgentId">
+  Record<FixedRole, "mainAgentId" | "requirementAgentId" | "dispatcherAgentId" | "progressAgentId">
 > = Object.freeze({
   main: "mainAgentId",
+  requirement: "requirementAgentId",
   dispatcher: "dispatcherAgentId",
   progress: "progressAgentId",
 });
@@ -154,7 +157,7 @@ export function agentIdOf(roles: WorkspaceRoles | null | undefined, role: FixedR
  * 一个工作区的角色绑定，名册已经按目录合并过。
  *
  * 两半的归属不同，必须分开取：
- * - 会话槽位（主窗口 / 派单窗口 / 进度窗口）按 `workspaceId`——会话本来就属于具体工作区；
+ * - 会话槽位（主窗口 / 需求窗口 / 派单窗口 / 进度窗口）按 `workspaceId`——会话本来就属于具体工作区；
  * - 名册按**目录**——同一个目录在宿主里会攒出好几个 workspaceId（每次重开一个），
  *   卡若跟着 id 分开，「换个工作区打开」就等于人全没了。见 `rosterOf`。
  */
@@ -183,11 +186,12 @@ export function withAgentIdFor(
 ): WorkspaceRoles {
   const next: WorkspaceRoles = { ...(roles ?? {}), workspaceId };
   delete next.mainAgentId;
+  delete next.requirementAgentId;
   delete next.dispatcherAgentId;
   delete next.progressAgentId;
   const trimmed = agentId?.trim();
   if (trimmed) next[ROLE_AGENT_FIELD[role]] = trimmed;
-  // 其它槽位要留：只换一个角色，不该把另外两个清空。
+  // 其它槽位要留：只换一个角色，不该把另外几个清空。
   for (const other of FIXED_ROLES) {
     if (other === role) continue;
     const id = agentIdOf(roles, other);
@@ -589,7 +593,7 @@ export function ticketLabelOf(repoKey: string | null | undefined, number: number
 export const DECK_DIFFICULTY_LABEL = "deck.difficulty";
 export const DECK_DISPATCH_LABEL = "deck.dispatch";
 /** 这个子会话是名册里的哪张卡在干；岗位履历按它反查。定义在 `./staff.ts`，上面已重新导出。 */
-/** 这个会话是三个固定窗口里的哪一个；会话树与面板按它认人。 */
+/** 这个会话是四个固定窗口里的哪一个；会话树与面板按它认人。 */
 export const DECK_ROLE_LABEL = "deck.role";
 /** 标记「这是插件建出来的固定窗口」，与派单产生的子会话区分开。 */
 export const DECK_ROLE_WINDOW_LABEL = "deck.role.window";
@@ -727,7 +731,13 @@ export type DispatchRejection =
   /** 名册非空、没写 staff，也没给 region：不猜人，也不猜区。 */
   | "region-required"
   /** region 里没有任何一张卡覆盖这片：不回落成根经理或随便一张卡。 */
-  | "region-unowned";
+  | "region-unowned"
+  /** 这条任务没挂需求票：无票不干活。 */
+  | "no-requirement"
+  /** 需求票读不出来：无法确认它定没定稿。 */
+  | "requirement-unreadable"
+  /** 需求票没有 `deck:定稿`：先谈完、核完影响面再派。 */
+  | "requirement-not-finalized";
 
 export interface DispatchTask extends DispatchTaskInput {
   difficulty: Difficulty;
@@ -1401,7 +1411,7 @@ export function countTree(nodes: readonly AgentNode[]): { nodes: number; depth: 
 // ---------------------------------------------------------------------------
 
 /**
- * 收三个窗口的提示词：只认三个固定键，空的不留，超长的截断。
+ * 收四个窗口的提示词：只认四个固定键，空的不留，超长的截断。
  *
  * 截断而不是拒收：这里是归一化路径，一份手改坏的文件不该让整份设置失效；
  * 真按 4000 字去写提示词的人本来就该拆成更短的指令。
@@ -1455,6 +1465,7 @@ export function normalizeOrchestration(value: unknown): OrchestrationSettings {
       const workspaceId = text(role?.workspaceId);
       if (!role || !workspaceId) continue;
       const mainAgentId = optionalText(role.mainAgentId);
+      const requirementAgentId = optionalText(role.requirementAgentId);
       const dispatcherAgentId = optionalText(role.dispatcherAgentId);
       const progressAgentId = optionalText(role.progressAgentId);
       const prompts = promptsOf(role.prompts);
@@ -1462,6 +1473,7 @@ export function normalizeOrchestration(value: unknown): OrchestrationSettings {
       roles.push({
         workspaceId,
         ...(mainAgentId ? { mainAgentId } : {}),
+        ...(requirementAgentId ? { requirementAgentId } : {}),
         ...(dispatcherAgentId ? { dispatcherAgentId } : {}),
         ...(progressAgentId ? { progressAgentId } : {}),
         ...(prompts ? { prompts } : {}),
@@ -1560,6 +1572,7 @@ export function withWorkspaceRoles(
   const rest = settings.roles.filter((item) => item.workspaceId !== role.workspaceId);
   const next: WorkspaceRoles = { workspaceId: role.workspaceId };
   if (role.mainAgentId?.trim()) next.mainAgentId = role.mainAgentId.trim();
+  if (role.requirementAgentId?.trim()) next.requirementAgentId = role.requirementAgentId.trim();
   if (role.dispatcherAgentId?.trim()) next.dispatcherAgentId = role.dispatcherAgentId.trim();
   if (role.progressAgentId?.trim()) next.progressAgentId = role.progressAgentId.trim();
   const prompts = promptsOf(role.prompts);

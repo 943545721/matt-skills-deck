@@ -2,8 +2,9 @@ import { useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { ScrollView, TextInput } from "@getpaseo/plugin/client/ui";
 import type { ProviderModelList } from "../../../../shared/orchestration-rpc.ts";
+import type { ProviderModelDefinition } from "../../../../shared/provider-models.ts";
 import { installCommandOf, installRecipeFor, installStateOf } from "../../../../shared/provider-install.ts";
-import { isModelEnvKey } from "../../../../shared/provider-models.ts";
+import { claudeCodeContextWindowOf, CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY, isModelEnvKey } from "../../../../shared/provider-models.ts";
 import { envKeysFor } from "../../../../shared/provider-env.ts";
 import type { PanelKey } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
@@ -60,7 +61,7 @@ export function ClientsPanel({
   providers: ProviderRow[];
   onSaveEnv(input: { provider: string; env: Record<string, string> }): void;
   /** 传这个客户端声明的**完整**模型清单（替换语义）。 */
-  onSaveModel(input: { provider: string; models: string[] }): void;
+  onSaveModel(input: { provider: string; models: string[]; modelDefinitions?: ProviderModelDefinition[] }): void;
   /** 只改显示名。 */
   onSaveLabel(input: { provider: string; label: string }): void;
   /** 全量默认档表（来自设置）；界面按 provider + model 查自己那一条。 */
@@ -75,7 +76,7 @@ export function ClientsPanel({
   onInstall(provider: string): Promise<{ ok: true; output: string } | { ok: false; detail: string; output?: string }>;
   /** 用配置里已有的 base url + 凭据去问接口要模型清单。 */
   onFetchModels(provider: string): Promise<
-    { ok: true; endpoint: string; models: string[] } | { ok: false; detail: string }
+    { ok: true; endpoint: string; models: ProviderModelDefinition[] } | { ok: false; detail: string }
   >;
   /**
    * 让宿主重读模型清单（`providers.refresh` + 回读快照）。
@@ -361,6 +362,16 @@ export function ClientsPanel({
         const otherKeys = provider.env.filter(
           (item) => item.key !== keys.baseUrlKey && !provider.credentialKeys.includes(item.key),
         );
+        const contextEnv = envOf(CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY);
+        const clientContextWindow = contextEnv && !contextEnv.masked && /^\d+$/.test(contextEnv.display)
+          ? Number(contextEnv.display)
+          : undefined;
+        const apiContextWindow = provider.id === "claude"
+          ? claudeCodeContextWindowOf(
+              (provider.modelCapabilities ?? []).filter((model) => provider.configModels.includes(model.id)),
+              envOf("ANTHROPIC_MODEL")?.display,
+            )
+          : undefined;
 
         /** 一个密钥键：掩码（或原值）+ 显示 + 改。 */
         const secretRow = (key: string) => {
@@ -522,10 +533,25 @@ export function ClientsPanel({
                       t={t}
                       models={provider.configModels}
                       listKey={provider.modelsKey}
+                      baseUrl={provider.baseUrl}
                       busy={busy}
-                      onSave={(ids) => onSaveModel({ provider: provider.id, models: ids })}
+                      onSave={(ids, definitions) => onSaveModel({ provider: provider.id, models: ids, modelDefinitions: definitions })}
                       onFetch={() => onFetchModels(provider.id)}
                     />
+                    {provider.id === "claude" && (apiContextWindow !== undefined || clientContextWindow !== undefined) ? (
+                      <View style={{ gap: 4 }}>
+                        <Text style={styles.dim}>
+                          {t("orch.contextWindow", {
+                            api: apiContextWindow ?? t("orch.contextWindowUnknown"),
+                            client: clientContextWindow ?? t("orch.contextWindowDefault"),
+                          })}
+                        </Text>
+                        {apiContextWindow !== undefined && apiContextWindow !== clientContextWindow ? (
+                          <Text style={styles.dim}>{t("orch.contextWindowMismatch", { n: apiContextWindow })}</Text>
+                        ) : null}
+                        <Text style={styles.dim}>{t("orch.contextWindowRestart")}</Text>
+                      </View>
+                    ) : null}
                     {/* 每个已选模型自己的默认档：派单用这个模型时自动带上。 */}
                     <ModelThinkingList
                       skin={skin}

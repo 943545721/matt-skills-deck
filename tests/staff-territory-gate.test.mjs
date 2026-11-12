@@ -77,8 +77,13 @@ function permissionHandlers() {
   const server = fakeServer();
   registerHooks(server);
   const handlers = server.handlers.get("on:agent.permission_requested") ?? [];
-  assert.equal(handlers.length, 2, "同一事件上必须有两个处理函数：越界闸在前，自动放行在后");
-  return handlers;
+  // 越界闸必须在最前、自动放行必须在最后；中间的 gh 票闸（只认 shell 命令）
+  // 与这里判的越界写无关，也不该限制它以后还能再加几条。
+  assert.ok(
+    handlers.length >= 3,
+    "同一事件上至少要有三个处理函数：越界闸 → gh 票闸 → 自动放行",
+  );
+  return [handlers[0], handlers.at(-1)];
 }
 
 /** 宿主替身：deny 过的请求会真的消失，第二条 allow 会像真宿主那样报 No pending permission request。 */
@@ -438,7 +443,7 @@ test("事件里没有 labels 时，靠岗位会话台账仍认出员工", async 
   assert.equal(paseo.calls[0].response.behavior, "deny");
 });
 
-test("开了自动放行：越界仍是 deny，后面的 allow 落空并留下 No pending permission request", async (t) => {
+test("开了自动放行：越界仍是 deny，自动放行看到 held 标记不再补一条 allow", async (t) => {
   useSettings(t, { backend: "local", autoAllowPermissions: true });
   const dir = await makeWorkspace(t);
   const paseo = fakePaseo();
@@ -453,18 +458,12 @@ test("开了自动放行：越界仍是 deny，后面的 allow 落空并留下 N
   await handlers[0](payload, context(paseo));
   await handlers[1](payload, context(paseo));
 
-  assert.equal(paseo.calls.length, 2, "先是 deny，后是自动放行那一次 allow 尝试");
+  assert.equal(paseo.calls.length, 1, "越界闸 deny 之后，自动放行不再尝试 allow");
   assert.equal(paseo.calls[0].response.behavior, "deny");
-  assert.equal(paseo.calls[1].response.behavior, "allow");
-  const text = logs();
-  assert.ok(
-    text.includes("No pending permission request"),
-    "请求已被 deny 撤掉，第二条 allow 必须落空——这是顺序生效的正面证据",
-  );
-  assert.ok(!text.includes("已自动放行"), "deny 不能被翻回 allow");
+  assert.ok(!logs().includes("已自动放行"), "deny 不能被翻回 allow");
 });
 
-test("宿主并发分发时，自动放行也先等闸判完，不会抢在 deny 前面 allow", async (t) => {
+test("宿主并发分发时，自动放行也先等闸判完，deny 之后不会再补 allow", async (t) => {
   useSettings(t, { backend: "local", autoAllowPermissions: true });
   const dir = await makeWorkspace(t);
   const paseo = fakePaseo();
@@ -481,11 +480,8 @@ test("宿主并发分发时，自动放行也先等闸判完，不会抢在 deny
     handlers[1](payload, context(paseo)),
   ]);
 
+  assert.equal(paseo.calls.length, 1, "deny 之后自动放行被 held 挡住");
   assert.equal(paseo.calls[0].response.behavior, "deny");
-  assert.ok(
-    logs().includes("No pending permission request"),
-    "第二条 allow 必须撞上已经撤掉的请求",
-  );
 });
 
 /* ------------------------------------------------------------------ 收件箱 RPC */
@@ -525,12 +521,15 @@ test("agent.created：子会话带父 id → 往协调收件箱记一条血缘",
   const server = fakeServer();
   registerHooks(server);
   const created = server.handlers.get("on:agent.created") ?? [];
-  assert.equal(created.length, 1);
+  assert.ok(created.length >= 1, "agent.created 至少要有血缘那一个处理器");
 
-  await created[0](
-    { agent: { id: "child-1", cwd: dir, workspaceId: "ws-1", parentAgentId: "parent-1", labels: {} } },
-    context(fakePaseo()),
-  );
+  // 现在还有交接 relay 挂在同一个事件上：所有处理器都要跑，血缘那一个不能因为顺序被跳过。
+  for (const handler of created) {
+    await handler(
+      { agent: { id: "child-1", cwd: dir, workspaceId: "ws-1", parentAgentId: "parent-1", labels: {} } },
+      context(fakePaseo()),
+    );
+  }
 
   const lineage = (await readCoordination(dir)).records.filter((item) => item.kind === "lineage");
   assert.equal(lineage.length, 1);

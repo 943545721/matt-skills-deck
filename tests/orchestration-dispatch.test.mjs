@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { orchestrationFileOf, writeOrchestration } from "../server/orchestration-store.ts";
 import { runDispatch } from "../server/orchestration.ts";
-import { getLocalIssue } from "../server/tracker/local.ts";
+import { createLocalIssue, getLocalIssue } from "../server/tracker/local.ts";
 import { orchestrationDispatchRpc } from "../shared/orchestration-rpc.ts";
 
 /**
@@ -69,12 +69,37 @@ async function workspaceWith(settings) {
 
 const TASKS = [{ key: "t1", prompt: "做点事" }];
 
+/** 执行层现在也查票门：能派的任务必须先挂一张已定稿的需求。 */
+async function finalizedRequirement(dir) {
+  const issue = await createLocalIssue(dir, {
+    title: "需求：做点事",
+    body: "六节谈完了",
+    labels: ["requirement", "deck:定稿"],
+  });
+  assert.equal(issue.ok, true);
+  return issue.number;
+}
+
 test("派单：这个工作区一条角色都没有时，原因报 unknown-workspace（不是「没选派单窗口」）", async () => {
   const dir = await workspaceWith({ roles: [], routing: ROUTING, maxDepth: 3, maxChildrenPerDispatch: 4, reportOnFinish: true });
   const result = await runDispatch(fakePaseo(), { workspaceId: "ws-1", workspaceDir: dir, tasks: TASKS, depth: 1 });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "unknown-workspace");
   assert.match(result.detail, /加一条工作区角色/);
+});
+
+test("派单：带会话身份、工作区一条角色都没有时报 no-workspace", async () => {
+  const dir = await workspaceWith({ roles: [], routing: ROUTING, maxDepth: 3, maxChildrenPerDispatch: 4, reportOnFinish: true });
+  const result = await runDispatch(fakePaseo(), {
+    workspaceId: "ws-1",
+    workspaceDir: dir,
+    tasks: TASKS,
+    depth: 1,
+    callerAgentId: "dispatch-9",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "no-workspace");
+  assert.match(result.detail, /没有任何角色绑定/);
 });
 
 test("派单：绑了角色但没选派单窗口时报 no-dispatcher", async () => {
@@ -114,7 +139,7 @@ test("派单：超层拒绝，且不夹到上限硬派", async () => {
   assert.equal(paseo.created.length, 0, "超层一个会话都不能建");
 });
 
-test("派单：成功路径按路由落到 provider/model，标签里的父会话是实际调用者", async () => {
+test("派单：成功路径按路由落到 provider/model，标签里的父会话是绑定的派单窗口", async () => {
   const dir = await workspaceWith({
     roles: [{ workspaceId: "ws-1", dispatcherAgentId: "dispatch-1" }],
     routing: ROUTING,
@@ -122,25 +147,63 @@ test("派单：成功路径按路由落到 provider/model，标签里的父会�
     maxChildrenPerDispatch: 4,
     reportOnFinish: true,
   });
+  const requirement = await finalizedRequirement(dir);
   const paseo = fakePaseo();
   const result = await runDispatch(paseo, {
     workspaceId: "ws-1",
     workspaceDir: dir,
-    tasks: [{ key: "t1", prompt: "做点事", difficulty: "normal" }],
+    tasks: [{ key: "t1", prompt: "做点事", difficulty: "normal", requirementKey: requirement }],
     depth: 1,
-    callerAgentId: "main-9",
+    callerAgentId: "dispatch-1",
   });
   assert.equal(result.ok, true);
-  assert.equal(result.dispatcherAgentId, "main-9", "放行看绑定，标签看真实调用者");
+  assert.equal(result.dispatcherAgentId, "dispatch-1", "派单窗口本人派单，父会话就是它");
   assert.equal(paseo.created.length, 1);
   const options = paseo.created[0];
   assert.deepEqual(paseo.createdIn, ["ws-1"], "派出去的会话落回这条工作区：裸 cwd 会让宿主再登记一条");
   assert.equal("cwd" in options, false, "句柄路径不传 cwd");
   assert.equal(options.config.provider, "claude/sonnet");
-  assert.equal(options.parent, "main-9");
-  assert.equal(options.labels["paseo.parent-agent-id"], "main-9");
+  assert.equal(options.parent, "dispatch-1");
+  assert.equal(options.labels["paseo.parent-agent-id"], "dispatch-1");
   assert.equal(options.labels["deck.difficulty"], "normal");
   assert.match(options.prompt, /第 1 层/);
+});
+
+
+test("派单入口：主窗口与其他会话带身份派单被拒；面板人工派单放行并留 warning", async () => {
+  const dir = await workspaceWith({
+    roles: [{ workspaceId: "ws-1", mainAgentId: "main-9", dispatcherAgentId: "dispatch-1" }],
+    routing: ROUTING,
+    maxDepth: 3,
+    maxChildrenPerDispatch: 4,
+    reportOnFinish: true,
+  });
+  const task = [{ key: "t1", prompt: "做点事", difficulty: "normal" }];
+
+  const fromMain = await runDispatch(fakePaseo(), {
+    workspaceId: "ws-1",
+    workspaceDir: dir,
+    tasks: task,
+    depth: 1,
+    callerAgentId: "main-9",
+  });
+  assert.equal(fromMain.ok, false);
+  assert.equal(fromMain.reason, "main-cannot-dispatch");
+
+  const fromOther = await runDispatch(fakePaseo(), {
+    workspaceId: "ws-1",
+    workspaceDir: dir,
+    tasks: task,
+    depth: 1,
+    callerAgentId: "child-1",
+  });
+  assert.equal(fromOther.ok, false);
+  assert.equal(fromOther.reason, "caller-not-dispatcher");
+
+  // 面板不传 callerAgentId：按人工操作放行，但要说明「这不是会话内派单」。
+  const panel = await runDispatch(fakePaseo(), { workspaceId: "ws-1", workspaceDir: dir, tasks: task, depth: 1 });
+  assert.equal(panel.ok, true);
+  assert.ok(panel.warnings.some((line) => line.includes("人工操作")));
 });
 
 test("派单：一条不合格不影响其它条，逐条带原因返回", async () => {
@@ -151,13 +214,14 @@ test("派单：一条不合格不影响其它条，逐条带原因返回", async
     maxChildrenPerDispatch: 4,
     reportOnFinish: true,
   });
+  const requirement = await finalizedRequirement(dir);
   const paseo = fakePaseo();
   const result = await runDispatch(paseo, {
     workspaceId: "ws-1",
     workspaceDir: dir,
     tasks: [
-      { key: "ok", prompt: "干活" },
-      { key: "empty", prompt: "  " },
+      { key: "ok", prompt: "干活", requirementKey: requirement },
+      { key: "empty", prompt: "  ", requirementKey: requirement },
     ],
     depth: 1,
   });
@@ -177,23 +241,30 @@ test("派单先建票：会话标签指向真票号，结果里也带着这张�
     maxChildrenPerDispatch: 4,
     reportOnFinish: true,
   });
+  const requirement = await finalizedRequirement(dir);
   const paseo = fakePaseo();
   const result = await runDispatch(paseo, {
     workspaceId: "ws-1",
     workspaceDir: dir,
-    tasks: [{ key: "t1", prompt: "## 接口层重构\n\n把读路径拆开。", difficulty: "hard" }],
+    tasks: [{
+      key: "t1",
+      prompt: "## 接口层重构\n\n把读路径拆开。",
+      difficulty: "hard",
+      requirementKey: requirement,
+    }],
     depth: 1,
   });
   assert.equal(result.ok, true);
   const outcome = result.results[0];
-  assert.equal(outcome.ticket.number, 1);
+  assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  const workNumber = outcome.ticket.number;
   // 本地 `.deck` 没有幂等锚：这句话要如实带出来，别让人以为重试不会重复建票。
   assert.match(outcome.ticketNotes.join("\n"), /没有幂等锚/);
   // 会话标签指真票号，不用计划里那个任务键；抬头里也写明票号。
-  assert.equal(paseo.created[0].labels["deck.ticket"], "#1");
-  assert.match(paseo.created[0].prompt, /票 #1/);
+  assert.equal(paseo.created[0].labels["deck.ticket"], `#${workNumber}`);
+  assert.match(paseo.created[0].prompt, new RegExp(`票 #${workNumber}`));
 
-  const ticket = await getLocalIssue(dir, 1);
+  const ticket = await getLocalIssue(dir, workNumber);
   assert.equal(ticket.ok, true);
   assert.equal(ticket.issue.title, "接口层重构");
   assert.deepEqual(
@@ -211,13 +282,15 @@ test("票建不出来就不派：这条任务回 ticket-failed，会话一个都
     maxChildrenPerDispatch: 4,
     reportOnFinish: true,
   });
-  // 把 `.deck/issues` 占成一个普通文件：建票时写不进去，模拟「后端坏了」。
-  await writeFile(path.join(dir, ".deck/issues"), "占位");
+  const requirement = await finalizedRequirement(dir);
+  // 下一张票的目标路径先被一个目录占住：需求票仍读得出来，但工作票写不进去，
+  // 模拟「建票后端坏了」而不把票门也一起弄坏。
+  await mkdir(path.join(dir, ".deck", "issues", `${requirement + 1}.md`), { recursive: true });
   const paseo = fakePaseo();
   const result = await runDispatch(paseo, {
     workspaceId: "ws-1",
     workspaceDir: dir,
-    tasks: [{ key: "t1", prompt: "干点事" }],
+    tasks: [{ key: "t1", prompt: "干点事", requirementKey: requirement }],
     depth: 1,
   });
   assert.equal(result.ok, true, "一条任务失败不该让整批崩掉");

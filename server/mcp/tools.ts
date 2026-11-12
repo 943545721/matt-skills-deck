@@ -39,7 +39,12 @@ import {
 } from "../../shared/tool-contract.ts";
 import { SUGGEST_DEFINITION, SUGGEST_TOOL_NAME, normalizeSuggestions } from "../../shared/suggestions.ts";
 import { writeChildHandoff } from "../handoff-store.ts";
+import { noteIdentityRefusal } from "../identity-presence.ts";
+import { HANDOFF_TOOL_NAME, planHandoff } from "../../shared/handoff-to-dispatcher.ts";
+import { judgeDispatchCaller, judgeHandoffCaller, judgeRequirementTicketWriter, judgeTicketCreator, windowSlotsOf, type TicketWriteVerdict, type WindowSlots } from "../../shared/window-gates.ts";
+import { writePendingHandoff } from "../dispatch-handoff-store.ts";
 import { readPlanContext } from "../daemon-profiles.ts";
+import { readOrchestration } from "../orchestration-store.ts";
 import { thinkingContextOf } from "../provider-entry.ts";
 import {
   MAX_STAFF_ID_CHARS,
@@ -67,9 +72,14 @@ import {
 } from "../../shared/edge-rules.ts";
 import { readWorkspaceConfig } from "../tracker/workspace-repo.ts";
 import { withDerivedFrom } from "../../shared/derived.ts";
+import { noteRequirementWindow, requirementNoteSuffix } from "../window-note-send.ts";
 import {
   REQUIREMENT_LABEL,
+  finalizeProblem,
+  impactSectionProblem,
   isDeckLabel,
+  isFinalized,
+  isRequirementTicket,
   normalizeRequirementKey,
   parseImpactTable,
   requireTicketGates,
@@ -352,6 +362,62 @@ function githubWriteReason(kind: string): string {
   return "gh-failed";
 }
 
+/**
+ * 需求票写闸的接线：从工作区配置里取调用者身份与四个槽位。
+ *
+ * 读不出配置、坏文件、分不清是哪片工作区时返回 null（这道闸这次不生效）：
+ * 身份门与执行门同一口径，护栏不能因为一份手改坏的 JSON 把建票整条路堵死。
+ * 但这三种情况都要在 stderr 留一行，别让坏配置悄悄关掉这道门。
+ */
+async function requirementWriteGuardOf(
+  context: ToolContext,
+): Promise<{ callerAgentId: string; slots: WindowSlots | null } | null> {
+  const callerAgentId = process.env.PASEO_AGENT_ID?.trim() ?? "";
+  if (!callerAgentId) return null;
+  const read = await readOrchestration(context.workspaceDir);
+  if (read.readFailed || read.corrupt) {
+    process.stderr.write(
+      `[${MCP_SERVER_NAME}] 需求票写闸跳过（caller=${callerAgentId}, workspace=${context.workspaceDir}）：编排文件${read.corrupt ? "解析失败" : "读不出来"}（${read.detail ?? "未知原因"}）\n`,
+    );
+    return null;
+  }
+  const roleIds = [...new Set(read.settings.roles.map((role) => role.workspaceId.trim()).filter(Boolean))];
+  const workspaceId = read.workspaceId || (roleIds.length === 1 ? roleIds[0] ?? "" : "");
+  if (!workspaceId) {
+    if (roleIds.length > 1) {
+      process.stderr.write(
+        `[${MCP_SERVER_NAME}] 需求票写闸跳过（caller=${callerAgentId}, workspace=${context.workspaceDir}）：分不清会话属于哪个工作区（roles: ${roleIds.join(", ")}）\n`,
+      );
+    }
+    return null;
+  }
+  const roles = workspaceRolesOf(read.settings, workspaceId);
+  return { callerAgentId, slots: roles ? windowSlotsOf(roles) : null };
+}
+
+/**
+ * 改票时的票型判定：现状与写完之后都算。
+ *
+ * 只看现状会漏掉「给普通票加一枚 requirement 标签」——读的时候还不是需求票，
+ * 写完就变成了需求票，等于绕开「只有需求窗口能写需求票」。反过来，
+ * 需求窗口删掉 requirement 标签把票改成工作票，也要按 `remainsRequirement` 拦住。
+ */
+function judgeTicketWrite(
+  guard: { callerAgentId: string; slots: WindowSlots | null } | null,
+  kind: unknown,
+  currentLabels: unknown,
+  nextLabels: readonly string[] | null,
+): TicketWriteVerdict {
+  if (!guard) return { ok: true };
+  const currentIs = isRequirementTicket(kind, currentLabels);
+  const nextIs = nextLabels === null ? currentIs : isRequirementTicket(kind, nextLabels);
+  return judgeRequirementTicketWriter({
+    ...guard,
+    currentIsRequirement: currentIs,
+    nextIsRequirement: nextIs,
+  });
+}
+
 async function runIssueCreate(args: unknown, context: ToolContext): Promise<ToolResult> {
   const raw = isRecord(args) ? args : {};
   // 兼容旧调用：isMap:true 等价于 kind=map；都不给时落到 issue（DSH 契约要求必填，工具面也标了必填）。
@@ -413,6 +479,11 @@ async function runIssueCreate(args: unknown, context: ToolContext): Promise<Tool
     ...(repoListing ? { repos: repoListing.keys, hasChain } : {}),
   });
   if (!gate.ok) return fail("invalid", `${gate.detail}这张票没建。`);
+
+  // 这张票自己的正文写了影响面表，就当场按表校验结构：
+  // 表头 / 分隔行 / 列数写坏时，等派单窗口来报就晚了——改票的人不在那个窗口。
+  const ownImpact = impactSectionProblem(input.body ?? "");
+  if (ownImpact) return fail("invalid", `${ownImpact}这张票没建。`);
 
   /* ---------------- 跨区链条 / 验收票：和派单闸共用同一份判定 ---------------- */
   // 放在写盘之前：格式坏、对方票没关、验收票缺席都在这里拒绝，一个字节都不写。
@@ -519,6 +590,20 @@ async function runIssueCreate(args: unknown, context: ToolContext): Promise<Tool
       }
     }
     labels.push(`${DECK_STAFF_LABEL}=${staffId}`);
+  }
+  // 需求票写闸：绑定了需求窗口后，只有它能建需求票；它自己也不建工作票。
+  // 建票闸：主窗口与进度窗口不建票。两闸共用同一次配置读取。
+  const ticketWriteGuard = await requirementWriteGuardOf(context);
+  if (ticketWriteGuard) {
+    const createsRequirement = isRequirementTicket(position, labels);
+    const ticketWrite = judgeRequirementTicketWriter({
+      ...ticketWriteGuard,
+      currentIsRequirement: createsRequirement,
+      nextIsRequirement: createsRequirement,
+    });
+    if (!ticketWrite.ok) return fail(ticketWrite.reason, `${ticketWrite.detail}这张票没建。`);
+    const ticketCreator = judgeTicketCreator(ticketWriteGuard);
+    if (!ticketCreator.ok) return fail(ticketCreator.reason, `${ticketCreator.detail}这张票没建。`);
   }
   // 阻塞边分两路：本仓库票号走原生依赖边，跨仓库引用只能写进正文隐藏区段
   // （远端没有跨仓库原生边）。任何一项写法不合法就整组拒绝：
@@ -762,6 +847,18 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
   const wantedAssignees = (input.assignees ?? []).map((name) => name.trim()).filter(Boolean);
   const addLabels = (input.addLabels ?? []).map((label) => label.trim()).filter(Boolean);
   const removeLabels = (input.removeLabels ?? []).map((label) => label.trim()).filter(Boolean);
+  // `deck:` 私标签与 `deck_issue_create` / `deck_issue_labels` 同口径：只能由界面按钮打。
+  // 放它进来就等于「先写一张派单必拒的票，再顺手给自己发一枚定稿许可」，绕掉按钮上那次核。
+  const privateAdd = addLabels.find(isDeckLabel);
+  if (privateAdd) {
+    return fail("invalid", `标签「${privateAdd}」不能经 MCP 写：deck: 前缀只能由界面上的按钮打，模型不能给自己发许可证。本次什么都没动。`);
+  }
+  // 撤也一样：能悄悄摘掉 `deck:定稿`，就等于能绕过「定稿后正文不许偏离」那条约束
+  // ——先摘标签、改成派单必拒的样子、再谎称已定稿。撤定稿是用户的动作。
+  const privateRemove = removeLabels.find(isDeckLabel);
+  if (privateRemove) {
+    return fail("invalid", `标签「${privateRemove}」不能经 MCP 撤：deck: 前缀只能由界面上的按钮增删。本次什么都没动。`);
+  }
   const hasLabels = addLabels.length > 0 || removeLabels.length > 0;
   const hasBodyEdit = input.body !== undefined || input.originalWords !== undefined || input.progress !== undefined;
   const hasBlockers = input.blockedBy !== undefined;
@@ -784,15 +881,29 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
   if (dependencies && !dependencies.ok) return fail("invalid", `${dependencies.detail}。本次什么都没动。`);
   const nativeBlockers = dependencies && dependencies.ok ? dependencies.local.map(String) : [];
   const crossRefs = dependencies && dependencies.ok ? dependencies.cross : [];
+  // 需求票写闸要先知道票型：绑定了需求窗口时，读一次现状再判谁能改。
+  const ticketWriteGuard = await requirementWriteGuardOf(context);
   // 只有需要「现状」的字段才读票：标签要算全集、正文追加要拿旧正文、关票要确认是不是地图。
   // 正文编辑一律读旧正文：契约变更要靠「旧 vs 新」才能算出哪一行变了。
-  const needCurrent = hasLabels || hasBodyEdit || close || (hasBlockers && input.body === undefined);
+  const needCurrent =
+    ticketWriteGuard !== null || hasLabels || hasBodyEdit || close || (hasBlockers && input.body === undefined);
   type CurrentIssue = Extract<Awaited<ReturnType<typeof readOne>>, { ok: true }>;
   let current: CurrentIssue | null = null;
   if (needCurrent) {
     const read = await readOne(backend, number);
     if (!read.ok) return failureOf(read);
     current = read;
+  }
+  if (ticketWriteGuard && current) {
+    // 写完之后这张票的标签：现状减去 removeLabels，再并上 addLabels。
+    const nextLabels = [
+      ...labelNames(current.issue.labels).filter(
+        (name) => !removeLabels.some((remove) => remove.toLowerCase() === name.toLowerCase()),
+      ),
+      ...addLabels,
+    ];
+    const ticketWrite = judgeTicketWrite(ticketWriteGuard, current.issue.kind, current.issue.labels, nextLabels);
+    if (!ticketWrite.ok) return fail(ticketWrite.reason, `${ticketWrite.detail}本次什么都没动。`);
   }
   if (current && hasLabels && current.meta.labelsTruncated) {
     return fail(
@@ -859,6 +970,33 @@ async function runIssuePatch(args: unknown, context: ToolContext): Promise<ToolR
     blockBodyChanged = applied.changed;
   }
   if (!bodyWithinLimit(body)) return fail("invalid", "正文超过 60KB，拒绝写入；一个字节都没有动。");
+
+  // 整段换正文时当场核影响面表：写坏的表不能先落盘、等派单窗口才发现。
+  // 只认 `input.body`（显式改写）；追加进度 / 备注不改表，旧票就算表坏了也照样能写进这些。
+  if (input.body !== undefined && body !== previousBody) {
+    const structural = impactSectionProblem(body);
+    if (structural) return fail("invalid", `${structural}本次什么都没动。`);
+    // 已定稿的票必须保持「现在点定稿也过」的状态：否则派单必拒，而改票的人还看不见。
+    if (current && isFinalized(current.issue.labels)) {
+      const repoListing = await writableRepoKeys(context.workspaceDir);
+      // 读不出仓库清单时不能拿空清单当「单区、免人工表」：那会让多仓库需求把影响面整节删掉也放行，
+      // 而派单窗口随后必拒——同一个输入不能两条路两个结论。
+      if (repoListing.detail) {
+        return fail(
+          "invalid",
+          `#${number} 已定稿，但读不到工作区仓库清单（${repoListing.detail}），判不出这张票要不要人工影响面表：本次什么都没动。`,
+        );
+      }
+      const drift = finalizeProblem(body, repoListing.keys);
+      if (drift) {
+        return fail(
+          "invalid",
+          `#${number} 已定稿，正文改成这样派单会被拒：${drift}本次什么都没动。`
+            + "影响面表改回合规的样子，或先让用户撤掉定稿再改。",
+        );
+      }
+    }
+  }
 
   // 关票必须先留评论：评论失败时直接停，票不会被关掉。
   let commentBody = input.comment?.trim() ?? "";
@@ -1134,6 +1272,14 @@ async function runIssueLabels(args: unknown, context: ToolContext): Promise<Tool
   }
   const backend = await resolveWritableBackend(context.workspaceDir, "labels", input.repo);
   if (!backend.ok) return fail(backend.reason, backend.detail);
+  // 需求票写闸：整体换标签也是「改需求票」，先读现状确认票型。
+  const ticketWriteGuard = await requirementWriteGuardOf(context);
+  if (ticketWriteGuard) {
+    const read = await readOne(backend, input.number);
+    if (!read.ok) return failureOf(read);
+    const ticketWrite = judgeTicketWrite(ticketWriteGuard, read.issue.kind, read.issue.labels, input.labels);
+    if (!ticketWrite.ok) return fail(ticketWrite.reason, `${ticketWrite.detail}本次什么都没动。`);
+  }
   // GitHub 的 PUT 是整体替换：读不全现有标签就拒绝。守卫放在领域层（面板 RPC 同一条），
   // 宁可拒绝并让人去远端改，也不做一次「成功」的静默数据丢失。本地文件没有截断问题。
   if (backend.kind === "github") {
@@ -1437,6 +1583,17 @@ async function runMapPlanCreate(args: unknown, context: ToolContext): Promise<To
   const backend = await resolveWritableBackend(context.workspaceDir, "create map plan", input.repo);
   if (!backend.ok) return fail(backend.reason, backend.detail);
 
+  // 第二条建票入口也过角色闸：地图票与它下面的路线票都不是需求票。
+  // 不接这道闸的话，主窗口 / 进度窗口可以绕过 `deck_issue_create` 的建票闸，
+  // 需求窗口也能从这里建出工作票。「这张图没建」写在详情里，别让调用方以为部分成功。
+  const ticketWriteGuard = await requirementWriteGuardOf(context);
+  if (ticketWriteGuard) {
+    const mapWrite = judgeTicketWrite(ticketWriteGuard, "map", [MAP_LABEL], [MAP_LABEL]);
+    if (!mapWrite.ok) return fail(mapWrite.reason, `${mapWrite.detail}这张图没建。`);
+    const ticketCreator = judgeTicketCreator(ticketWriteGuard);
+    if (!ticketCreator.ok) return fail(ticketCreator.reason, `${ticketCreator.detail}这张图没建。`);
+  }
+
   // 有 v2 清单且对得上项目时，正文按该项目的 areas 生成骨架；没有清单时与以前完全一致。
   const mapProject = await resolveMapProject({
     workspaceDir: context.workspaceDir,
@@ -1569,6 +1726,13 @@ async function runMapPlanCreate(args: unknown, context: ToolContext): Promise<To
     });
     if (!ticketGate.ok) {
       tickets.push({ title: ticket.title, kind: ticket.kind, error: ticketGate.detail });
+      continue;
+    }
+    // 同一个结构闸：路线票通常没有影响面表，但真写了就按同一张表核，
+    // 免得「换个入口写坏表」还能落盘。
+    const ticketImpact = impactSectionProblem(ticketBody);
+    if (ticketImpact) {
+      tickets.push({ title: ticket.title, kind: ticket.kind, error: ticketImpact });
       continue;
     }
     const created = await create(
@@ -1765,6 +1929,8 @@ async function runHandoff(args: unknown, context: ToolContext): Promise<ToolResu
   const input = inputResult.data;
   const agentId = process.env.PASEO_AGENT_ID?.trim() ?? "";
   if (!agentId) {
+    // 这类失败用户只看到一条工具报错，很难想到「是开窗口时没带身份」：留一份痕，面板据此点名。
+    await noteIdentityRefusal(context.workspaceDir, "deck_handoff");
     return fail("no-agent-id", "拿不到本会话的 agent id（PASEO_AGENT_ID 为空），无法写下回传件");
   }
   const written = await writeChildHandoff(context.workspaceDir, {
@@ -1786,6 +1952,80 @@ async function runHandoff(args: unknown, context: ToolContext): Promise<ToolResu
     status: input.status ?? "completed",
     markdown: written.markdown,
     note: "回传件已落盘；父窗口在派单钩子里收尾时会拿到它。派单场景下如果父窗口还开着，直接把它贴进对话也能保证不丢。",
+  });
+}
+
+/**
+ * 主窗口把定稿方案交给派单窗口。
+ *
+ * 只写 outbox，不建票、不建会话、不调 `gh`：真正的派单仍由派单窗口调
+ * `deck_dispatch_plan` / `deck_requirement_dispatch` 完成。写件时必须已经绑好
+ * 派单窗口（没有就拒绝）；写完之后窗口忙、解绑或换人，件都留在原地等当前绑定。
+ */
+const handoffToDispatcherSchema = z.strictObject({
+  workspaceId: z.string().max(200).optional(),
+  requirementKey: z.number().int().positive(),
+  requirementRepoKey: z.string().max(200).optional(),
+  summary: z.string().min(1),
+  tasks: z
+    .array(
+      z.strictObject({
+        title: z.string().max(200).optional(),
+        prompt: z.string().min(1),
+        acceptance: z.string().optional(),
+        staff: z.string().max(64).optional(),
+        repoKey: z.string().max(200).optional(),
+        map: z.string().max(200).optional(),
+      }),
+    )
+    .min(1)
+    .max(50),
+  constraints: z.string().optional(),
+  lang: z.enum(["zh", "en"]).optional(),
+});
+
+async function runHandoffToDispatcher(args: unknown, context: ToolContext): Promise<ToolResult> {
+  const inputResult = asInput(handoffToDispatcherSchema, args);
+  if (!inputResult.ok) return fail("invalid", inputResult.error);
+  const input = inputResult.data;
+
+  const read = await readPlanContext(context.workspaceDir);
+  if (read.readFailed) {
+    return fail("settings-unreadable", `编排文件读不出来（不是「没配过」）：${read.detail ?? "未知原因"}`);
+  }
+  if (read.corrupt) {
+    return fail("settings-corrupt", `编排文件解析失败：${read.detail ?? "格式不对"}——先修好它，不能拿默认值交接`);
+  }
+  const roleIds = [...new Set(read.settings.roles.map((role) => role.workspaceId.trim()).filter(Boolean))];
+  const workspaceId =
+    input.workspaceId?.trim() || read.workspaceId || (roleIds.length === 1 ? roleIds[0] ?? "" : "");
+  if (!workspaceId) {
+    if (roleIds.length > 1) {
+      return fail("workspace-ambiguous", "这个目录里有多份工作区角色绑定：显式传 workspaceId，别让交接件落错片。");
+    }
+    return fail("no-main", "这个工作区还没有角色绑定：先到面板「编排」里指定主沟通窗口和派单窗口。");
+  }
+  const callerAgentId = process.env.PASEO_AGENT_ID?.trim() ?? "";
+  const slots = windowSlotsOf(workspaceRolesOf(read.settings, workspaceId));
+  const verdict = judgeHandoffCaller({ callerAgentId, slots });
+  if (!verdict.ok) {
+    if (verdict.reason === "caller-unknown") await noteIdentityRefusal(context.workspaceDir, HANDOFF_TOOL_NAME);
+    return fail(verdict.reason, verdict.detail);
+  }
+
+  const built = planHandoff(input, { callerAgentId, workspaceId });
+  if (!built.ok) return fail(built.reason, built.detail);
+  const written = await writePendingHandoff(context.workspaceDir, built.envelope);
+  if (!written.ok) return fail("write-failed", written.detail);
+  return ok({
+    ok: true,
+    handoffId: built.envelope.handoffId,
+    dispatcherAgentId: verdict.dispatcherAgentId,
+    duplicate: written.duplicate,
+    file: written.path,
+    note: written.duplicate
+      ? "这份交接已经在 outbox 里（同一位主窗口、同一张需求票、同样的任务内容），没有重复入队。"
+      : "交接件已进 outbox；派单窗口空下来时按当前绑定的窗口送达，忙的时候会排队，不会丢。",
   });
 }
 
@@ -1875,15 +2115,22 @@ async function runDispatchPlan(args: unknown, context: ToolContext): Promise<Too
   if (read.profileDetail) warnings.push(read.profileDetail);
 
   const roleIds = [...new Set(read.settings.roles.map((role) => role.workspaceId.trim()).filter(Boolean))];
+  // 同一个目录里可能有多份角色绑定：文件里没记 id、入参也没点名，就不猜是哪一片。
+  const workspaceAmbiguous = !input.workspaceId?.trim() && !read.workspaceId && roleIds.length > 1;
   const workspaceId =
     input.workspaceId?.trim() || read.workspaceId || (roleIds.length === 1 ? roleIds[0] ?? "" : "");
   if (!workspaceId) {
-    warnings.push("分不清这个工作区：多份角色绑定同时存在，请显式传 workspaceId");
+    return fail(
+      workspaceAmbiguous ? "workspace-ambiguous" : "no-workspace",
+      workspaceAmbiguous
+        ? "这个目录里有多份工作区角色绑定：显式传 workspaceId，别让派单落错片。"
+        : "这个工作区没有任何角色绑定：先到面板「编排」里加一条工作区角色。",
+    );
   }
 
   const depth = input.depth;
-  // 谁在派单：优先信 `PASEO_AGENT_ID`（真实调用者）。配置里的派单窗口只是默认值，
-  // 任何会话都能调这个工具，标签写错窗口会让会话树与真实回传链指向两个不同会话。
+  // 谁在派单：只信 `PASEO_AGENT_ID`（真实调用者）。配置里的派单窗口是唯一有权派单的窗口，
+  // 不是默认值——任何会话都能调这个工具，光靠身份提示词劝不住。
   const callerAgentId = process.env.PASEO_AGENT_ID?.trim() ?? "";
   // 名册按目录合并；槽位仍按 workspaceId（会话属于具体工作区）。
   const workspaceRoles = workspaceRolesOf(read.settings, workspaceId);
@@ -1896,13 +2143,19 @@ async function runDispatchPlan(args: unknown, context: ToolContext): Promise<Too
         `越界、缺人手或需要别的区配合时，调 ${STAFF_REQUEST_TOOL_NAME} 写一条待处理的协调请求（task / why），由经理决定。`,
     );
   }
-  const configuredDispatcher = workspaceRoles?.dispatcherAgentId?.trim() ?? "";
-  if (callerAgentId && configuredDispatcher && callerAgentId !== configuredDispatcher) {
-    warnings.push(
-      `这次是 ${callerAgentId} 在派单，不是绑定的派单窗口 ${configuredDispatcher}：标签与抬头按实际调用者写，绑定关系没改。`,
-    );
-  } else if (!callerAgentId) {
-    warnings.push("拿不到本会话的 agent id（PASEO_AGENT_ID 为空）：标签里的父会话只能写绑定的派单窗口，可能和宿主的父子关系不一致。");
+  // 入口门：只有绑定的派单窗口能派单。比较对象必须是工作区角色里的派单窗口，
+  // 不是计划自己算出来的 dispatcherAgentId（那会把调用者 id 兜底成派单窗口，等于自己放自己）。
+  const dispatchCaller = judgeDispatchCaller({
+    callerAgentId,
+    // 没绑定要报 no-workspace，不要折成空槽位后说「没选派单窗口」。
+    slots: workspaceRoles ? windowSlotsOf(workspaceRoles) : null,
+    workspaceAmbiguous: false,
+  });
+  if (!dispatchCaller.ok) {
+    if (dispatchCaller.reason === "caller-unknown") {
+      await noteIdentityRefusal(context.workspaceDir, "deck_dispatch_plan");
+    }
+    return fail(dispatchCaller.reason, dispatchCaller.detail);
   }
   const dispatchId = input.dispatchId?.trim() || `deck-${Date.now().toString(36)}`;
   // 多仓库工作区：先把仓库列出来，「没写 repoKey」才能在计划阶段被拒。
@@ -2144,11 +2397,20 @@ async function runRequirementDispatchTool(args: unknown, context: ToolContext): 
     return fail("settings-corrupt", `编排文件解析失败：${read.detail ?? "格式不对"}——先修好它`);
   }
   const roleIds = [...new Set(read.settings.roles.map((role) => role.workspaceId.trim()).filter(Boolean))];
+  const workspaceAmbiguous = !read.workspaceId && roleIds.length > 1;
   const workspaceId =
     read.workspaceId || (roleIds.length === 1 ? roleIds[0] ?? "" : "");
+  if (!workspaceId) {
+    return fail(
+      workspaceAmbiguous ? "workspace-ambiguous" : "no-workspace",
+      workspaceAmbiguous
+        ? "这个目录里有多份工作区角色绑定：需求拆票不知道该按哪一片的角色派，先在编排里确认工作区。"
+        : "这个工作区没有任何角色绑定：先到面板「编排」里加一条工作区角色。",
+    );
+  }
   const callerAgentId = process.env.PASEO_AGENT_ID?.trim() ?? "";
   // 名册按目录合并：按 id 取会把别处（同一目录的旧 id）的名册读成空的，员工就漏拦了。
-  const workspaceRoles = workspaceId ? workspaceRolesOf(read.settings, workspaceId) : null;
+  const workspaceRoles = workspaceRolesOf(read.settings, workspaceId);
   const callerWorker = await callerWorkerOf(workspaceRoles, callerAgentId, context.workspaceDir);
   if (callerWorker) {
     return fail(
@@ -2156,6 +2418,18 @@ async function runRequirementDispatchTool(args: unknown, context: ToolContext): 
       `「${callerWorker.name || callerWorker.id}」是员工卡，不能拆需求：只有经理能派活。` +
         `缺人手或需要别的区配合时，调 ${STAFF_REQUEST_TOOL_NAME} 写一条待处理的协调请求。`,
     );
+  }
+  const dispatchCaller = judgeDispatchCaller({
+    callerAgentId,
+    // 没绑定要报 no-workspace，不要折成空槽位后说「没选派单窗口」。
+    slots: workspaceRoles ? windowSlotsOf(workspaceRoles) : null,
+    workspaceAmbiguous: false,
+  });
+  if (!dispatchCaller.ok) {
+    if (dispatchCaller.reason === "caller-unknown") {
+      await noteIdentityRefusal(context.workspaceDir, "deck_requirement_dispatch");
+    }
+    return fail(dispatchCaller.reason, dispatchCaller.detail);
   }
 
   const requirement = await readRequirementForDispatch(
@@ -2165,6 +2439,19 @@ async function runRequirementDispatchTool(args: unknown, context: ToolContext): 
   );
   if (!requirement.ok) return fail("no-requirement", requirement.detail);
 
+  // 票面写坏死掉的那几条拒绝：先把原因递给需求窗口，再回报给派单窗口。
+  const refuseWithNote = async (reason: string, detail: string): Promise<ToolResult> => {
+    const note = await noteRequirementWindow({
+      workspaceDir: context.workspaceDir,
+      workspaceId,
+      fromAgentId: callerAgentId,
+      requirementKey: input.requirementNumber,
+      reason,
+      detail,
+    });
+    return fail(reason, `${detail}${requirementNoteSuffix(note)}`);
+  };
+
   const lookup = await requirementWorkspacesOf({
     workspaceDir: context.workspaceDir,
     workspaceId,
@@ -2172,7 +2459,7 @@ async function runRequirementDispatchTool(args: unknown, context: ToolContext): 
     // MCP 只有当前目录：至少让当前区的仓库键参与匹配；别区仍要靠服务端执行时补齐。
     workspaceDirs: workspaceId ? new Map([[workspaceId, context.workspaceDir]]) : null,
   });
-  if (!lookup.ok) return fail(lookup.reason, lookup.detail);
+  if (!lookup.ok) return refuseWithNote(lookup.reason, lookup.detail);
 
   const plan = await planRequirementDispatch({
     requirement: requirement.ticket,
@@ -2181,7 +2468,7 @@ async function runRequirementDispatchTool(args: unknown, context: ToolContext): 
     // 与执行层同一份宿主配置：模型删掉后清单里不该再显示它的默认档。
     daemonConfig: read.config,
   });
-  if (!plan.ok) return fail(plan.reason, plan.detail);
+  if (!plan.ok) return refuseWithNote(plan.reason, plan.detail);
 
   const summary = summarizeRequirementDispatch(plan);
   const confirmed = input.confirm === true || read.settings.confirmRequirementSplit === false;
@@ -2252,7 +2539,12 @@ async function runStaffRequest(args: unknown, context: ToolContext): Promise<Too
     sessionAgentId: process.env.PASEO_AGENT_ID?.trim() ?? "",
     staffIds,
   });
-  if (!build.ok) return fail(build.reason, build.detail);
+  if (!build.ok) {
+    if (build.reason === "no-agent-id") {
+      await noteIdentityRefusal(context.workspaceDir, STAFF_REQUEST_TOOL_NAME);
+    }
+    return fail(build.reason, build.detail);
+  }
 
   // 员工可以自报 `fromStaff`，但台账记的会话 id → 卡 id 才是证据。台账认得出时就以它为准：
   // 与自报不一致直接拒绝，不能拿一张经理卡的名义发请求。
@@ -2298,6 +2590,7 @@ const HANDLERS: Readonly<Record<string, ToolHandler>> = Object.freeze({
   deck_next_steps: runNextSteps,
   deck_probe: runProbe,
   deck_handoff: runHandoff,
+  [HANDOFF_TOOL_NAME]: runHandoffToDispatcher,
   deck_dispatch_plan: runDispatchPlan,
   [REQUIREMENT_DISPATCH_TOOL_NAME]: runRequirementDispatchTool,
   [STAFF_REQUEST_TOOL_NAME]: runStaffRequest,
@@ -2323,11 +2616,12 @@ export const MCP_TOOLS: readonly ToolDefinition[] = Object.freeze(
 
 /**
  * 不需要用户逐次确认的工具：只读工具（`suggest_next_steps` 同样不写任何状态），
- * 外加两个只写本地旁路文件的工具：
+ * 外加三个只写本地旁路文件的工具：
  * - `deck_handoff` 写 `.deck/handoffs/` 里自己名下的回传件；
+ * - `deck_handoff_to_dispatcher` 写 `.deck/dispatch-handoffs/pending/` 的交接件；
  * - `deck_staff_request` 写 `.deck/coordination.jsonl` 的协调收件箱。
  *
- * 为什么这两个写工具进白名单：子会话要「把结果送回上一级」「缺人手时叫经理」，
+ * 为什么这三个写工具进白名单：子会话要「把结果送回上一级」「把活交给派单窗口」「缺人手时叫经理」，
  * 如果每写一次都要人点确认，无人值守的派单链条就断在最后一步；而它们写不进票面、
  * 写不进远端，最坏情况是多一份本地文件。改票面的写工具故意不在这个名单里。
  */
@@ -2340,6 +2634,7 @@ export const PREAPPROVED_TOOL_NAMES: readonly string[] = Object.freeze([
   "deck_next_steps",
   "deck_probe",
   "deck_handoff",
+  HANDOFF_TOOL_NAME,
   "deck_dispatch_plan",
   REQUIREMENT_DISPATCH_TOOL_NAME,
   STAFF_REQUEST_TOOL_NAME,

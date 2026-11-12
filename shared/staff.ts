@@ -52,7 +52,12 @@ export interface StaffCard {
   duty?: string;
   /** 用哪份档案；不给就按这条任务的 difficulty 走路由。 */
   profileId?: string;
-  /** 他在这个工作区内部管的路径前缀，一行一个；空 = 整片。 */
+  /**
+   * 他在这个工作区内部管的路径前缀，一行一个。
+   *
+   * **必填**：至少一条工作区里真实存在的路径，或 `["."]` 表示整片。
+   * 空 = 没配，不等于整片；保存时由 `staffTerritoryProblems` 拦住新增 / 改过的卡。
+   */
   paths?: string[];
   /** 同一张卡同时最多几个在跑；默认 1。 */
   maxConcurrent?: number;
@@ -155,6 +160,71 @@ export function normalizeStaffCards(value: unknown): StaffCard[] | undefined {
   return out.length ? out : undefined;
 }
 
+/** 领地归一后的路径；空数组 = 没配。`["."]` 归一后仍是 `["."]`，算配了整片。 */
+function territoryPathsOf(card: StaffCard): string[] {
+  return (card.paths ?? []).map(normalizeStaffPath).filter(Boolean);
+}
+
+/**
+ * 名册里缺领地的卡（纯函数）：归一后一条路径都没有 = 没配。
+ *
+ * `["."]` 是显式「整片」，不算缺；`.` 与旧的空 `paths` 在归属计算上等价，
+ * 但派单不允许把「没写」当成「管全部」——所以这道判据只看有没有写。
+ *
+ * 返回卡本身而不是布尔 / id：岗位页横幅要列卡名，派单闸还要同时给出名字与 id。
+ * 「保存时校验」与「派单前拦截」共用这一处判据，别各写一份。
+ */
+export function staffWithoutTerritory(cards: readonly StaffCard[]): StaffCard[] {
+  return cards.filter((card) => territoryPathsOf(card).length === 0);
+}
+
+/** 领地校验的一处问题：卡缺领地，或某条领地路径在工作区里不存在。 */
+export interface StaffTerritoryProblem {
+  kind: "missing" | "not-found";
+  id: string;
+  name: string;
+  /** 仅 `not-found`：那条在工作区里找不到（或读不到）的路径。 */
+  path?: string;
+}
+
+/**
+ * 领地校验（纯函数）：只回答问题，不碰文件系统。
+ *
+ * `pathExists` 由调用方注入——测试传假函数，保存路径传真实工作区。`.` 是整片，
+ * 工作区根天然存在，不需要问文件系统；空名单（`paths` 缺失或全被归一成空）算没配。
+ *
+ * 调用方只该把「本次新增或内容有变化」的卡传进来：没动过的老卡由派单闸（#41）拦，
+ * 不该连累一次与它无关的保存。
+ */
+export function staffTerritoryProblems(
+  cards: readonly StaffCard[],
+  pathExists: (relativePath: string) => boolean,
+): StaffTerritoryProblem[] {
+  const problems: StaffTerritoryProblem[] = [];
+  for (const card of cards) {
+    const paths = territoryPathsOf(card);
+    if (!paths.length) {
+      problems.push({ kind: "missing", id: card.id, name: card.name });
+      continue;
+    }
+    for (const one of paths) {
+      if (one === ".") continue;
+      if (!pathExists(one)) problems.push({ kind: "not-found", id: card.id, name: card.name, path: one });
+    }
+  }
+  return problems;
+}
+
+/** 把领地问题写成能直接给用户看的一句话：点名哪张卡、缺什么、哪条路径不存在。 */
+export function describeStaffTerritoryProblems(problems: readonly StaffTerritoryProblem[]): string {
+  const lines = problems.map((problem) =>
+    problem.kind === "missing"
+      ? `岗位「${problem.name}」（${problem.id}）没填领地：至少写一条工作区里存在的路径，或填 . 表示整片工作区`
+      : `岗位「${problem.name}」（${problem.id}）的领地路径「${problem.path}」在工作区里不存在或读不到`,
+  );
+  return `名册保存被拒：${lines.join("；")}`;
+}
+
 /** 按 id 取卡；大小写归一后比较，取不到回 `null`。 */
 export function staffCardOf(
   roles: WorkspaceRoles | null | undefined,
@@ -214,6 +284,7 @@ export function rosterOf(file: RosterFile | null | undefined): StaffCard[] {
 export function roleCarriesFields(role: WorkspaceRoles): boolean {
   return Boolean(
     role.mainAgentId?.trim() ||
+      role.requirementAgentId?.trim() ||
       role.dispatcherAgentId?.trim() ||
       role.progressAgentId?.trim() ||
       role.prompts ||

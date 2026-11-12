@@ -359,6 +359,25 @@ export function needsManualImpactTable(input: {
   return input?.hasChain === true || uniqueRepos.length >= 2;
 }
 
+/** 正文里有没有「## 影响面」这一节。定稿按钮与写票闸都从这里判，省得两处各写一份找法。 */
+export function hasImpactSection(body: unknown): boolean {
+  const textBody = typeof body === "string" ? body : "";
+  return textBody.split(/\r?\n/).some((line) => line.trim() === IMPACT_HEADING);
+}
+
+/**
+ * 正文里写了「## 影响面」就校验这张表的结构；没写就放行。
+ *
+ * 与 `finalizeProblem` 的分工：这里只管标题 / 表头 / 分隔行 / 列数，不看数据行，
+ * 因为写票过程中表可以先空着。结构必须一开始就对——写坏的表如果等到派单才发现，
+ * 报错会落在派单窗口，改票的人却在需求窗口。
+ */
+export function impactSectionProblem(body: unknown): string | null {
+  if (!hasImpactSection(body)) return null;
+  const parsed = parseImpactTable(typeof body === "string" ? body : "");
+  return parsed.ok ? null : parsed.reason;
+}
+
 /**
  * 点「定稿」之前核影响面：通过返回 null，否则返回一句可显示的原因。
  *
@@ -368,8 +387,7 @@ export function needsManualImpactTable(input: {
  */
 export function finalizeProblem(body: unknown, repos?: readonly string[] | null): string | null {
   const textBody = typeof body === "string" ? body : "";
-  const section = textBody.split(/\r?\n/).some((line) => line.trim() === IMPACT_HEADING);
-  if (!needsManualImpactTable({ repos }) && !section) return null;
+  if (!needsManualImpactTable({ repos }) && !hasImpactSection(textBody)) return null;
   const parsed = parseImpactTable(textBody);
   if (!parsed.ok) return parsed.reason;
   if (parsed.rows.length === 0) return "影响面表没有数据行：每个要动的区至少占一行。";

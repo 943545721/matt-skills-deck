@@ -34,7 +34,15 @@ import {
 } from "../tracker/local.ts";
 import { updateGitLabIssue } from "../tracker/gitlab.ts";
 import { labelNames } from "../../shared/issue-kind.ts";
-import { REQUIREMENT_LABEL, normalizeRequirementKey } from "../../shared/impact.ts";
+import {
+  DECK_FINALIZE_LABEL,
+  REQUIREMENT_LABEL,
+  finalizeProblem,
+  impactSectionProblem,
+  isFinalized,
+  normalizeRequirementKey,
+} from "../../shared/impact.ts";
+import { writableRepoKeys } from "../tracker/targets.ts";
 import { acceptanceRecordForClose, judgeCreateChainGate, requirementNumberOfBody } from "../chain-gates.ts";
 import type { TicketReader } from "../contract-chain.ts";
 import { record } from "../logs.ts";
@@ -249,6 +257,12 @@ export async function createIssueHandler(
   }
   for (const warning of scope.scope.warnings) record("warn", "issues.create", warning);
 
+  // 面板允许直接粘正文：写了影响面表就当场校验结构，别等定稿按钮或派单窗口才发现表头写坏。
+  const impactProblem = impactSectionProblem(input.body ?? "");
+  if (impactProblem) {
+    return { ok: false, reason: "invalid", detail: `${impactProblem}这张票没建。`, repo: backend.repo };
+  }
+
   // 勾了「地图」就自动带 wayfinder:map：源仓库里地图票就是靠这个标签认出来的，
   // 让用户自己记得手打字符串迟早会漏。DSH 的 kind=map 与旧的 isMap 同义。
   const labels = [...(input.labels ?? [])];
@@ -338,6 +352,32 @@ export async function setIssueLabelsHandler(input: SetLabelsInput): Promise<RpcO
   if (!backend.ok) return backend;
   if (input.kind === "pull-request") {
     return { ok: false, reason: "invalid", detail: "拉取请求的标签是只读的，请到远端网页上修改" };
+  }
+
+  // 定稿这枚标签只有面板按钮会写，可按钮是「先看缓存里的正文、再调这里」，两步之间正文
+  // 可能被另一个窗口改过。服务端在这里重算一次：标签只许落在「现在点定稿也过」的正文上，
+  // 否则派单必拒，而改票的人不在那个窗口。
+  const finalizing = input.labels.some((label) => label.trim().toLowerCase() === DECK_FINALIZE_LABEL.toLowerCase());
+  if (finalizing) {
+    const read = await readIssue(input.workspaceDir, input.number, { repoKey: input.repoKey });
+    if (!read.ok) return { ok: false, reason: read.reason, detail: read.detail };
+    if (!read.result.ok) return { ok: false, reason: read.result.reason, detail: read.result.detail };
+    const current = read.result.issue;
+    if (!isFinalized(current.labels)) {
+      const repos = await writableRepoKeys(input.workspaceDir);
+      if (repos.detail) {
+        return {
+          ok: false,
+          reason: "invalid",
+          detail: `读不到这个工作区的仓库清单（${repos.detail}）；没有它判不出这张票要不要人工影响面表，所以没定稿。`,
+        };
+      }
+      const problem = finalizeProblem(current.body, repos.keys);
+      if (problem) {
+        record("warn", "issues.labels", `#${input.number} 拒绝定稿：${problem.slice(0, 200)}`);
+        return { ok: false, reason: "invalid", detail: `${problem}这次没定稿。` };
+      }
+    }
   }
 
   if (backend.kind === "local") {

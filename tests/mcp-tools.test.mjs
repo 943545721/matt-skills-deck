@@ -862,6 +862,88 @@ test("建票闸：需求影响面「依据」为空 → 拒绝，不建这一票
   }
 });
 
+test("建票时正文的影响面表结构写坏 → 拒绝，不建这一票", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  assert.equal((await initializeLocalScratch(ws, { name: "unit" })).ok, true);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    // 需求窗口凭印象写表：常见偏差是多插一列「仓库」、把「核的人」写成「核验人」。
+    const brokenBody = [
+      "## 影响面",
+      "| 区 / 仓库 | 仓库 | 依据 | 结论 | 核验人 |",
+      "|---|---|---|---|---|",
+      "| kxhyapp.com | acme/deck | 需求票本身 | 要动 | 单区，免核 |",
+    ].join("\n");
+    const refused = await run(
+      "deck_issue_create",
+      { title: "需求：影响面写坏", body: brokenBody, labels: ["requirement"], feature: "unit" },
+      ws,
+    );
+    assert.equal(refused.isError, true);
+    assert.match(refused.text, /第 2 列应该是「依据」/);
+    const board = json(await run("deck_issue_list", {}, ws));
+    assert.equal(board.issues.some((issue) => issue.title === "需求：影响面写坏"), false, "拒绝发生在写盘之前");
+
+    // 表可以空着数据行：写票过程中先立骨架不算错。
+    const skeletonOnly = json(await run(
+      "deck_issue_create",
+      { title: "需求：先立骨架", body: "## 影响面\n| 区 / 仓库 | 依据 | 结论 | 核的人 |\n|---|---|---|---|", labels: ["requirement"], feature: "unit" },
+      ws,
+    ));
+    assert.ok(skeletonOnly.number >= 0);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("改票：已定稿需求被改成不合规的影响面表 → 拒绝，正文一个字节都不动", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  assert.equal((await initializeLocalScratch(ws, { name: "unit" })).ok, true);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    const good = [
+      "## 影响面",
+      "| 区 / 仓库 | 依据 | 结论 | 核的人 |",
+      "|---|---|---|---|",
+      "| 当前工作区 | 需求票本身 | 要动 | 单区，免核 |",
+    ].join("\n");
+    const requirement = json(await run(
+      "deck_issue_create",
+      { title: "需求：定稿后别改坏", body: good, labels: ["requirement"], feature: "unit" },
+      ws,
+    ));
+    await replaceLocalLabels(ws, requirement.number, ["requirement", "deck:定稿"]);
+
+    // 定稿之后把表改成派单会拒的样子：两条路都要在写盘前拒。
+    const brokenHeader = good.replace(
+      "| 区 / 仓库 | 依据 | 结论 | 核的人 |",
+      "| 区 / 仓库 | 仓库 | 依据 | 结论 | 核验人 |",
+    ).replace("|---|---|---|---|", "|---|---|---|---|---|")
+      .replace("| 当前工作区 | 需求票本身 | 要动 | 单区，免核 |", "| 当前工作区 | acme/deck | 需求票本身 | 要动 | 单区，免核 |");
+    const structural = await run("deck_issue_patch", { number: requirement.number, body: brokenHeader }, ws);
+    assert.equal(structural.isError, true);
+    assert.match(structural.text, /影响面表头/);
+
+    // 结构对、数据行不合规（结论不在三个词里）：定稿的票也要拦住。
+    const badRow = good.replace("| 要动 |", "| 动一下 |");
+    const semantic = await run("deck_issue_patch", { number: requirement.number, body: badRow }, ws);
+    assert.equal(semantic.isError, true);
+    assert.match(semantic.text, /已定稿/);
+    assert.match(semantic.text, /结论/);
+
+    // 本地后端会把正文按字段重排一遍，所以按内容核：还是原来那张表，没被改坏。
+    const detail = json(await run("deck_issue_get", { number: requirement.number }, ws));
+    assert.match(detail.issue.body, /\| 区 \/ 仓库 \| 依据 \| 结论 \| 核的人 \|/);
+    assert.doesNotMatch(detail.issue.body, /核验人|动一下/, "两次被拒之后正文还是原来那份");
+
+    // 只追加进度（不换正文）照旧能写：坏票上的进度不该被影响面闸挡住。
+    const progress = json(await run("deck_issue_patch", { number: requirement.number, progress: { percent: 20, note: "起步" } }, ws));
+    assert.equal(progress.ok, true);
+  } finally {
+    gh.restore();
+  }
+});
+
 test("deck_issue_labels 拒绝任何 deck: 前缀标签，整组不写", { skip: !gitAvailable && "本机没有 git" }, async () => {
   const ws = workspace(false);
   const gh = toolGh('process.stdout.write("{}\\n")');
@@ -873,6 +955,55 @@ test("deck_issue_labels 拒绝任何 deck: 前缀标签，整组不写", { skip:
 
     const detail = json(await run("deck_issue_get", { number: 1 }, ws));
     assert.deepEqual(detail.issue.labels, [], "被拒的整组标签一枚都不能写进去");
+  } finally {
+    gh.restore();
+  }
+});
+
+test("改票的 addLabels 同样挡 deck: 前缀：否则「先写坏表、再补定稿」就绕开了按钮那次核", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    json(await run("deck_issue_create", { title: "需求：先谈清楚", labels: ["requirement"] }, ws));
+    const refused = await run("deck_issue_patch", { number: 1, addLabels: ["deck:定稿"] }, ws);
+    assert.equal(refused.isError, true);
+    assert.match(refused.text, /deck: 前缀只能由界面上的按钮打/);
+
+    const detail = json(await run("deck_issue_get", { number: 1 }, ws));
+    assert.deepEqual(detail.issue.labels, ["requirement"], "一枚 deck: 标签都不该被补上去");
+
+    // 撤也一样：能悄悄摘掉定稿，就能先摘、再写成派单必拒的样子。
+    const stillFinalized = await run("deck_issue_patch", { number: 1, removeLabels: ["deck:定稿"] }, ws);
+    assert.equal(stillFinalized.isError, true);
+    assert.match(stillFinalized.text, /不能经 MCP 撤/);
+  } finally {
+    gh.restore();
+  }
+});
+
+test("建地图：路线票正文里的影响面表写坏 → 这一张不建，别的照建", { skip: !gitAvailable && "本机没有 git" }, async () => {
+  const ws = workspace(false);
+  const gh = toolGh('process.stdout.write("{}\\n")');
+  try {
+    const plan = json(
+      await run(
+        "deck_map_plan_create",
+        {
+          title: "地图",
+          destination: "跑通地图",
+          tickets: [
+            { title: "写坏表的票", kind: "task", body: "## 影响面\n| 区 | 依据 | 结论 | 核的人 |\n|---|---|---|---|" },
+            { title: "正常票", kind: "task" },
+          ],
+        },
+        ws,
+      ),
+    );
+    // 坏的逐条拒绝，不给它一个票号；好的照旧建出来。
+    assert.equal(plan.failed, 1);
+    assert.match(plan.tickets[0].error, /区 \/ 仓库/);
+    assert.equal(plan.tickets[0].number, undefined);
+    assert.equal(plan.tickets[1].number > 0, true);
   } finally {
     gh.restore();
   }

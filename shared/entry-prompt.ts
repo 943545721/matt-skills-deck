@@ -1,3 +1,4 @@
+import type { RepoTargetSummary } from "./repo.ts";
 import type { DeckLang } from "./requirement.ts";
 
 /**
@@ -14,6 +15,26 @@ import type { DeckLang } from "./requirement.ts";
 export interface EntryPromptInput {
   lang: DeckLang;
   repo: string;
+}
+
+/** 入口能拿到的仓库清单：只关心默认项与 key，别的字段不参与这行文本。 */
+export interface EntryRepoListing {
+  readonly defaultKey: string | null;
+  readonly repos: readonly Pick<RepoTargetSummary, "key">[];
+}
+
+/**
+ * 入口开场白里「仓库」那一行该填什么。
+ *
+ * 单仓库 / 有默认项时就是它的 key；v2 多项目工作区没有默认仓库，这里把清单列出来，
+ * 而不是返回空串——空串会让「新建需求 / 探讨需求 / + bug」三个入口一直禁用，
+ * 多项目工作区里根本点不开。多仓库时按界面语言用顿号或逗号连接。
+ */
+export function entryRepoLabel(listing: EntryRepoListing | null | undefined, lang: DeckLang): string {
+  if (!listing) return "";
+  if (listing.defaultKey) return listing.defaultKey;
+  if (listing.repos.length === 1) return listing.repos[0]?.key ?? "";
+  return listing.repos.map((repo) => repo.key).join(lang === "zh" ? "、" : ", ");
 }
 
 const pick = <T,>(lang: DeckLang, zh: T, en: T): T => (lang === "zh" ? zh : en);

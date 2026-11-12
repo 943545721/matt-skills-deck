@@ -4,7 +4,9 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findTool } from "../server/mcp/tools.ts";
+import { readIdentityGaps } from "../server/identity-presence.ts";
 import { createLocalIssue, getLocalIssue, replaceLocalLabels } from "../server/tracker/local.ts";
+import { listPendingWindowNotes } from "../server/window-note-store.ts";
 
 /**
  * 两个新工具的入口层。
@@ -49,6 +51,8 @@ const baseSettings = {
  * 统一清掉，需要它的用例自己设、自己还原。
  */
 delete process.env.PASEO_AGENT_ID;
+// 派单入口现在校验调用者：默认把测试当成绑定的派单窗口。要测别的身份时，用例自己设、自己还原。
+process.env.PASEO_AGENT_ID = "dispatch-1";
 
 const runToolRaw = async (name, args, workspaceDir) => {
   const tool = findTool(name);
@@ -144,25 +148,22 @@ test("deck_dispatch_plan：MCP 派单也吃卡片默认档；模型删掉后不�
   assert.equal(second.body.tasks[0].thinkingOptionId, null, "模型删掉后不再带档位");
 });
 
-test("deck_dispatch_plan：没配派单窗口时逐条拒绝，并给出可执行的下一步", async (t) => {
-  // 角色在、派单窗口没选：这一条走的是 no-dispatcher
+test("deck_dispatch_plan：没配派单窗口时整次拒绝，并给出可执行的下一步", async (t) => {
+  // 角色在、派单窗口没选：没有人有资格派单，连计划都不该出。
   const dir = await workspace(t, { ...baseSettings, roles: [{ workspaceId: "ws1", mainAgentId: "main-1" }] });
   const { isError, body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
-  assert.equal(isError, false, "拒绝是正常结果，不是工具错误");
-  assert.equal(body.ok, true);
-  assert.equal(body.tasks.length, 0);
-  assert.equal(body.rejected[0].reason, "no-dispatcher");
-  assert.match(body.rejected[0].detail, /派单窗口/);
+  assert.equal(isError, true);
+  assert.equal(body.reason, "no-dispatcher");
+  assert.match(body.detail, /派单窗口/);
 });
 
-test("deck_dispatch_plan：工作区里根本没有编排文件时，除了拒绝还要提示先去配", async (t) => {
+test("deck_dispatch_plan：工作区里根本没有编排文件时，入口就拒并指到面板", async (t) => {
   const dir = await workspace(t, null);
-  const { body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
-  assert.equal(body.tasks.length, 0);
-  // 连角色都没有：这条是「没绑定工作区」，不是「没选派单窗口」
-  assert.equal(body.rejected[0].reason, "unknown-workspace");
-  assert.match(body.rejected[0].detail, /角色绑定/);
-  assert.ok(body.warnings.some((line) => line.includes("还没有编排设置")));
+  const { isError, body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
+  assert.equal(isError, true);
+  // 连角色都没有：这是「没有工作区角色」，不是「没选派单窗口」。
+  assert.equal(body.reason, "no-workspace");
+  assert.match(body.detail, /角色绑定/);
 });
 
 test("deck_dispatch_plan：超过单次上限的条目被拒，其余照发", async (t) => {
@@ -215,19 +216,41 @@ test("deck_dispatch_plan：depth 必填，缺省不按第 0 层猜", async (t) =
   assert.equal(body.reason, "invalid");
 });
 
-test("deck_dispatch_plan：真正在派单的是当前会话时，标签按它写并说清和绑定不一致", async (t) => {
+test("deck_dispatch_plan：主窗口不能派单，入口直接拒并指向交接工具", async (t) => {
   const dir = await workspace(t, baseSettings);
   const previous = process.env.PASEO_AGENT_ID;
-  process.env.PASEO_AGENT_ID = "main-9";
+  process.env.PASEO_AGENT_ID = "main-1";
   t.after(() => {
     if (previous === undefined) delete process.env.PASEO_AGENT_ID;
     else process.env.PASEO_AGENT_ID = previous;
   });
 
-  const { body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 0 }, dir);
-  assert.equal(body.tasks[0].labels["paseo.parent-agent-id"], "main-9");
-  assert.match(body.tasks[0].prompt, /main-9/);
-  assert.ok(body.warnings.some((line) => line.includes("main-9") && line.includes("dispatch-1")));
+  const { isError, body } = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 0 }, dir);
+  assert.equal(isError, true);
+  assert.equal(body.reason, "main-cannot-dispatch");
+  assert.match(body.detail, /deck_handoff_to_dispatcher/);
+});
+
+test("deck_dispatch_plan：其他会话不能派单；无身份同样拒", async (t) => {
+  const dir = await workspace(t, baseSettings);
+  const previous = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "child-1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+
+  const other = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
+  assert.equal(other.isError, true);
+  assert.equal(other.body.reason, "caller-not-dispatcher");
+
+  delete process.env.PASEO_AGENT_ID;
+  const anonymous = await runTool("deck_dispatch_plan", { tasks: [{ key: "t1", prompt: "p" }], depth: 1 }, dir);
+  assert.equal(anonymous.isError, true);
+  assert.equal(anonymous.body.reason, "caller-unknown");
+  // 身份缺失要留下可见痕迹：面板靠它点名「这个窗口该重开」，而不是让用户只看到一次工具报错。
+  const [gap] = await readIdentityGaps(dir);
+  assert.equal(gap.lastTool, "deck_dispatch_plan");
 });
 
 test("deck_dispatch_plan：编排文件坏掉时直接报错，不拿默认值编出「先加一条角色」", async (t) => {
@@ -314,6 +337,8 @@ test("deck_handoff：没有 PASEO_AGENT_ID 就失败，不拿别人的 id 顶上
   const { isError, body } = await runTool("deck_handoff", { summary: "无名氏" }, dir);
   assert.equal(isError, true);
   assert.equal(body.reason, "no-agent-id");
+  const [gap] = await readIdentityGaps(dir);
+  assert.equal(gap.lastTool, "deck_handoff", "被拒这件事要留痕，面板才能提示缺身份的窗口");
 });
 
 test("deck_handoff：没有 summary 就拒绝，不写空回传件", async (t) => {
@@ -633,6 +658,8 @@ test("deck_staff_request：没有 PASEO_AGENT_ID 不冒充发起人", async (t) 
   const { isError, body } = await runTool("deck_staff_request", { task: "要人", why: "忙不过来" }, dir);
   assert.equal(isError, true);
   assert.equal(body.reason, "no-agent-id");
+  const [gap] = await readIdentityGaps(dir);
+  assert.equal(gap.lastTool, "deck_staff_request");
 });
 
 test("deck_staff_request：缺「为什么」被参数校验挡住", async (t) => {
@@ -701,7 +728,7 @@ test("deck_dispatch_plan：员工卡调用在计划阶段就被拒，并指向 d
   assert.match(body.detail, /deck_staff_request/);
 });
 
-test("deck_dispatch_plan：认不出的调用者按非员工放行，不误杀", async (t) => {
+test("deck_dispatch_plan：没有岗位台账的派单窗口按非员工放行，不误杀", async (t) => {
   const dir = await workspace(t, {
     ...baseSettings,
     roles: [{
@@ -712,7 +739,8 @@ test("deck_dispatch_plan：认不出的调用者按非员工放行，不误杀",
     }],
   });
   const previous = process.env.PASEO_AGENT_ID;
-  process.env.PASEO_AGENT_ID = "agent-with-no-ledger";
+  // 绑定派单窗口本人，但台账里没有它的岗位记录：不能因为查不到卡就当成员工拦掉。
+  process.env.PASEO_AGENT_ID = "dispatch-1";
   t.after(() => {
     if (previous === undefined) delete process.env.PASEO_AGENT_ID;
     else process.env.PASEO_AGENT_ID = previous;
@@ -733,7 +761,7 @@ const staffSettings = {
     workspaceId: "ws1",
     mainAgentId: "main-1",
     dispatcherAgentId: "dispatch-1",
-    staff: [{ id: "frontend", name: "前端", kind: "worker" }],
+    staff: [{ id: "frontend", name: "前端", kind: "worker", paths: ["."] }],
   }],
 };
 
@@ -754,6 +782,26 @@ test("deck_requirement_dispatch：默认只回清单，一个字节都不写", a
   assert.equal((await getLocalIssue(dir, 2)).ok, false);
 });
 
+test("deck_requirement_dispatch：主窗口不能拆需求，入口直接拒", async (t) => {
+  const dir = await workspace(t, staffSettings);
+  const previous = process.env.PASEO_AGENT_ID;
+  process.env.PASEO_AGENT_ID = "main-1";
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+  const { isError, body } = await runToolRaw("deck_requirement_dispatch", { requirementNumber: 1 }, dir);
+  assert.equal(isError, true);
+  assert.equal(body.reason, "main-cannot-dispatch");
+
+  delete process.env.PASEO_AGENT_ID;
+  const anonymous = await runToolRaw("deck_requirement_dispatch", { requirementNumber: 1 }, dir);
+  assert.equal(anonymous.isError, true);
+  assert.equal(anonymous.body.reason, "caller-unknown");
+  const [gap] = await readIdentityGaps(dir);
+  assert.equal(gap.lastTool, "deck_requirement_dispatch");
+});
+
 test("deck_requirement_dispatch：需求没定稿 → 拒绝，也不写票", async (t) => {
   const dir = await workspace(t, staffSettings);
   await replaceLocalLabels(dir, 1, ["requirement"]);
@@ -762,4 +810,172 @@ test("deck_requirement_dispatch：需求没定稿 → 拒绝，也不写票", as
   assert.equal(body.ok, false);
   assert.equal(body.reason, "not-finalized");
   assert.equal((await getLocalIssue(dir, 2)).ok, false);
+});
+
+test("deck_requirement_dispatch：影响面表写坏 → 拒绝，并把原因自动递给需求窗口", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      { workspaceId: "ws1", mainAgentId: "main-1", requirementAgentId: "requirement-1", dispatcherAgentId: "dispatch-1" },
+    ],
+  });
+  const broken = await createLocalIssue(dir, {
+    title: "需求：影响面写坏",
+    body: [
+      "## 影响面",
+      "| 区 / 仓库 | 仓库 | 依据 | 结论 | 核验人 |",
+      "|---|---|---|---|---|",
+      "| kxhyapp.com | acme/deck | 需求票本身 | 要动 | 单区，免核 |",
+    ].join("\n"),
+    labels: ["requirement", "deck:定稿"],
+  });
+  assert.equal(broken.ok, true);
+
+  const { isError, body } = await runToolRaw("deck_requirement_dispatch", { requirementNumber: broken.number }, dir);
+  assert.equal(isError, true);
+  assert.equal(body.reason, "bad-impact");
+  assert.match(body.detail, /窗口条子放进队列/);
+  assert.doesNotMatch(body.detail, /已递给需求窗口/, "只排队不等于已送达");
+
+  const notes = await listPendingWindowNotes(dir);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].toRole, "requirement");
+  assert.equal(notes[0].requirementKey, broken.number);
+  assert.equal(notes[0].reason, "bad-impact");
+
+  // 同一个错再试一次：条子不重复递，用户不会被同一句话刷屏。
+  const again = await runToolRaw("deck_requirement_dispatch", { requirementNumber: broken.number }, dir);
+  assert.equal(again.isError, true);
+  assert.match(again.body.detail, /已经排进条子队列/);
+  assert.equal((await listPendingWindowNotes(dir)).length, 1);
+});
+
+test("需求票写闸：只有绑定的需求窗口能建 / 改需求票，它也不碰工作票", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      { workspaceId: "ws1", mainAgentId: "main-1", requirementAgentId: "requirement-1", dispatcherAgentId: "dispatch-1" },
+    ],
+  });
+  const previous = process.env.PASEO_AGENT_ID;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+
+  // 主窗口建需求票：拒；建工作票：也拒。
+  process.env.PASEO_AGENT_ID = "main-1";
+  const denied = await runToolRaw("deck_issue_create", { title: "主窗口建的需求", labels: ["requirement"] }, dir);
+  assert.equal(denied.isError, true);
+  assert.equal(denied.body.reason, "requirement-window-only");
+  const mainWork = await runToolRaw("deck_issue_create", { title: "主窗口建的工作票", requirementKey: 1 }, dir);
+  assert.equal(mainWork.isError, true);
+  assert.equal(mainWork.body.reason, "main-cannot-create-tickets");
+
+  // 需求窗口建需求票：放行。
+  process.env.PASEO_AGENT_ID = "requirement-1";
+  const created = await runToolRaw("deck_issue_create", { title: "需求窗口建的需求", labels: ["requirement"] }, dir);
+  assert.equal(created.isError, false, created.raw);
+  const requirementNumber = created.body.number;
+
+  // 需求窗口建工作票：拒。
+  const work = await runToolRaw("deck_issue_create", { title: "需求窗口建的工作票", requirementKey: 1 }, dir);
+  assert.equal(work.isError, true);
+  assert.equal(work.body.reason, "requirement-cannot-write-work");
+
+  // 派单窗口建工作票：放行；改需求票：拒。
+  process.env.PASEO_AGENT_ID = "dispatch-1";
+  const workTicket = await runToolRaw("deck_issue_create", { title: "派单窗口建的工作票", requirementKey: 1 }, dir);
+  assert.equal(workTicket.isError, false, workTicket.raw);
+  const patchByDispatcher = await runToolRaw("deck_issue_patch", { number: requirementNumber, title: "派单窗口改需求" }, dir);
+  assert.equal(patchByDispatcher.isError, true);
+  assert.equal(patchByDispatcher.body.reason, "requirement-window-only");
+  const relabelByDispatcher = await runToolRaw(
+    "deck_issue_labels",
+    { number: requirementNumber, labels: ["requirement", "area:server"] },
+    dir,
+  );
+  assert.equal(relabelByDispatcher.isError, true);
+  assert.equal(relabelByDispatcher.body.reason, "requirement-window-only");
+  // 给工作票加 requirement 标签：写入后变成需求票，同样拒。
+  const escalate = await runToolRaw(
+    "deck_issue_patch",
+    { number: workTicket.body.number, addLabels: ["requirement"] },
+    dir,
+  );
+  assert.equal(escalate.isError, true);
+  assert.equal(escalate.body.reason, "requirement-window-only");
+  const escalateLabels = await runToolRaw(
+    "deck_issue_labels",
+    { number: workTicket.body.number, labels: ["requirement"] },
+    dir,
+  );
+  assert.equal(escalateLabels.isError, true);
+  assert.equal(escalateLabels.body.reason, "requirement-window-only");
+
+  // 需求窗口改需求票：放行；改工作票：拒。
+  process.env.PASEO_AGENT_ID = "requirement-1";
+  const allowed = await runToolRaw("deck_issue_patch", { number: requirementNumber, title: "需求票新标题" }, dir);
+  assert.equal(allowed.isError, false, allowed.raw);
+  const workPatch = await runToolRaw("deck_issue_patch", { number: workTicket.body.number, title: "需求窗口改工作票" }, dir);
+  assert.equal(workPatch.isError, true);
+  assert.equal(workPatch.body.reason, "requirement-cannot-write-work");
+  const relabelWork = await runToolRaw(
+    "deck_issue_labels",
+    { number: workTicket.body.number, labels: ["requirement"] },
+    dir,
+  );
+  assert.equal(relabelWork.isError, true);
+  assert.equal(relabelWork.body.reason, "requirement-cannot-write-work");
+  // 把自己的需求票删成工作票：也拒。
+  const stripRequirement = await runToolRaw(
+    "deck_issue_patch",
+    { number: requirementNumber, removeLabels: ["requirement"] },
+    dir,
+  );
+  assert.equal(stripRequirement.isError, true);
+  assert.equal(stripRequirement.body.reason, "requirement-cannot-write-work");
+});
+
+test("需求票写闸：建地图也过同一道闸，主 / 需求 / 进度窗口建不了", async (t) => {
+  const dir = await workspace(t, {
+    ...baseSettings,
+    roles: [
+      {
+        workspaceId: "ws1",
+        mainAgentId: "main-1",
+        requirementAgentId: "requirement-1",
+        dispatcherAgentId: "dispatch-1",
+        progressAgentId: "progress-1",
+      },
+    ],
+  });
+  const previous = process.env.PASEO_AGENT_ID;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PASEO_AGENT_ID;
+    else process.env.PASEO_AGENT_ID = previous;
+  });
+  const plan = { title: "地图", destination: "跑通地图", tickets: [{ title: "第一张", kind: "task" }] };
+
+  // 主窗口 / 进度窗口不建票：地图与路线票也不行，不能从第二条建票入口绕过去。
+  process.env.PASEO_AGENT_ID = "main-1";
+  const mainPlan = await runToolRaw("deck_map_plan_create", plan, dir);
+  assert.equal(mainPlan.isError, true);
+  assert.equal(mainPlan.body.reason, "main-cannot-create-tickets");
+  process.env.PASEO_AGENT_ID = "progress-1";
+  const progressPlan = await runToolRaw("deck_map_plan_create", plan, dir);
+  assert.equal(progressPlan.isError, true);
+  assert.equal(progressPlan.body.reason, "progress-cannot-create-tickets");
+
+  // 需求窗口只建需求票：地图票与路线票都算工作票。
+  process.env.PASEO_AGENT_ID = "requirement-1";
+  const requirementPlan = await runToolRaw("deck_map_plan_create", plan, dir);
+  assert.equal(requirementPlan.isError, true);
+  assert.equal(requirementPlan.body.reason, "requirement-cannot-write-work");
+
+  // 派单窗口建地图：放行（没有被这道闸误伤）。
+  process.env.PASEO_AGENT_ID = "dispatch-1";
+  const dispatcherPlan = await runToolRaw("deck_map_plan_create", plan, dir);
+  assert.equal(dispatcherPlan.isError, false, dispatcherPlan.raw);
+  assert.equal(dispatcherPlan.body.tickets.length, 1);
 });

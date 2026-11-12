@@ -145,6 +145,13 @@ export async function inventoryOf(workspaceDir: string): Promise<ScanInventory> 
   return { dirs, files, ci, warnings };
 }
 
+/** 名册卡的领地展示：`.` 是整片；空是旧数据「没配」，不能读成整片。 */
+function territoryTextOf(paths: readonly string[] | undefined, en: boolean): string {
+  if (!paths?.length) return en ? "(not set)" : "（没配）";
+  if (paths.length === 1 && paths[0] === ".") return en ? "whole workspace" : "整片";
+  return paths.join(en ? ", " : "、");
+}
+
 /** 简报里的名册段：只说已有的名字与领地，别重复提案同一片。 */
 function rosterLines(cards: readonly StaffCard[], lang?: "zh" | "en"): string[] {
   const en = lang === "en";
@@ -157,10 +164,10 @@ function rosterLines(cards: readonly StaffCard[], lang?: "zh" | "en"): string[] 
       : card.kind === "manager"
         ? "经理"
         : "员工";
-    const paths = card.paths?.length ? card.paths.join(en ? ", " : "、") : en ? "whole workspace" : "整片";
+    const territory = territoryTextOf(card.paths, en);
     return en
-      ? `- ${card.name} (${card.id}, ${kind}) territory: ${paths}`
-      : `- ${card.name}（${card.id}，${kind}）领地：${paths}`;
+      ? `- ${card.name} (${card.id}, ${kind}) territory: ${territory}`
+      : `- ${card.name}（${card.id}，${kind}）领地：${territory}`;
   });
 }
 
@@ -203,7 +210,7 @@ export function buildScanBrief(input: ScanBriefInput, inventory: ScanInventory):
       "1. Read `.claude/skills/project-survey/SKILL.md` if it exists and follow its rules for finding projects and modules.",
       "2. Read the manifests above to confirm languages, package layout and deployable units.",
       "3. Split roles by *who owns which slice of the code*, never by file type (no 'styling engineer').",
-      `4. Propose at most ${MAX_STAFF_SCAN_CANDIDATES} roles. Each: name (2-4 words), kind (worker|manager), territories (paths relative to the workspace root that really exist; empty = whole workspace), duty (one or two sentences that will become a sub-session system prompt), evidence (1-6 files you actually read).`,
+      `4. Propose at most ${MAX_STAFF_SCAN_CANDIDATES} roles. Each: name (2-4 words), kind (worker|manager), territories (directories relative to the workspace root that really exist; one or more — write "." only when the whole workspace really is one module), duty (one or two sentences that will become a sub-session system prompt), evidence (1-6 files you actually read, paths relative to the workspace root; at least one must fall inside a territory).`,
       "5. Fewer is better than invented: never claim a directory you did not see.",
       "6. Write exactly one file and nothing else:",
       `   ${path.join(".deck", STAFF_SCAN_FILE)}`,
@@ -229,7 +236,7 @@ export function buildScanBrief(input: ScanBriefInput, inventory: ScanInventory):
     "1. 先读 `.claude/skills/project-survey/SKILL.md`（存在才读），按它的口径找项目与模块。",
     "2. 再读上面那些清单文件，确认语言、包结构与可部署单元。",
     "3. 按「谁负责哪片代码」切岗位，不按文件类型切（不要「样式岗」「工具函数岗」）。",
-    `4. 最多提 ${MAX_STAFF_SCAN_CANDIDATES} 条。每条要有：名字（2–6 字的人话）、身份（worker 或 manager）、领地（相对工作区根、**确实存在**的路径，可多条，留空 = 整片）、职责（一两句，会写进子会话的系统提示）、依据（你真读过的文件，1–6 条）。`,
+    `4. 最多提 ${MAX_STAFF_SCAN_CANDIDATES} 条。每条要有：名字（2–6 字的人话）、身份（worker 或 manager）、领地（相对工作区根、**确实存在**的目录，可多条；只有整个工作区确实是一个模块时才写「.」表示整片）、职责（一两句，会写进子会话的系统提示）、依据（你真读过的文件，1–6 条，路径相对工作区根，至少一条要落在领地里）。`,
     "5. 宁可少一条，也不要编一片你没见过的目录。",
     "6. 只写这一个文件，别的什么都别动：",
     `   ${path.join(".deck", STAFF_SCAN_FILE)}`,

@@ -4,6 +4,7 @@ import {
   buildNewBugPrompt,
   buildNewSpecPrompt,
   buildNewWayfinderPrompt,
+  entryRepoLabel,
 } from "../shared/entry-prompt.ts";
 import { MCP_TOOLS } from "../server/mcp/tools.ts";
 
@@ -34,6 +35,17 @@ const assertEndsWithRequirementPrefix = (text, lang, label) => {
   const prefix = lang === "zh" ? "需求描述：" : "Requirement: ";
   assert.match(text, new RegExp(`\\n\\n${prefix}\\s*$`), `${label}：末尾应是 prompt.requirementPrefix`);
 };
+
+test("入口仓库字段：多项目工作区列出全部仓库，不再返回空串把入口锁死", () => {
+  assert.equal(entryRepoLabel({ defaultKey: null, repos: [{ key: "local" }] }, "zh"), "local");
+  assert.equal(entryRepoLabel({ defaultKey: "acme/b", repos: [{ key: "acme/a" }, { key: "acme/b" }] }, "zh"), "acme/b");
+  assert.equal(entryRepoLabel({ defaultKey: null, repos: [{ key: "acme/a" }, { key: "acme/b" }] }, "zh"), "acme/a、acme/b");
+  // 英文界面用逗号，别把中文顿号带进英文开场白。
+  assert.equal(entryRepoLabel({ defaultKey: null, repos: [{ key: "acme/a" }, { key: "acme/b" }] }, "en"), "acme/a, acme/b");
+  assert.equal(entryRepoLabel({ defaultKey: null, repos: [] }, "zh"), "");
+  assert.equal(entryRepoLabel(undefined, "zh"), "");
+  assert.equal(entryRepoLabel(null, "zh"), "");
+});
 
 test("三个入口都写入真实仓库，不残留 {repo} 占位符", () => {
   for (const [label, build] of ENTRIES) {

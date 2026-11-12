@@ -16,6 +16,9 @@ import { createLocalIssue, getLocalIssue, initializeLocalScratch } from "../serv
  * 「入口有没有调用它、拒绝理由有没有原样回传、坏任务会不会拖累整批」。
  */
 
+// 派单入口现在校验调用者：这个文件测的是链条闸，把测试当成绑定的派单窗口。
+process.env.PASEO_AGENT_ID = "dispatch-app";
+
 const impact = (...rows) => [
   "## 影响面",
   "| 区 / 仓库 | 依据 | 结论 | 核的人 | 链条（没有就留空） |",

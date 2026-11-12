@@ -4,8 +4,10 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readOrchestrationState } from "../server/orchestration.ts";
+import { announcePresence } from "../server/identity-presence.ts";
 import { forgetMirrorFailures, resetAdoptAttemptsForTest } from "../server/codex-adopt.ts";
 import { isListedClient, isSupportedClient, SUPPORTED_CLIENTS, SUPPORTED_CLIENTS_LABEL } from "../shared/orchestration.ts";
+import { providerRowSchema } from "../shared/orchestration-rpc.ts";
 
 // 「模型清单补不进去」的记忆是模块级的：每个用例从干净的起点开始。
 test.beforeEach(() => forgetMirrorFailures());
@@ -156,6 +158,137 @@ test("编排状态：推理档位随客户端行下发，没报档位的模型�
       defaultThinkingOptionId: "high",
     },
   ]);
+});
+
+test("编排状态：接口窗口以保存的模型定义为准，旧快照不能盖掉刚保存的值", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  const config = {
+    agentProfiles: [],
+    providers: {
+      claude: {
+        additionalModels: [{ id: "haiku-x", label: "Haiku X", contextWindowMaxTokens: 96000 }],
+      },
+    },
+  };
+  const paseo = fakePaseo({
+    config: { get: async () => ({ config }) },
+    providers: {
+      snapshot: async () => ({
+        entries: [{
+          provider: "claude",
+          status: "ready",
+          models: [{ id: "haiku-x", contextWindowMaxTokens: 200000 }],
+        }],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.deepEqual(state.providers[0].modelCapabilities, [{ id: "haiku-x", contextWindowMaxTokens: 96000 }]);
+});
+
+test("编排状态：宿主配置没存窗口时，卡片仍按工作区缓存显示接口窗口", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  await writeFile(
+    join(dir, ".deck", "model-windows.json"),
+    JSON.stringify({
+      version: 1,
+      providers: {
+        claude: {
+          baseUrl: "https://api.example.test/v1",
+          models: [{ id: "auto/gpt-6-astra", contextWindowMaxTokens: 128000 }],
+        },
+      },
+    }),
+    "utf8",
+  );
+  const config = {
+    agentProfiles: [],
+    providers: {
+      claude: {
+        env: { ANTHROPIC_BASE_URL: "https://api.example.test/v1" },
+        additionalModels: [{ id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" }],
+      },
+    },
+  };
+  const paseo = fakePaseo({
+    config: { get: async () => ({ config }) },
+    providers: {
+      snapshot: async () => ({
+        entries: [{ provider: "claude", status: "ready", models: [{ id: "auto/gpt-6-astra" }] }],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.deepEqual(state.providers[0].modelCapabilities, [
+    { id: "auto/gpt-6-astra", contextWindowMaxTokens: 128000 },
+  ]);
+  assert.doesNotThrow(() => providerRowSchema.parse(state.providers[0]));
+});
+
+test("编排状态：缓存地址与当前接口不一致时不显示旧窗口", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  await writeFile(
+    join(dir, ".deck", "model-windows.json"),
+    JSON.stringify({
+      version: 1,
+      providers: {
+        claude: {
+          baseUrl: "https://old.example.test/v1",
+          models: [{ id: "auto/gpt-6-astra", contextWindowMaxTokens: 128000 }],
+        },
+      },
+    }),
+    "utf8",
+  );
+  const config = {
+    agentProfiles: [],
+    providers: {
+      claude: {
+        env: { ANTHROPIC_BASE_URL: "https://api.example.test/v1" },
+        additionalModels: [{ id: "auto/gpt-6-astra", label: "auto/gpt-6-astra" }],
+      },
+    },
+  };
+  const paseo = fakePaseo({
+    config: { get: async () => ({ config }) },
+    providers: {
+      snapshot: async () => ({
+        entries: [{ provider: "claude", status: "ready", models: [{ id: "auto/gpt-6-astra" }] }],
+      }),
+    },
+  });
+  const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.deepEqual(state.providers[0].modelCapabilities, []);
+});
+
+test("编排状态：畸形快照与配置能力退化为没有能力，不让整页客户端消失", async (t) => {
+  const dir = await workspace(t);
+  await writeFile(join(dir, ".deck", "orchestration.json"), JSON.stringify(settings()), "utf8");
+  for (const snapshotModels of ["sonnet", { id: "haiku-x" }, [{ id: "haiku-x", contextWindowMaxTokens: -1 }]]) {
+    const config = {
+      agentProfiles: [],
+      providers: {
+        claude: {
+          additionalModels: [{ id: "haiku-x", label: "Haiku X", thinkingOptions: ["high", { id: "low" }] }],
+        },
+      },
+    };
+    const paseo = fakePaseo({
+      config: { get: async () => ({ config }) },
+      providers: { snapshot: async () => ({ entries: [{ provider: "claude", status: "ready", models: snapshotModels }] }) },
+    });
+    const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+    assert.equal(state.ok, true);
+    assert.equal(state.providers.length, 1);
+    assert.deepEqual(state.providers[0].modelCapabilities, [{ id: "haiku-x", thinkingOptions: [{ id: "low", label: "low" }] }]);
+    assert.doesNotThrow(() => providerRowSchema.parse(state.providers[0]));
+  }
 });
 
 test("编排状态：磁盘形状（daemon.agentProfiles / agents.providers）也认，换版本不至于显示为空", async (t) => {
@@ -697,4 +830,22 @@ test("模型清单：对齐写不进去时说一句，不假装同步了", async
     state.warnings.some((line) => line.includes("没能同步")),
     `要提示其它窗口可能还是旧清单，实际警告：${state.warnings.join(" / ")}`,
   );
+});
+
+test("编排状态带上缺会话身份的窗口：读过它的面板才能在会话树上点名", async (t) => {
+  const dir = await workspace(t);
+  await announcePresence(dir, { agentId: "" });
+
+  const state = await readOrchestrationState(fakePaseo(), { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.equal(state.identityGaps.length, 1);
+  assert.equal(state.identityGaps[0].pid, process.pid);
+  assert.equal(state.identityGaps[0].lastTool, null, "还没被拒过就是 null，不编一个工具名");
+});
+
+test("没有痕迹的工作区 identityGaps 是空数组，不是缺字段", async (t) => {
+  const dir = await workspace(t);
+  const state = await readOrchestrationState(fakePaseo(), { workspaceId: "ws1", workspaceDir: dir });
+  assert.equal(state.ok, true);
+  assert.deepEqual(state.identityGaps, []);
 });

@@ -1,7 +1,8 @@
 import type { PaseoApi } from "@getpaseo/client";
-import { endpointAuthOf, modelListUrls, parseModelList } from "../shared/provider-models.ts";
+import { endpointAuthOf, modelListUrls, parseModelList, providerBaseUrlKey, type ProviderModelDefinition } from "../shared/provider-models.ts";
 import { readDaemonConfig } from "./orchestration.ts";
 import { providerEntryOf, providersRawOf } from "./provider-entry.ts";
+import { saveFetchedModelWindows } from "./model-window-cache.ts";
 import { record } from "./logs.ts";
 
 /**
@@ -22,7 +23,14 @@ const MAX_MODELS = 500;
 const TIMEOUT_MS = 10_000;
 
 export type FetchModelsResult =
-  | { ok: true; provider: string; endpoint: string; models: string[] }
+  | {
+      ok: true;
+      provider: string;
+      endpoint: string;
+      models: ProviderModelDefinition[];
+      /** 窗口没缓存成功时的告警；成功拿到清单不受影响。 */
+      cacheWarning?: string;
+    }
   | {
       ok: false;
       reason:
@@ -57,7 +65,7 @@ function snippet(text: string): string {
 
 export async function fetchProviderModels(
   paseo: PaseoApi,
-  input: { provider: string },
+  input: { provider: string; workspaceDir?: string },
   deps: FetchDeps = {},
 ): Promise<FetchModelsResult> {
   const provider = (input.provider ?? "").trim();
@@ -81,7 +89,9 @@ export async function fetchProviderModels(
     }
   }
 
-  const auth = endpointAuthOf(env);
+  // 地址选取必须与按地址查窗口缓存的那边一致（`providerBaseUrlKey`），
+  // 否则清单从 A 地址拉、窗口按 B 地址记，保存模型时永远补不回窗口。
+  const auth = endpointAuthOf(env, providerBaseUrlKey(provider));
   if (!auth) {
     const hasUrl = Object.keys(env).some((key) => /BASE_URL$/i.test(key) && /^https?:\/\//i.test((env[key] ?? "").trim()));
     const hasKey = Object.keys(env).some((key) => /(_AUTH_TOKEN|_API_KEY|_TOKEN)$/i.test(key) && (env[key] ?? "").trim());
@@ -150,7 +160,22 @@ export async function fetchProviderModels(
       };
     }
     record("info", SCOPE, `拉到 ${provider} 的模型清单：${models.length} 个（${url}，凭据不进日志）`);
-    return { ok: true, provider, endpoint: url, models };
+    // 宿主保存模型时会裁掉 `contextWindowMaxTokens`，所以窗口要在这里留一份：
+    // 保存与重建 Codex 目录都从这份缓存补，重载面板也还看得到接口报的数。
+    // 写缓存失败不影响这次拉取结果，但要把告警带回界面。
+    const cacheWarning = await saveFetchedModelWindows({
+      workspaceDir: input.workspaceDir,
+      provider,
+      baseUrl: auth.baseUrl,
+      models,
+    });
+    return {
+      ok: true,
+      provider,
+      endpoint: url,
+      models,
+      ...(cacheWarning ? { cacheWarning } : {}),
+    };
   }
 
   return {

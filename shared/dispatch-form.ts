@@ -2,8 +2,8 @@
  * 派单台（面板表单）到 `deck.orchestration.dispatch` 入参的那一跳。
  *
  * 之所以单独抽成纯函数而不是写在面板里：这段「什么算填好了」的判定有几条硬规则
- * （空提示词、名册非空却没选卡、需求票号不是正整数），面板里夹在 JSX 里就没法
- * 单独钉住。服务器也会拒这些，但让它先拒一遍意味着用户点一次、等一个往返、
+ * （空提示词、名册非空却没选卡、没填需求票号或票号不是正整数），面板里夹在 JSX 里
+ * 就没法单独钉住。服务器也会拒这些，但让它先拒一遍意味着用户点一次、等一个往返、
  * 再看一句机器码；在这里拦住能直接说人话。
  *
  * 只做形状整理，不做业务判定：链条闸、repoKey 归属、层数、并发都在服务端。
@@ -28,7 +28,7 @@ export interface DispatchFormInput {
   staffId?: string;
   repoKey?: string;
   pathPrefix?: string;
-  /** 需求票号；留空表示「这次不挂需求」——链条检查就跳过，服务器照建票。 */
+  /** 需求票号；必填。无票不干活，服务器也会拒。 */
   requirementNumber?: number | null;
   requirementRepoKey?: string;
   /** 名册非空时为真：没选卡就让调用方先拒，别等服务器按 region 猜一个人。 */
@@ -71,8 +71,11 @@ export function buildDispatchTask(input: DispatchFormInput): DispatchFormResult 
   }
 
   const requirementNumber = input.requirementNumber ?? null;
-  if (requirementNumber !== null && (!Number.isInteger(requirementNumber) || requirementNumber < 1)) {
-    return { ok: false, problem: "需求票号是正整数，比如 42；不挂需求就留空" };
+  if (requirementNumber === null) {
+    return { ok: false, problem: "需求票号必填：无票不干活，先建一张需求票再派" };
+  }
+  if (!Number.isInteger(requirementNumber) || requirementNumber < 1) {
+    return { ok: false, problem: "需求票号是正整数，比如 42" };
   }
 
   const pathPrefix = text(input.pathPrefix);

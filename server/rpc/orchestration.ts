@@ -65,6 +65,7 @@ import {
 import { listArchivedAgents } from "../archived-agents.ts";
 import { stopStaffSessions } from "../staff-stop.ts";
 import { record } from "../logs.ts";
+import { noteRequirementWindow, requirementNoteSuffix } from "../window-note-send.ts";
 import {
   deliverReassign,
   resolveReassignTarget,
@@ -113,6 +114,7 @@ export async function orchestrationStateHandler(
     providers: state.providers,
     agents: state.agents,
     tree: state.tree,
+    identityGaps: state.identityGaps,
     warnings: state.warnings,
   };
 }
@@ -400,10 +402,12 @@ export async function orchestrationProviderHandler(
 ): Promise<RpcOutput<typeof orchestrationProviderRpc>> {
   return patchProviderConfig(context.paseo, {
     provider: input.provider,
+    ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
     ...(input.env ? { env: input.env } : {}),
     ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
     ...(input.label !== undefined ? { label: input.label } : {}),
     ...(input.models ? { models: input.models } : {}),
+    ...(input.modelDefinitions ? { modelDefinitions: input.modelDefinitions } : {}),
   });
 }
 
@@ -484,7 +488,20 @@ export async function orchestrationRequirementDispatchHandler(
     workspaceDirs,
     workspaceAliases,
   });
-  if (!lookup.ok) return lookup;
+  // 面板派单是人工点的，但「票写坏了」该改的仍是需求窗口：同一条条子通道照走，
+  // 用户不用再自己去需求窗口里复述一遍。面板没有会话身份，来源如实留空。
+  const withNote = async <T extends { readonly detail: string }>(refusal: T): Promise<T> => {
+    const note = await noteRequirementWindow({
+      workspaceDir: input.workspaceDir,
+      workspaceId: input.workspaceId,
+      fromAgentId: "",
+      requirementKey: input.requirementNumber,
+      reason: "reason" in refusal ? String((refusal as { reason: unknown }).reason) : "",
+      detail: refusal.detail,
+    });
+    return { ...refusal, detail: `${refusal.detail}${requirementNoteSuffix(note)}` };
+  };
+  if (!lookup.ok) return withNote(lookup);
 
   const config = await readDaemonConfig(context.paseo);
   const result = await runRequirementDispatch(context.paseo, {
@@ -495,7 +512,7 @@ export async function orchestrationRequirementDispatchHandler(
     daemonConfig: config,
     ...(input.confirm === true ? { confirmRequirementSplit: false } : {}),
   });
-  if (!result.ok) return result;
+  if (!result.ok) return withNote(result);
   return {
     ok: true,
     created: result.created,
@@ -563,6 +580,7 @@ export async function orchestrationSiteHandler(
 ): Promise<RpcOutput<typeof orchestrationSiteRpc>> {
   return saveClientSite(context.paseo, {
     provider: input.provider,
+    ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
     ...(input.site ? { site: input.site } : {}),
     ...(input.removeId ? { removeId: input.removeId } : {}),
     ...(input.enableId ? { enableId: input.enableId } : {}),
@@ -574,7 +592,10 @@ export async function orchestrationProviderModelsHandler(
   input: RpcInput<typeof orchestrationProviderModelsRpc>,
   context: PluginHandlerContext,
 ): Promise<RpcOutput<typeof orchestrationProviderModelsRpc>> {
-  return fetchProviderModels(context.paseo, { provider: input.provider });
+  return fetchProviderModels(context.paseo, {
+    provider: input.provider,
+    ...(input.workspaceDir ? { workspaceDir: input.workspaceDir } : {}),
+  });
 }
 
 /**
@@ -603,7 +624,7 @@ type WindowFailure = {
 };
 
 /**
- * 窗口标题固定用中文（规格 #25：「主窗口 / 派单窗口 / 进度窗口」）。
+ * 窗口标题固定用中文（四个固定窗口各有一个稳定标题，见 `ROLE_WINDOW_TITLES`）。
  *
  * `lang` 只决定身份提示词的语言；标题是给人认「这是哪一个窗口」的固定标识，
  * 不随界面语言变，否则同一个角色会因语言生成两个名字。

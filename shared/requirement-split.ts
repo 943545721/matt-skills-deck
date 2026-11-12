@@ -19,7 +19,7 @@ import {
   isFinalized,
   type ImpactRow as ParsedImpactRow,
 } from "./impact.ts";
-import { pathWithinPrefix, resolveOwner } from "./staff-guard.ts";
+import { normalizeOwnerPath, pathWithinPrefix, resolveOwner } from "./staff-guard.ts";
 import type { OwnerStaff } from "./staff-guard.ts";
 import type { StaffCard } from "./staff.ts";
 
@@ -154,6 +154,33 @@ export function uniqueRepos(workspace: SplitWorkspace): string[] {
   return out;
 }
 
+/**
+ * 仓库键与名册 / 影响面路径用的不是同一套坐标系：仓库键带 `owner/` 前缀
+ * （`943545721/kxhyapp.com-saas`），而名册 `paths` 与工作区相对路径只有仓库名
+ * 那一段（`kxhyapp.com-saas/src`）。这里取仓库键的末段当「工作区相对」写法。
+ */
+function repoStem(repo: string): string {
+  const parts = normalizeOwnerPath(repo).split("/");
+  return parts.length > 1 ? parts[parts.length - 1] ?? repo : repo;
+}
+
+/**
+ * 把可能带 `owner/` 前缀的路径折回工作区相对写法；对不上任何仓库键就原样返回。
+ *
+ * `943545721/kxhyapp.com-saas/src/Service` → `kxhyapp.com-saas/src/Service`，
+ * 这样名册里的相对 `paths` 才认得它，仓库键也才能按末段匹配。
+ */
+function toWorkspaceRelative(path: string, repos: readonly string[]): string {
+  const normalized = normalizeOwnerPath(path);
+  for (const repo of repos) {
+    const full = normalizeOwnerPath(repo);
+    if (!full.includes("/")) continue;
+    if (normalized === full) return repoStem(repo);
+    if (normalized.startsWith(`${full}/`)) return repoStem(repo) + normalized.slice(full.length);
+  }
+  return normalized;
+}
+
 /** 行属于哪个工作区：显式 id 优先；单工作区自动落；多工作区再按第一列 / 仓库名各对一次。 */
 export function workspaceForRow(row: ImpactRow, workspaces: readonly SplitWorkspace[]): SplitWorkspace | null {
   const wanted = textOf(row.workspaceId);
@@ -189,13 +216,31 @@ function repoKeyOf(row: ImpactRow, workspace: SplitWorkspace, ownerPrefix: strin
   const repos = uniqueRepos(workspace);
   if (repos.length === 1) return repos[0] ?? null;
   if (!repos.length) return null;
-  const path = textOf(row.pathPrefix) || ownerPrefix;
-  let best: string | null = null;
+  const path = toWorkspaceRelative(textOf(row.pathPrefix) || ownerPrefix, repos);
+  // 仓库键带 owner 前缀、路径没有：按末段（仓库名）匹配；末段重复的不猜。
+  const stemCounts = new Map<string, number>();
   for (const repo of repos) {
-    if (!pathWithinPrefix(path, repo)) continue;
-    if (!best || repo.length > best.length) best = repo;
+    const stem = repoStem(repo);
+    stemCounts.set(stem, (stemCounts.get(stem) ?? 0) + 1);
   }
-  return best;
+  let best: string | null = null;
+  let bestLen = -1;
+  let tie = false;
+  for (const repo of repos) {
+    const stem = repoStem(repo);
+    const matched = pathWithinPrefix(path, repo)
+      ? repo
+      : (stemCounts.get(stem) === 1 ? pathWithinPrefix(path, stem) : false) ? stem : "";
+    if (!matched) continue;
+    if (matched.length > bestLen) {
+      best = repo;
+      bestLen = matched.length;
+      tie = false;
+    } else if (matched.length === bestLen) {
+      tie = true;
+    }
+  }
+  return tie ? null : best;
 }
 
 function workBody(input: { requirement: number; row: ImpactRow; reviewer: string }): string {
@@ -251,7 +296,8 @@ function workerForRow(
   workspace: SplitWorkspace,
 ): { readonly worker: StaffCard; readonly prefix: string; readonly managerPrefix: string } | { readonly detail: string } {
   const owner = resolveOwner({
-    path: textOf(row.pathPrefix),
+    // 名册 paths 是工作区相对写法；把可能带 owner 前缀的路径折回来再匹配。
+    path: toWorkspaceRelative(textOf(row.pathPrefix), uniqueRepos(workspace)),
     roster: workspace.roster,
     workspaceId: workspace.workspaceId,
     rootManager: workspace.rootManager,

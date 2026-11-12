@@ -10,6 +10,7 @@ import type { PanelKey } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelBanner, PixelButton } from "../../pixel.tsx";
 import { OrchSection, rowDivider } from "./parts.tsx";
+import { territoryText } from "./staff-draft.ts";
 
 /**
  * 一键扫岗：起一个会话读工作区，把它提的岗位摊在这里，人点了「采纳」才进名册。
@@ -136,6 +137,8 @@ export function StaffScan({
       spacer: { flex: 1 },
       duty: { color: skin.colors.ink, fontSize: 11, lineHeight: 16, fontFamily: skin.mono.fontFamily },
       meta: { color: skin.colors.ink2, fontSize: 10, lineHeight: 15, fontFamily: skin.mono.fontFamily },
+      /** 领地与名册卡同一种绿；行高阶不变，只换颜色。 */
+      territory: { color: skin.colors.ok, fontSize: 10, lineHeight: 15, fontFamily: skin.mono.fontFamily },
       hint: { color: skin.colors.ink2, fontSize: 11, lineHeight: 16, fontFamily: skin.mono.fontFamily },
       actions: { flexDirection: "row" as const, alignItems: "center" as const, gap: 6, flexWrap: "wrap" as const },
       warn: skin.error,
@@ -217,6 +220,7 @@ export function StaffScan({
       {candidates.map((candidate, index) => {
         const scanKey = staffScanKeyOf(candidate);
         const done = adopted.includes(scanKey);
+        const territory = territoryText(candidate.paths, t("orch.scanWhole"));
         return (
           <View key={`${scanKey}#${index}`} style={[styles.row, rowDivider(skin, index === 0)]}>
             <View style={styles.head}>
@@ -237,9 +241,11 @@ export function StaffScan({
               />
             </View>
             {candidate.duty ? <Text style={styles.duty} numberOfLines={3}>{candidate.duty}</Text> : null}
-            <Text style={styles.meta} numberOfLines={1}>
-              {candidate.paths.length ? candidate.paths.join(" · ") : t("orch.scanWhole")}
-            </Text>
+            {territory ? (
+              <Text style={styles.territory} numberOfLines={1}>
+                {territory}
+              </Text>
+            ) : null}
             {candidate.evidence.length ? (
               <Text style={styles.meta} numberOfLines={2}>
                 {`${t("orch.scanEvidence")}：${candidate.evidence.join("、")}`}

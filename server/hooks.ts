@@ -3,18 +3,27 @@ import type { AgentPermissionRequest, AgentPermissionRequestKind } from "@getpas
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { CODEX_SITE_PROVIDER, providerId } from "../shared/orchestration.ts";
+import { decideRoleChild, rolesOfAgent } from "../shared/window-gates.ts";
+import { roleSlotsFor } from "./role-window.ts";
 import { describeCodexEnsureFailure, ensureCodexAddressEffective } from "./codex-adopt.ts";
+import { deliverMessage, registerDeliveryQueue } from "./delivery.ts";
 import { codexSiteUsable, legacyCodexAddressOf, providersRawOf } from "./provider-entry.ts";
 import { resolveOwner } from "../shared/staff-guard.ts";
 import { record } from "./logs.ts";
 import { MCP_SERVER_NAME, PREAPPROVED_TOOL_NAMES } from "./mcp/tools.ts";
 import { pluginRoot } from "./paths.ts";
-import { TurnReporter, reportEnabledFor } from "./report.ts";
+import { registerPermissionWatch } from "./permission-watch.ts";
+import { registerDispatchHandoffRelay } from "./dispatch-handoff-relay.ts";
+import { registerWindowNoteRelay } from "./window-note-relay.ts";
+import { TurnReporter, mainAgentFor, reportEnabledFor } from "./report.ts";
 import { getSettings } from "./settings.ts";
 import { readDaemonConfig } from "./orchestration.ts";
 import { readOrchestration } from "./orchestration-store.ts";
 import { decideStaffGate, decideWorkerDispatch, staffGateApplies } from "./staff-gates.ts";
 import { DECK_STAFF_LABEL, rosterOf } from "../shared/staff.ts";
+import { registerTicketShellGate } from "./ticket-shell-gate.ts";
+import { registerExecutionGate } from "./execution-gate.ts";
+import { runPermissionGate } from "./permission-gates.ts";
 import type { StaffCard } from "../shared/staff.ts";
 import {
   appendLineageRecord,
@@ -319,17 +328,49 @@ function canInjectDeckTools(): boolean {
   );
 }
 
-async function isDeckWorkspace(workspaceDir: string): Promise<boolean> {
+/**
+ * 按（口径，后端，目录）缓存一次判定。
+ *
+ * 两个调用方问的是同一个问题、只是要不要把「能挂 MCP 工具」算进去不同；
+ * 缓存形状与 TTL 只该有一份，否则改了一处、另一处还在按旧口径返回。
+ */
+async function cachedDeckVerdict(
+  scope: "tools" | "board",
+  workspaceDir: string,
+  compute: (dir: string) => Promise<boolean>,
+): Promise<boolean> {
   const dir = workspaceDir.trim();
   if (!dir) return false;
-  const key = `${getSettings().backend}\u0000${dir}`;
+  const key = `${scope}\u0000${getSettings().backend}\u0000${dir}`;
   const now = Date.now();
   const hit = deckWorkspaceCache.get(key);
   if (hit && now - hit.at < DECK_WORKSPACE_TTL_MS) return hit.deck;
-  const { deck } = await deckWorkspaceState(dir);
-  const usable = deck && canInjectDeckTools();
-  deckWorkspaceCache.set(key, { at: now, deck: usable });
-  return usable;
+  const deck = await compute(dir);
+  deckWorkspaceCache.set(key, { at: now, deck });
+  return deck;
+}
+
+/** 能挂 deck 工具的工作区：自动放行只在这类目录里点头。 */
+async function isDeckWorkspace(workspaceDir: string): Promise<boolean> {
+  return cachedDeckVerdict("tools", workspaceDir, async (dir) => {
+    const { deck } = await deckWorkspaceState(dir);
+    return deck && canInjectDeckTools();
+  });
+}
+
+/**
+ * 是不是一块有票可读的板子。
+ *
+ * 与 `isDeckWorkspace` 的区别在于**不要求**能把 deck 工具注进去，也不认「后端选了 local
+ * 就等于处处是板子」：那只是本机的存储方式，没建过板的目录里 gh 并没有绕过任何票闸。
+ * 认的是「有远端仓库」或「目录里真有 `.deck/` / `.scratch/`」。
+ */
+async function isDeckBoardWorkspace(workspaceDir: string): Promise<boolean> {
+  return cachedDeckVerdict("board", workspaceDir, async (dir) => {
+    const targets = await resolveWorkspaceTargets(dir);
+    if (targets.ok && targets.kind === "repos") return targets.targets.length > 0;
+    return existsSync(path.join(dir, ".deck")) || existsSync(path.join(dir, ".scratch"));
+  });
 }
 
 /** 宿主对「没有标题」的请求给的是这个哨兵值，不是空串（cursor 实测就是 `-`）。 */
@@ -568,36 +609,41 @@ async function denyOutOfTerritory(input: DenyInput): Promise<void> {
   });
 }
 
-/** 员工会话的越界写：拒绝并落一条协调请求；没有证据时既不自动放行也不 deny。 */
+/**
+ * 员工会话的越界写：拒绝并落一条协调请求；没有证据时既不自动放行也不 deny。
+ *
+ * 返回 `pass` 表示这道闸不管这条请求，调用方把它交还给自动放行；
+ * `handled` 表示已经拒绝、放行或留给用户确认，标记不能被外层清掉。
+ */
 async function gateStaffPermission(
   agent: PluginHookAgent,
   request: AgentPermissionRequest,
   context: PluginHookContext,
-): Promise<void> {
+): Promise<"pass" | "handled"> {
   const staffId = await staffIdForPermission(agent);
   // 不是员工会话：原样交给后面的处理函数，不改变现有行为。
-  if (!staffId) return;
+  if (!staffId) return "pass";
 
   const type = request.detail?.type;
   // 读与检索永远不拦：越界闸管的是写。
-  if (type === "read" || type === "search") return;
+  if (type === "read" || type === "search") return "pass";
 
   // shell 选择不拦，但要把「这是选择，不是漏了」写进日志。命令内容不进日志：
   // 权限请求里的命令可能带 token / 连接串，日志不是放它的地方。
   if (type === "shell") {
     record("info", SCOPE, `员工会话的 shell 请求选择不拦（不是拦不住）：agent=${agent.id}`);
-    return;
+    return "pass";
   }
 
   const lookup = await rosterForPermission(agent);
   if (!lookup.ok) {
     leavePermissionToUser(agent, request, lookup.why);
-    return;
+    return "handled";
   }
   const card = lookup.roster.find((item) => item.id === staffId);
   if (!card) {
     leavePermissionToUser(agent, request, `会话标签 ${DECK_STAFF_LABEL}=${staffId} 在名册里找不到对应的卡`);
-    return;
+    return "handled";
   }
 
   const verdict = territoryVerdict({
@@ -607,10 +653,10 @@ async function gateStaffPermission(
     workspaceDir: agent.cwd,
     workspaceId: agent.workspaceId ?? undefined,
   });
-  if (verdict.kind === "pass") return;
+  if (verdict.kind === "pass") return "pass";
   if (verdict.kind === "leave") {
     leavePermissionToUser(agent, request, verdict.why);
-    return;
+    return "handled";
   }
 
   if (await consumeApprovalIfAny(agent, verdict.normalized)) {
@@ -625,16 +671,14 @@ async function gateStaffPermission(
         `按「批准这一次」放行（${verdict.normalized}）：agent=${agent.id}，批准已用掉`,
       );
     } catch (error) {
-      if (AUTO_ALLOW_KINDS.has(request.kind) && getSettings().autoAllowPermissions) {
-        heldForUserConfirmation.add(permissionKey(agent.id, request.id));
-      }
+      // 放行没送到也保持外层的 held：自动放行不能把它翻回来。
       record(
         "warn",
         SCOPE,
         `「批准这一次」放行失败（${verdict.normalized}）：agent=${agent.id}，${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    return;
+    return "handled";
   }
 
   await denyOutOfTerritory({
@@ -646,6 +690,7 @@ async function gateStaffPermission(
     ownerName: verdict.ownerName,
     context,
   });
+  return "handled";
 }
 
 export function registerHooks(server: PluginServerContext): void {
@@ -692,25 +737,49 @@ export function registerHooks(server: PluginServerContext): void {
   // **越界闸必须注册在「自动放行」之前**：先 deny 掉，后面那条 allow 到达宿主时请求
   // 已经不在了，deny 不会被翻回 allow。顺序是硬条件，不要用配置项绕过。
   server.on("agent.permission_requested", async ({ agent, request }, context) => {
-    const key = permissionKey(agent.id, request.id);
-    const run = (async () => {
+    await runPermissionGate({ permissionKey, heldForUserConfirmation, gateInFlight }, agent.id, request.id, async (release) => {
       try {
-        await gateStaffPermission(agent, request, context);
+        const verdict = await gateStaffPermission(agent, request, context);
+        // 只有「这道闸不管」才交还自动放行；留给用户确认的标记不能被外层清掉。
+        if (verdict === "pass") release();
       } catch (error) {
-        // 闸自己出错时既不静默放行，也不卡死会话：标成人工确认，日志留原因。
-        if (AUTO_ALLOW_KINDS.has(request.kind) && getSettings().autoAllowPermissions) {
-          heldForUserConfirmation.add(key);
-        }
+        // 闸自己出错时既不静默放行，也不卡死会话：保持 held，交给用户确认，日志留原因。
         record(
           "warn",
           SCOPE,
           `岗位越界闸判定失败，本次交给用户确认（${describePermission(request, request.detail?.type)}）：${error instanceof Error ? error.message : String(error)}`,
         );
       }
-    })();
-    gateInFlight.set(key, run);
-    try { await run; } finally { gateInFlight.delete(key); }
+    });
   });
+
+  // 票闸的 shell 侧：MCP 的票闸拦不住 `gh issue create`，会话照样能绕过去建票。
+  // 必须排在「自动放行」之前，并与越界闸共用 `gateInFlight`（见 `server/ticket-shell-gate.ts`）。
+  registerTicketShellGate(server, {
+    isDeckBoardWorkspace,
+    permissionKey,
+    heldForUserConfirmation,
+    gateInFlight,
+  });
+
+  // 执行门：主窗口 / 需求窗口 / 派单窗口 / 进度窗口不改文件。排在票闸之后——gh / glab
+  // 先让票闸拒，别让同一条命令收到两条拒绝；同样必须排在自动放行之前。
+  registerExecutionGate(server, { permissionKey, heldForUserConfirmation, gateInFlight });
+
+  // 往别的窗口递消息（回传、提醒）时先看对方忙不忙：忙就排队，等这一轮跑完再送。
+  registerDeliveryQueue(server);
+
+  // 主窗口写进 outbox 的交接件：在回合结束 / 建会话时按当前绑定送进派单窗口。
+  // 必须排在投递队列之后：relay 用的是 `deliverMessage`，队列没注册就退回直接发送。
+  registerDispatchHandoffRelay(server);
+
+  // 派单被拒、错在票面时的条子：自动递给需求窗口，省掉「用户复制粘贴转述」这一环。
+  // 与交接件同一套触发点，同样必须排在投递队列之后。
+  registerWindowNoteRelay(server);
+
+  // 子会话的确认只弹在它自己的窗口；等久了往主沟通窗口递一句话，
+  // 否则用户不切过去就完全不知道有活儿卡在那里（见 `server/permission-watch.ts`）。
+  registerPermissionWatch(server, { mainAgentFor });
 
   // 设置里打开「自动放行」后，替用户点这个确认：客户端不给预授权（cursor 等），
   // 不开这条路的话每调一次 deck 工具都要人点一次。默认关，开关的意义见 `shared/settings.ts`。
@@ -786,6 +855,49 @@ export function registerHooks(server: PluginServerContext): void {
         );
         return;
       }
+      // C 创建门：主窗口 / 需求窗口 / 进度窗口不能直接开执行会话。放在名册早退之前——
+      // 空名册的工作区同样要受约束，否则「没配岗位」就等于「谁都能开」。
+      const roleLookup = roleSlotsFor(read.settings, agent.workspaceId);
+      if (!roleLookup.ok) {
+        // 分不清会话属于哪片：后台事件失败方向是放行，只留一条 warn。
+        record("warn", SCOPE, `窗口角色判定跳过（${roleLookup.detail}）：agent=${agent.id}`);
+      } else {
+        const childRoles = rolesOfAgent(roleLookup.slots, agent.id);
+        const parentRoles = rolesOfAgent(roleLookup.slots, agent.parentAgentId);
+        const decision = decideRoleChild({
+          parentAgentId: agent.parentAgentId ?? null,
+          parentRoles,
+          childIsRoleWindow: childRoles.length > 0,
+        });
+        if (decision.archive) {
+          const childHandle = context.paseo.agents.ref(agent.id);
+          await childHandle.archive();
+          record("warn", SCOPE, `窗口闸已归档新会话（${decision.reason}）：${decision.detail}；agent=${agent.id}`);
+          // 归档不能静默：父窗口要知道自己这一下被拦了，以及正规通道在哪。
+          if (agent.parentAgentId) {
+            try {
+              await deliverMessage(context.paseo, agent.parentAgentId, decision.notice);
+            } catch (error) {
+              record(
+                "warn",
+                SCOPE,
+                `窗口闸通知父会话失败（agent=${agent.id}）：${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+          return;
+        }
+        if (agent.parentAgentId && parentRoles.length === 0 && childRoles.length === 0) {
+          // 父会话不在任何角色槽位里：可能是执行窗口，也可能是已经删掉的旧会话。
+          // 后台事件失败方向是放行，但要留一条 warn，免得「创建门没生效」看起来像「没配」。
+          record(
+            "warn",
+            SCOPE,
+            `创建门认不出父会话的角色，本次放行：agent=${agent.id}，parent=${agent.parentAgentId}`,
+          );
+        }
+      }
+
       // 名册按目录取：同一目录会有好几个 workspaceId，按 id 取会读成一个空名册。
       const roster = rosterOf(read.settings);
       if (!staffGateApplies(roster)) return;
@@ -840,9 +952,11 @@ export function registerHooks(server: PluginServerContext): void {
         // 拒绝必须给出下一步：告诉员工这条正规通道存在，否则它只会换个写法硬试。
         if (agent.parentAgentId) {
           try {
-            await context.paseo.agents
-              .ref(agent.parentAgentId)
-              .send("你不能派活。需要人手请发 deck_staff_request 给经理：说明要什么、为什么、建议交给谁。");
+            await deliverMessage(
+              context.paseo,
+              agent.parentAgentId,
+              "你不能派活。需要人手请发 deck_staff_request 给经理：说明要什么、为什么、建议交给谁。",
+            );
           } catch (error) {
             record(
               "warn",

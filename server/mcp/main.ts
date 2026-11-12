@@ -4,6 +4,8 @@ import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { handleMessage, needsSerialization } from "./protocol.ts";
 import { MCP_SERVER_NAME } from "./tools.ts";
+import { announcePresence } from "../identity-presence.ts";
+import { adoptSessionAgentId } from "./session-identity.ts";
 import type { ToolContext } from "./tools.ts";
 
 /**
@@ -39,11 +41,18 @@ function parseWorkspace(argv: readonly string[]): { dir: string } | { error: str
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
+  // Codex 没有把会话环境传给 MCP 子进程；先从父进程树补齐身份，再碰任何会读
+  // `PASEO_AGENT_ID` 的逻辑。找不到时保持空，原有拒绝行为不变。
+  adoptSessionAgentId();
   const workspace = parseWorkspace(argv);
   if ("error" in workspace) {
     process.stderr.write(`[${MCP_SERVER_NAME}] ${workspace.error}\n`);
     return 2;
   }
+
+  // 拿不到会话身份就在工作区里留一份痕：面板据此提示「这个窗口的 deck 工具不能用」。
+  // 写盘失败不影响工具本身（函数内部吞掉错误），这里不必等它成功。
+  await announcePresence(workspace.dir);
 
   const context: ToolContext = { workspaceDir: workspace.dir };
   const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });

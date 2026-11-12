@@ -238,7 +238,13 @@ export function IssueDetailView({
    */
   const finalizeRequirement = (): void => {
     if (!issue) return;
-    const problem = finalizeProblem(issue.body, targets.data?.ok ? targets.data.repos.map((repo) => repo.key) : []);
+    // 读不到仓库清单时不能拿空清单顶上：那等于判成「单区、免人工表」，
+    // 跨仓库需求会在按钮这里放过、到派单窗口才报 missing-impact——错落在没权限改票的那个人身上。
+    if (!targets.data?.ok) {
+      toast.show(t("issue.finalizeNeedsRepos"), { variant: "error" });
+      return;
+    }
+    const problem = finalizeProblem(issue.body, targets.data.repos.map((repo) => repo.key));
     if (problem) {
       toast.show(`${t("issue.finalizeBlocked")}：${problem}`, { variant: "error" });
       return;

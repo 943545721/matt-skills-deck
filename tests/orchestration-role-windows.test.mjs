@@ -13,7 +13,7 @@ import { promptPatchFor, withRoles } from "../client/deck/surfaces/orchestration
 
 const workspaceId = "ws-1";
 
-test("三个固定窗口各有中英两份默认提示词", () => {
+test("四个固定窗口各有中英两份默认提示词", () => {
   for (const role of FIXED_ROLES) {
     assert.ok(DEFAULT_ROLE_PROMPTS[role].zh.trim().length > 0, `${role} 缺中文默认值`);
     assert.ok(DEFAULT_ROLE_PROMPTS[role].en.trim().length > 0, `${role} 缺英文默认值`);
@@ -21,6 +21,10 @@ test("三个固定窗口各有中英两份默认提示词", () => {
   // 主窗口那条必须把「不改代码」写出来：这是本轮要解决的问题，不能被改写冲掉。
   assert.match(DEFAULT_ROLE_PROMPTS.main.zh, /不改代码/);
   assert.match(DEFAULT_ROLE_PROMPTS.main.en, /Do not edit code/);
+  // 需求窗口是唯一被允许建需求票的那个：提示词必须点名工具，不能只写「可以建票」。
+  assert.match(DEFAULT_ROLE_PROMPTS.requirement.zh, /deck_issue_create/);
+  assert.match(DEFAULT_ROLE_PROMPTS.requirement.zh, /不建工作票/);
+  assert.match(DEFAULT_ROLE_PROMPTS.requirement.en, /deck_issue_create/);
 });
 
 test("用户改过的提示词覆盖默认值，没改的回落到默认值", () => {
@@ -36,48 +40,54 @@ test("没有绑定、提示词为空白时一律回默认值", () => {
 });
 
 test("槽位取值走同一个入口，空的回 null", () => {
-  const roles = { workspaceId, mainAgentId: " a ", progressAgentId: "" };
+  const roles = { workspaceId, mainAgentId: " a ", requirementAgentId: "r", progressAgentId: "" };
   assert.equal(agentIdOf(roles, "main"), "a");
+  assert.equal(agentIdOf(roles, "requirement"), "r");
   assert.equal(agentIdOf(roles, "dispatcher"), null);
   assert.equal(agentIdOf(roles, "progress"), null);
   assert.equal(agentIdOf(null, "main"), null);
 });
 
-test("归一化保留进度窗口与提示词，超长的被截断", () => {
+test("归一化保留需求窗口、进度窗口与提示词，超长的被截断", () => {
   const settings = normalizeOrchestration({
     roles: [
       {
         workspaceId,
         mainAgentId: "m",
+        requirementAgentId: "r",
         progressAgentId: "p",
-        prompts: { main: "x".repeat(MAX_ROLE_PROMPT_CHARS + 50), progress: "只收进度", nonsense: "丢掉" },
+        prompts: { main: "x".repeat(MAX_ROLE_PROMPT_CHARS + 50), requirement: "只建需求票", progress: "只收进度", nonsense: "丢掉" },
       },
     ],
   });
   const role = settings.roles[0];
   assert.equal(role.mainAgentId, "m");
+  assert.equal(role.requirementAgentId, "r");
   assert.equal(role.progressAgentId, "p");
   assert.equal(role.prompts.main.length, MAX_ROLE_PROMPT_CHARS);
+  assert.equal(role.prompts.requirement, "只建需求票");
   assert.equal(role.prompts.progress, "只收进度");
   assert.equal("nonsense" in role.prompts, false);
 });
 
-test("保存一次不会把进度窗口与提示词抹掉", () => {
+test("保存一次不会把需求窗口、进度窗口与提示词抹掉", () => {
   const before = normalizeOrchestration({
-    roles: [{ workspaceId, mainAgentId: "m", progressAgentId: "p", prompts: { main: "只谈方案" } }],
+    roles: [{ workspaceId, mainAgentId: "m", requirementAgentId: "r", progressAgentId: "p", prompts: { main: "只谈方案" } }],
   });
   const after = withWorkspaceRoles(before, {
     workspaceId,
     mainAgentId: "m",
+    requirementAgentId: "r",
     progressAgentId: "p",
     prompts: { main: "只谈方案" },
   });
   const role = after.roles.find((item) => item.workspaceId === workspaceId);
+  assert.equal(role.requirementAgentId, "r");
   assert.equal(role.progressAgentId, "p");
   assert.equal(role.prompts.main, "只谈方案");
 });
 
-test("三个槽位都空且没有提示词时，整条角色被删掉", () => {
+test("四个槽位都空且没有提示词时，整条角色被删掉", () => {
   const before = normalizeOrchestration({ roles: [{ workspaceId, mainAgentId: "m" }] });
   const after = withWorkspaceRoles(before, { workspaceId });
   assert.equal(after.roles.length, 0);

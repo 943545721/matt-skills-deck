@@ -21,6 +21,7 @@ import {
   withWorkspaceRoles,
 } from "../shared/orchestration.ts";
 import { staffCardSchema } from "../shared/orchestration-rpc.ts";
+import { staffWithoutTerritory } from "../shared/staff.ts";
 
 /**
  * 岗位名册的纯函数。
@@ -46,6 +47,20 @@ test("建卡时的严格判定与归一化不是一回事", () => {
   assert.equal(isValidStaffId("Web-Admin"), false, "大写不算合法：原样就得是 [a-z0-9-]");
   assert.equal(isValidStaffId("a b"), false);
   assert.equal(isValidStaffId(""), false);
+});
+
+test("缺领地的卡：空 paths 与全空串算缺，`.` 算整片不算缺", () => {
+  const cards = [
+    { id: "a", name: "甲" },
+    { id: "b", name: "乙", paths: [] },
+    { id: "c", name: "丙", paths: ["  "] },
+    { id: "d", name: "丁", paths: ["."] },
+    { id: "e", name: "戊", paths: [".", "web"] },
+    { id: "f", name: "己", paths: [" web "] },
+  ];
+  const missing = staffWithoutTerritory(cards);
+  assert.deepEqual(missing.map((card) => card.id), ["a", "b", "c"]);
+  assert.equal(missing[0].name, "甲", "返回卡本身：调用方要拿名字给人看");
 });
 
 test("领地路径：去前导 / 与尾部 /、反斜杠统一", () => {

@@ -99,8 +99,8 @@
 
       <text class="s" x="14" y="122">应用</text>
       <rect class="box accent" x="70" y="104" width="210" height="34" rx="2"/><text class="t" x="80" y="125">RPC · 63 个 handler</text>
-      <rect class="box accent" x="288" y="104" width="210" height="34" rx="2"/><text class="t" x="298" y="125">MCP · 17 个 MCP 工具</text>
-      <rect class="box accent" x="506" y="104" width="286" height="34" rx="2"/><text class="t" x="516" y="125">hooks · agent.create / turn_ended</text>
+      <rect class="box accent" x="288" y="104" width="210" height="34" rx="2"/><text class="t" x="298" y="125">MCP · 20 个 MCP 工具</text>
+      <rect class="box accent" x="506" y="104" width="286" height="34" rx="2"/><text class="t" x="516" y="125">hooks · agent.created / permission / turn_ended</text>
 
       <line class="l" x1="400" y1="138" x2="400" y2="172"/>
       <text class="lbl" x="408" y="160">同一批纯函数与后端</text>
@@ -126,7 +126,7 @@
   <details><summary>ASCII 版</summary><pre>
 接入 │ 工作区面板 deck-board · 整页 deck-home · 设置页 · pill/顶栏/侧栏 · agent 面板 · 命令中心
      ↓ 宿主 RPC（defineRpc 契约 + zod 校验；客户端 index.client.tsx 调 useRpc）
-应用 │ server/rpc 63 个 handler · server/mcp 17 个 deck_* 工具 · hooks(agent.create / turn_ended)
+应用 │ server/rpc 63 个 handler · server/mcp 20 个 deck_* 工具 · hooks(agent.created / permission / turn_ended)
      ↓
 领域 │ tracker(36 文件) · skills(5) · git(6) · orchestration · session/handoff/ledger
      ↓

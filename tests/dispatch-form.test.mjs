@@ -6,16 +6,20 @@ import { buildDispatchTask } from "../shared/dispatch-form.ts";
  * 派单台表单 → `deck.orchestration.dispatch` 入参。
  *
  * 钉住的是「面板不该让用户白跑一趟」的那几条：空提示词、名册非空却没选卡、
- * 需求票号不是正整数、区域只填一半。剩下的（链条、归属、层数）都是服务端的判定，
- * 这里不重复实现。
+ * 没填需求票号或票号不是正整数、区域只填一半。剩下的（链条、归属、层数）都是服务端的
+ * 判定，这里不重复实现。
  */
 
-const base = { key: "k1", prompt: "把登录接口加上验证码" };
+const base = { key: "k1", prompt: "把登录接口加上验证码", requirementNumber: 42 };
 
-test("派单台：最少一份提示词就能派，其余字段不填就不出现", () => {
+test("派单台：提示词 + 需求票号是最少的一份，其余字段不填就不出现", () => {
   const result = buildDispatchTask(base);
   assert.equal(result.ok, true);
-  assert.deepEqual(result.task, { key: "k1", prompt: "把登录接口加上验证码" });
+  assert.deepEqual(result.task, {
+    key: "k1",
+    prompt: "把登录接口加上验证码",
+    requirementKey: 42,
+  });
 });
 
 test("派单台：可选字段去掉首尾空白，空串等于没填", () => {
@@ -25,8 +29,8 @@ test("派单台：可选字段去掉首尾空白，空串等于没填", () => {
     staffId: "  staff-back ",
     repoKey: "  ",
     pathPrefix: "",
-    requirementNumber: null,
-    requirementRepoKey: "owner/repo",
+    requirementNumber: 42,
+    requirementRepoKey: "  ",
   });
   assert.equal(result.ok, true);
   assert.deepEqual(result.task, {
@@ -34,6 +38,7 @@ test("派单台：可选字段去掉首尾空白，空串等于没填", () => {
     prompt: "把登录接口加上验证码",
     title: "加验证码",
     staff: "staff-back",
+    requirementKey: 42,
   });
 });
 
@@ -87,6 +92,14 @@ test("派单台：多仓库工作区没选仓库当场拒，单仓库不要求",
   assert.equal(buildDispatchTask({ ...base, repoRequired: true, pathPrefix: "apps/web" }).ok, false);
   assert.equal(buildDispatchTask({ ...base, repoRequired: true, repoKey: " owner/repo " }).ok, true);
   assert.equal(buildDispatchTask({ ...base, repoRequired: false }).ok, true);
+});
+
+test("派单台：需求票号必填，空着当场拒", () => {
+  for (const requirementNumber of [undefined, null]) {
+    const result = buildDispatchTask({ key: "k1", prompt: "干活", requirementNumber });
+    assert.equal(result.ok, false, String(requirementNumber));
+    assert.match(result.problem, /需求票号必填/);
+  }
 });
 
 test("派单台：需求票号必须是正整数，0 / 小数 / 负数都拒", () => {

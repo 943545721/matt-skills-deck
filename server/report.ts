@@ -1,6 +1,7 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server";
 import { agentIdOf, type WorkspaceRoles } from "../shared/orchestration.ts";
+import { deliverMessage } from "./delivery.ts";
 import { readChildHandoff, type ChildHandoffRecord } from "./handoff-store.ts";
 import { record } from "./logs.ts";
 import { readOrchestration } from "./orchestration-store.ts";
@@ -12,14 +13,17 @@ import { readOrchestration } from "./orchestration-store.ts";
  * 它不会把子会话的结论送回父会话的对话里。而用户要的是「一级一级往主窗口回」——
  * 每一层都得把下一层的成果整理成人能直接读的一段字，再交给上一级。
  *
- * 四条原则：
+ * 五条原则：
  * 1. 有回传件（`deck_handoff` 写的 `.deck/handoffs/<id>.json`）就按回传件说，那是子会话的自述；
  * 2. 没有回传件才退回读时间线尾部——这是兜底，不是主路径，且要明说「没写回传件」；
- * 3. 上一级收不到时改送「主沟通窗口」（角色里指定的那个），并把绕道这件事写进正文；
- * 4. 连主沟通窗口都发不出去就当失败：日志留原因，结果里如实返回，不粉饰。
+ * 3. 主投给上一级（派它的那个窗口），再抄一份更短的「进度」给进度窗口——进度只汇总在进度窗口，
+ *    不再往主窗口抄一遍，免得同一结论在三个窗口里各说一遍；
+ * 4. 上一级收不到时改送「主沟通窗口」（角色里指定的那个），并把绕道这件事写进正文；
+ * 5. 连主沟通窗口都发不出去就当失败：日志留原因，结果里如实返回，不粉饰。
  *
- * 发送用 `activeTurnBehavior: "steer"` 而不是默认值：默认会打断父会话正在进行的回合，
- * 一份回传不该把主窗口说到一半的话切断。
+ * 发送统一走 `deliverMessage`：目标窗口在忙就排队，等它这一轮结束再送，
+ * 不把消息插进正在进行的回合（`steer` 只在确认空闲后、查不到忙闲时兜底，
+ * 或未注册投递队列时使用）。
  */
 
 const SCOPE = "report";
@@ -217,12 +221,13 @@ export class TurnReporter {
         ? `${report.text}\n\n（注：这个会话上一次的回传件（${handoff.createdAt}）不是本回合写的，所以上面按本回合的时间线说话。）`
         : report.text;
     try {
-      await paseo.agents.ref(parentAgentId).send(text, { activeTurnBehavior: "steer" });
+      // 目标窗口正在跑活时先排队，跑完这一轮再送（见 `server/delivery.ts`）。
+      await deliverMessage(paseo, parentAgentId, text);
       if (key) this.remember(key);
       if (usable) this.rememberHandoff(input.agent.id, usable.createdAt);
       record("info", SCOPE, `子会话 ${input.agent.id} 已回传到 ${parentAgentId}（来源：${report.source}）`);
       // 主投递已经成功：抄送是旁路，成败都不该改变上面的结果。
-      await this.copyToProgress(paseo, input, parentAgentId, usable);
+      await this.copyToProgressWindow(paseo, input, parentAgentId, usable);
       return { ok: true, reported: true, parentAgentId, source: report.source, text };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -231,15 +236,16 @@ export class TurnReporter {
       const mainAgentId = await mainAgentFor(input.agent.cwd, input.agent.workspaceId);
       if (mainAgentId && mainAgentId !== parentAgentId) {
         try {
-          await paseo.agents.ref(mainAgentId).send(
+          await deliverMessage(
+            paseo,
+            mainAgentId,
             `${text}\n\n（注：上一级 ${parentAgentId} 收不到这条回传（${detail}），已直接送到主沟通窗口。）`,
-            { activeTurnBehavior: "steer" },
           );
           if (key) this.remember(key);
           if (usable) this.rememberHandoff(input.agent.id, usable.createdAt);
           record("warn", SCOPE, `回传到 ${parentAgentId} 失败（${detail}），已改送主沟通窗口 ${mainAgentId}`);
           // 绕道也是一次成功投递：进度窗口仍应收一份，别因为上一级不可达就漏掉旁听。
-          await this.copyToProgress(paseo, input, mainAgentId, usable);
+          await this.copyToProgressWindow(paseo, input, mainAgentId, usable);
           return { ok: true, reported: true, parentAgentId: mainAgentId, source: report.source, text, rerouted: true };
         } catch (fallbackError) {
           const fallbackDetail = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
@@ -253,33 +259,42 @@ export class TurnReporter {
   }
 
   /**
-   * 主投递成功后，把结论抄一份给进度窗口。
+   * 主投递成功后，把结论抄给**进度窗口**。
    *
-   * 进度窗口只是旁听：没配就跳过；只有它**就是刚收到回传的那个会话**时才不重发
-   * （否则同一段文字会在同一个窗口出现两次）。去重看的是本次实际收件人，
-   * 不是「主窗口」——正常路径的收件人是上一级，主窗口本来就没收到。
-   * 整个抄送包在 try 里——这里失败只记日志，主投递的成功结果不受影响。
+   * 进度只落在进度窗口：执行窗口的每条回合结论都汇总到这里，主窗口不再收
+   * 常规副本，免得同一个结论在三个窗口里各说一遍。主窗口仍会在
+   * 「上一级收不到、改送主窗口」时收到，那是兜底不是常规抄送。
+   *
+   * 去重看的是「本次实际收件人」：进度窗口就是上一级时只发一次。
+   * 抄送失败只记 warn，不改变主投递的结果。
    */
-  private async copyToProgress(
+  private async copyToProgressWindow(
     paseo: PaseoApi,
     input: TurnEndInput,
     recipientAgentId: string,
     handoff: ChildHandoffRecord | null,
   ): Promise<void> {
+    let progressAgentId: string | null = null;
     try {
-      const progressAgentId = await progressAgentFor(input.agent.cwd, input.agent.workspaceId);
-      if (!progressAgentId || progressAgentId === recipientAgentId) return;
-      await paseo.agents.ref(progressAgentId).send(
+      progressAgentId = await progressAgentFor(input.agent.cwd, input.agent.workspaceId);
+    } catch (error) {
+      record("warn", SCOPE, `读进度窗口槽位失败：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!progressAgentId || progressAgentId === recipientAgentId) return;
+    try {
+      await deliverMessage(
+        paseo,
+        progressAgentId,
         renderProgressCopy({
           child: { id: input.agent.id, title: input.agent.title },
           outcome: input.outcome,
           handoff,
         }),
-        { activeTurnBehavior: "steer" },
       );
       record("info", SCOPE, `子会话 ${input.agent.id} 的结论已抄送进度窗口 ${progressAgentId}`);
     } catch (error) {
-      record("warn", SCOPE, `抄送进度窗口失败：${error instanceof Error ? error.message : String(error)}`);
+      record("warn", SCOPE, `抄送进度窗口 ${progressAgentId} 失败：${error instanceof Error ? error.message : String(error)}`);
     }
   }
 }
@@ -299,7 +314,7 @@ async function roleSlotFor(
   if (!id) return null;
   const stored = await readOrchestration(workspaceDir);
   if (stored.readFailed || stored.corrupt) {
-    const what = purpose === "main-fallback" ? "主沟通窗口兜底" : "抄送进度窗口";
+    const what = purpose === "main-fallback" ? "用主沟通窗口兜底" : "抄送进度窗口";
     record("warn", SCOPE, `读不出编排设置（${stored.detail ?? "未知原因"}）：这次没法${what}`);
   }
   return stored.settings.roles.find((item) => item.workspaceId === id) ?? null;
@@ -308,8 +323,8 @@ async function roleSlotFor(
 /**
  * 这个工作区指定的主沟通窗口。
  *
- * 只在「上一级不可达」时用作兜底投递：主沟通窗口是整条链的终点，
- * 把它配了却不用，等于那项配置只是块装饰。
+ * 只在上一级不可达时兜底用它：常规回传不进主窗口，进度汇总在进度窗口。
+ * 主沟通窗口是整条链的终点，把它配了却不用，等于那项配置只是块装饰。
  */
 export async function mainAgentFor(workspaceDir: string, workspaceId: string | null): Promise<string | null> {
   return agentIdOf(await roleSlotFor(workspaceDir, workspaceId, "main-fallback"), "main");

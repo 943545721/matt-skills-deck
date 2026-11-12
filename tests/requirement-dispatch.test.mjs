@@ -8,7 +8,9 @@ import {
   requirementWorkspacesOf,
   runRequirementDispatch,
 } from "../server/requirement-dispatch.ts";
-import { getLocalIssue } from "../server/tracker/local.ts";
+import { createLocalIssue, getLocalIssue } from "../server/tracker/local.ts";
+import { orchestrationRequirementDispatchHandler } from "../server/rpc/orchestration.ts";
+import { listPendingWindowNotes } from "../server/window-note-store.ts";
 
 /**
  * 需求 → 每区一张票 + 每区一批派单。
@@ -90,8 +92,8 @@ function fakePaseo() {
 
 async function twoWorkspaces(t) {
   return [
-    await workspace(t, "ws-app", "app", "dispatch-app", [{ id: "w-app", name: "应用", kind: "worker", duty: "改应用" }], ["app"]),
-    await workspace(t, "ws-saas", "saas", "dispatch-saas", [{ id: "w-saas", name: "SaaS", kind: "worker", duty: "改 SaaS" }], ["saas"]),
+    await workspace(t, "ws-app", "app", "dispatch-app", [{ id: "w-app", name: "应用", kind: "worker", duty: "改应用", paths: ["."] }], ["app"]),
+    await workspace(t, "ws-saas", "saas", "dispatch-saas", [{ id: "w-saas", name: "SaaS", kind: "worker", duty: "改 SaaS", paths: ["."] }], ["saas"]),
   ];
 }
 
@@ -121,13 +123,139 @@ test("按影响面拆成每区一批：各用自己工作区的名册与派单�
   assert.equal(saas.entries[0].task.requirementRepoKey, "app");
 });
 
+test("名册里有卡缺领地 → 整批拒绝，点名张数与每张卡，零写入", async (t) => {
+  const ws = await workspace(
+    t,
+    "ws-app",
+    "app",
+    "dispatch-app",
+    [
+      { id: "w-app", name: "应用", kind: "worker", duty: "改应用", paths: ["."] },
+      { id: "w-bare", name: "没写领地", kind: "worker", duty: "不知道管哪片" },
+      { id: "w-blank", name: "空白领地", kind: "worker", duty: "只写了空格", paths: ["   "] },
+    ],
+    [],
+  );
+  const paseo = fakePaseo();
+  const result = await runRequirementDispatch(paseo, {
+    requirement: requirement({
+      body: requirementBody("| 整个工作区 | app/server.ts:1 | 要动 | 经理（2026-11-03） | |"),
+    }),
+    workspaces: [ws],
+    confirmRequirementSplit: false,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "staff-territory-missing");
+  assert.match(result.detail, /2 张/, "张数只算缺的两张，`.` 那张不算");
+  for (const [name, id] of [["没写领地", "w-bare"], ["空白领地", "w-blank"]]) {
+    assert.match(result.detail, new RegExp(name), `要点名「${name}」`);
+    assert.match(result.detail, new RegExp(id), `要带上 id ${id}`);
+  }
+  assert.equal(paseo.created.length, 0, "拒绝发生在建会话之前");
+  assert.equal((await getLocalIssue(ws.workspaceDir, 1)).ok, false, "一张票都不能建");
+});
+
+test("不同工作区的同名同 id 卡分开判：后一张写了 `.` 也盖不掉前一张缺领地", async (t) => {
+  // 两个项目都可能有 `frontend`：只按 id 去重会让读到后面的那张把前面的盖掉，
+  // 闸就漏了。提示里还要带上工作区，人才知道该去补哪一边。
+  const app = await workspace(t, "ws-app", "app", "dispatch-app", [{ id: "frontend", name: "前端", kind: "worker" }], ["app"]);
+  const saas = await workspace(t, "ws-saas", "saas", "dispatch-saas", [
+    { id: "frontend", name: "前端", kind: "worker", paths: ["."] },
+  ], ["saas"]);
+
+  const result = await planRequirementDispatch({
+    requirement: requirement({ repoKey: "app" }),
+    workspaces: [app, saas],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "staff-territory-missing");
+  assert.match(result.detail, /1 张/, "只算真正缺领地的那一张");
+  assert.match(result.detail, /frontend/);
+  assert.match(result.detail, /app/, "多工作区要说明是哪一边的卡");
+});
+
+test("同一目录换了 workspaceId，不会把同一张缺领地卡数成两张", async (t) => {
+  // 名册按目录归属，同一个目录会攒出好几个 workspaceId：同一张卡不该被数两次。
+  const dirWs = await workspace(t, "ws-a", "app", "dispatch-a", [
+    { id: "frontend", name: "前端", kind: "worker" },
+  ], ["app"]);
+  const sameDir = {
+    workspaceId: "ws-b",
+    workspaceDir: dirWs.workspaceDir,
+    name: "app",
+    repos: ["app"],
+    dispatcherAgentId: null,
+  };
+
+  const result = await planRequirementDispatch({
+    requirement: requirement({
+      body: requirementBody(
+        "| ws-a | app/a.ts:1 | 要动 | 经理 | |",
+        "| ws-b | app/b.ts:1 | 要动 | 经理 | |",
+      ),
+    }),
+    workspaces: [dirWs, sameDir],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "staff-territory-missing");
+  assert.match(result.detail, /1 张/, "同一个目录只算一张卡");
+});
+
+test("只有「待核」行时也按名册拦：缺领地整批拒绝，研究票也不建", async (t) => {
+  // 规格是「名册里只要有一张卡缺领地就整批拒绝」：研究票虽然不派会话，
+  // 但这次需求整张都不该往下走，否则「补齐前不能派单」就只挡了一半。
+  const ws = await workspace(t, "ws-app", "app", "dispatch-app", [
+    { id: "w-bare", name: "没写领地", kind: "worker", duty: "不知道管哪片" },
+  ], []);
+
+  const result = await runRequirementDispatch(fakePaseo(), {
+    requirement: requirement({
+      body: requirementBody("| 整个工作区 | app/server.ts:1 | 待核 | 经理（2026-11-03） | |"),
+    }),
+    workspaces: [ws],
+    confirmRequirementSplit: false,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "staff-territory-missing");
+  assert.equal((await getLocalIssue(ws.workspaceDir, 1)).ok, false, "研究票也不建");
+});
+
+test("只填 `.` 的卡是整片，不误拦；没有缺项时照常出计划", async (t) => {
+  const ws = await workspace(
+    t,
+    "ws-app",
+    "app",
+    "dispatch-app",
+    [
+      { id: "w-whole", name: "整片", kind: "worker", duty: "管全部", paths: ["."] },
+      { id: "w-web", name: "前端", kind: "worker", duty: "管前端", paths: ["app"] },
+    ],
+    [],
+  );
+  const result = await planRequirementDispatch({
+    requirement: requirement({
+      body: requirementBody("| 整个工作区 | app/server.ts:1 | 要动 | 经理（2026-11-03） | |"),
+    }),
+    workspaces: [ws],
+  });
+
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.batches.length, 1);
+  assert.equal(result.batches[0].entries.length, 1);
+  assert.ok(result.batches[0].entries[0].task.staffId, "照常派到某张卡上，没有被领地闸误拦");
+});
+
 test("需求批次预览与执行同判：模型从宿主清单删掉后预览也不再显示默认档", async (t) => {
   // 预览（planRequirementDispatch）与执行（runDispatch）必须按同一份宿主配置裁默认档，
   // 否则模型删掉后清单上还写着默认档，点确认却一个也不带。
   const modelThinking = [{ provider: "claude", model: "sonnet", thinkingOptionId: "high" }];
   const workspaces = [
-    await workspace(t, "ws-app", "app", "dispatch-app", [{ id: "w-app", name: "应用", kind: "worker", duty: "改应用" }], ["app"], { modelThinking }),
-    await workspace(t, "ws-saas", "saas", "dispatch-saas", [{ id: "w-saas", name: "SaaS", kind: "worker", duty: "改 SaaS" }], ["saas"], { modelThinking }),
+    await workspace(t, "ws-app", "app", "dispatch-app", [{ id: "w-app", name: "应用", kind: "worker", duty: "改应用", paths: ["."] }], ["app"], { modelThinking }),
+    await workspace(t, "ws-saas", "saas", "dispatch-saas", [{ id: "w-saas", name: "SaaS", kind: "worker", duty: "改 SaaS", paths: ["."] }], ["saas"], { modelThinking }),
   ];
 
   const live = await planRequirementDispatch({
@@ -258,7 +386,7 @@ test("拿不到需求票号 → 不给计划", async (t) => {
 });
 
 test("工作区没指派单窗口 → 拒绝并点名那个工作区", async (t) => {
-  const bad = await workspace(t, "ws-empty", "empty", "", [{ id: "w-empty", name: "空窗口", kind: "worker", duty: "x" }], ["empty"]);
+  const bad = await workspace(t, "ws-empty", "empty", "", [{ id: "w-empty", name: "空窗口", kind: "worker", duty: "x", paths: ["."] }], ["empty"]);
   const result = await planRequirementDispatch({
     requirement: requirement({
       body: requirementBody("| empty | src/x.ts:1 | 要动 | 经理 | |"),
@@ -320,7 +448,7 @@ test("确认前零写入；确认后才建票并开会话", async (t) => {
     "ws-app",
     "app",
     "dispatch-app",
-    [{ id: "w-app", name: "应用", kind: "worker", duty: "改应用" }],
+    [{ id: "w-app", name: "应用", kind: "worker", duty: "改应用", paths: ["."] }],
     [],
   );
   const input = {
@@ -475,4 +603,33 @@ test("requirementWorkspacesOf：宿主里找不到跨区目录时拒绝，不落
   assert.equal(lookup.ok, false);
   assert.equal(lookup.reason, "unknown-workspace");
   assert.match(lookup.detail, /ws-saas/);
+});
+
+/* ------------------------------------------------------- 面板派单（RPC）的条子 */
+
+test("面板按区派单因票面被拒：也走条子通道，不用人去需求窗口复述", async (t) => {
+  const ws = await workspace(t, "ws-app", "app", "dispatch-app", [], ["app"]);
+  // 表头写坏的需求票：派单还没进计划就该被拒。
+  const requirement = await createLocalIssue(ws.workspaceDir, {
+    title: "需求：影响面表写坏",
+    body: "## 影响面\n| 区 | 依据 | 结论 | 核的人 |\n|---|---|---|---|",
+    labels: ["requirement", "deck:定稿"],
+  });
+  assert.equal(requirement.ok, true);
+
+  const refusal = await orchestrationRequirementDispatchHandler(
+    { workspaceId: "ws-app", workspaceDir: ws.workspaceDir, requirementNumber: requirement.number },
+    { paseo: fakePaseo() },
+  );
+  assert.equal(refusal.ok, false);
+  assert.equal(refusal.reason, "bad-impact");
+  // 回执只说条子去了哪：落进队列不等于已经送到需求窗口。
+  assert.match(refusal.detail, /窗口条子放进队列/);
+  assert.doesNotMatch(refusal.detail, /已递给需求窗口/);
+
+  const notes = await listPendingWindowNotes(ws.workspaceDir);
+  assert.equal(notes.length, 1, "面板这条路也要写下一张条子");
+  assert.equal(notes[0].toRole, "requirement");
+  assert.equal(notes[0].requirementKey, requirement.number);
+  assert.equal(notes[0].workspaceId, "ws-app");
 });

@@ -32,8 +32,8 @@ export function isModelEnvKey(key: string): boolean {
 /**
  * 这个键值该不该明文显示。
  *
- * 只放行一种：`ANTHROPIC_*_MODEL` 这类键，且值是宿主已认得的模型 id
- * （或至少形状是模型 id）。凭据、URL、其它键一律继续走掩码 + 手动「显示」。
+ * 只放行模型 id 与纯数字的上下文窗口：前者限 `ANTHROPIC_*_MODEL`，后者限
+ * `CLAUDE_CODE_MAX_CONTEXT_TOKENS`。凭据、URL、其它键一律继续走掩码 + 手动「显示」。
  */
 export function isPlainModelValue(key: string, value: string, knownModels: readonly string[]): boolean {
   if (!isModelEnvKey(key)) return false;
@@ -60,9 +60,14 @@ export function maskValue(value: string): string {
   return `••••${text.slice(-4)}`;
 }
 
+export const CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
+
 export function envDisplayOf(key: string, value: string, knownModels: readonly string[]): EnvDisplay {
   const text = typeof value === "string" ? value : "";
   if (!text.trim()) return { display: "", masked: false };
+  if (key.trim().toUpperCase() === CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY && /^\d+$/.test(text.trim())) {
+    return { display: text.trim(), masked: false };
+  }
   if (isPlainModelValue(key, text, knownModels)) return { display: text.trim(), masked: false };
   return { display: maskValue(text), masked: true };
 }
@@ -156,18 +161,36 @@ export function credentialKeysOf(env: Record<string, string>): string[] {
     .sort((left, right) => left.localeCompare(right));
 }
 
-export function endpointAuthOf(env: Record<string, string>): EndpointAuth | null {
-  let baseUrlKey: string | null = null;
-  let baseUrl = "";
-  for (const [key, value] of Object.entries(env)) {
-    if (!URL_KEY.test(key)) continue;
-    const text = (value ?? "").trim();
-    if (!/^https?:\/\//i.test(text)) continue;
-    baseUrlKey = key;
-    baseUrl = text.replace(/\/+$/, "");
-    break;
-  }
-  if (!baseUrlKey) return null;
+/**
+ * 这个客户端真正在读的接入地址键。
+ *
+ * 不能只取 env 里第一个 `*_BASE_URL`：Claude 还认 `ANTHROPIC_BEDROCK_BASE_URL` /
+ * `ANTHROPIC_VERTEX_BASE_URL`，它们排在前面时 `ANTHROPIC_BASE_URL` 换了也检测不到。
+ * 问接口要模型清单、按地址查窗口缓存、判断「换没换接口」必须用**同一个**判断，
+ * 否则清单是从 A 地址拉的、窗口却按 B 地址找，缓存永远对不上。
+ */
+const PROVIDER_BASE_URL_KEYS: Record<string, string> = {
+  claude: "ANTHROPIC_BASE_URL",
+  codex: "OPENAI_BASE_URL",
+};
+
+/** 不认识的客户端返回 undefined，调用方退回「第一个像地址的键」。 */
+export function providerBaseUrlKey(provider: string): string | undefined {
+  return PROVIDER_BASE_URL_KEYS[provider.trim().toLowerCase()];
+}
+
+/**
+ * 拿配置里那对（地址 + 凭据）去问接口。
+ *
+ * `preferredBaseUrlKey` 由 [`providerBaseUrlKey`] 给出：首选键上真有 http(s) 地址就用它，
+ * 否则退回第一个像地址的键（用户在派生条目上只写了别的地址键时仍然能取清单）。
+ */
+export function endpointAuthOf(env: Record<string, string>, preferredBaseUrlKey?: string): EndpointAuth | null {
+  const preferred = preferredBaseUrlKey ? (env[preferredBaseUrlKey] ?? "").trim() : "";
+  const chosen = /^https?:\/\//i.test(preferred) ? baseUrlOf({ [preferredBaseUrlKey as string]: preferred }) : baseUrlOf(env);
+  if (!chosen) return null;
+  const baseUrlKey: string = chosen.key;
+  const baseUrl = chosen.value;
 
   let credentialKey: string | null = null;
   let credential = "";
@@ -200,10 +223,63 @@ export function modelListUrls(baseUrl: string): string[] {
 }
 
 /**
- * 认三种回包形状（OpenAI / Anthropic / 各家代理的变体）：
- * `{ data: [{ id }] }`、`{ models: [...] }`、裸数组。只取 id / name / model 字段。
+ * 认常见模型目录回包形状，并保留代理报告的上下文窗口与推理档位。
+ * 能力字段名按 OpenAI 兼容代理的常见写法读取；缺失或格式错误的字段直接忽略。
  */
-export function parseModelList(payload: unknown): string[] {
+export interface ProviderModelDefinition {
+  id: string;
+  label: string;
+  description?: string;
+  contextWindowMaxTokens?: number;
+  thinkingOptions?: Array<{ id: string; label: string; description?: string; isDefault?: boolean }>;
+  defaultThinkingOptionId?: string;
+}
+
+/**
+ * Claude Code 的上下文窗口：当前注入模型优先；当前模型没报窗口时取清单里的最小值，
+ * 避免任何已配置模型在压缩触发前先撞到接口上限。没有任何窗口就返回 undefined，不写 env。
+ */
+export function claudeCodeContextWindowOf(
+  models: readonly Pick<ProviderModelDefinition, "id" | "contextWindowMaxTokens">[],
+  currentModel: string | undefined,
+): number | undefined {
+  const selected = models.find((model) => model.id === currentModel?.trim());
+  const preferred = positiveTokenCount(selected?.contextWindowMaxTokens);
+  if (preferred !== undefined) return preferred;
+  const windows = models
+    .map((model) => positiveTokenCount(model.contextWindowMaxTokens))
+    .filter((value): value is number => value !== undefined);
+  return windows.length ? Math.min(...windows) : undefined;
+}
+
+/** 取第一个正的有限数（各家的能力字段拼写不一样，但含义就这一个）。 */
+export function positiveTokenCount(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) return value;
+  }
+  return undefined;
+}
+
+const MODEL_LABEL_MAX = 200;
+const MODEL_DESCRIPTION_MAX = 2000;
+const THINKING_OPTION_ID_MAX = 120;
+const THINKING_OPTIONS_MAX = 100;
+
+function thinkingOptionsOf(item: Record<string, unknown>) {
+  const raw = item.supported_reasoning_levels ?? item.reasoning_levels ?? item.thinkingOptions;
+  if (!Array.isArray(raw)) return undefined;
+  const options = raw.flatMap((entry) => {
+    const value = typeof entry === "string" ? entry : entry && typeof entry === "object"
+      ? String((entry as Record<string, unknown>).effort ?? (entry as Record<string, unknown>).id ?? "")
+      : "";
+    const id = value.trim().slice(0, THINKING_OPTION_ID_MAX);
+    return id ? [{ id, label: id }] : [];
+  }).slice(0, THINKING_OPTIONS_MAX);
+  return options.length ? options : undefined;
+}
+
+/** Parse model ids and capability metadata without assuming one vendor's field spelling. */
+export function parseModelList(payload: unknown): ProviderModelDefinition[] {
   const record = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null;
   const rawList = Array.isArray(payload)
     ? payload
@@ -212,17 +288,29 @@ export function parseModelList(payload: unknown): string[] {
       : Array.isArray(record?.models)
         ? (record?.models as unknown[])
         : [];
-  const ids: string[] = [];
+  const models: ProviderModelDefinition[] = [];
+  const seen = new Set<string>();
   for (const item of rawList) {
+    const row = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : null;
     const id =
       typeof item === "string"
         ? item
-        : (item as { id?: unknown; name?: unknown; model?: unknown })?.id ??
-          (item as { name?: unknown })?.name ??
-          (item as { model?: unknown })?.model;
+        : row?.id ?? row?.name ?? row?.model;
     if (typeof id !== "string") continue;
     const text = id.trim();
-    if (text && !ids.includes(text)) ids.push(text);
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    const label = typeof row?.display_name === "string" ? row.display_name.trim().slice(0, MODEL_LABEL_MAX) : "";
+    const description = typeof row?.description === "string" ? row.description.trim().slice(0, MODEL_DESCRIPTION_MAX) : "";
+    const contextWindowMaxTokens = positiveTokenCount(row?.context_window, row?.context_length, row?.max_input_tokens);
+    const thinkingOptions = row ? thinkingOptionsOf(row) : undefined;
+    models.push({
+      id: text,
+      label: label || text,
+      ...(description ? { description } : {}),
+      ...(contextWindowMaxTokens ? { contextWindowMaxTokens } : {}),
+      ...(thinkingOptions ? { thinkingOptions } : {}),
+    });
   }
-  return ids;
+  return models;
 }

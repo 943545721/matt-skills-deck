@@ -32,7 +32,7 @@ function fakePaseo(entries, options = {}) {
 
 test("刷新与回读用同一个工作区，返回每个客户端的模型 id", async () => {
   const { paseo, calls } = fakePaseo([
-    { provider: "claude", status: "ready", models: [{ id: "m1" }, { id: " m2 " }, {}] },
+    { provider: "claude", status: "ready", models: [{ id: "m1", contextWindowMaxTokens: 128000 }, { id: " m2 " }, {}] },
     { provider: "codex", status: "ready", models: [{ id: "x" }] },
   ]);
 
@@ -40,7 +40,7 @@ test("刷新与回读用同一个工作区，返回每个客户端的模型 id",
 
   assert.equal(result.ok, true);
   assert.deepEqual(result.providers, [
-    { id: "claude", models: ["m1", "m2"] },
+    { id: "claude", models: ["m1", "m2"], modelCapabilities: [{ id: "m1", contextWindowMaxTokens: 128000 }] },
     { id: "codex", models: ["x"] },
   ]);
   assert.deepEqual(result.warnings, []);

@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { TextInput } from "@getpaseo/plugin/client/ui";
 import { addModelId, filterModelIds, removeModelId, type ModelListKey } from "../../../../shared/provider-models.ts";
+import type { ProviderModelDefinition } from "../../../../shared/provider-models.ts";
 import type { PanelKey } from "../../panel/panelText.tsx";
 import type { PixelSkin } from "../../pixel.tsx";
 import { PixelButton } from "../../pixel.tsx";
@@ -23,6 +24,7 @@ export function ModelPicker({
   t,
   models,
   listKey,
+  baseUrl,
   busy,
   onSave,
   onFetch,
@@ -33,17 +35,25 @@ export function ModelPicker({
   models: string[];
   /** 声明落在哪把键上，只用来提示「追加」还是「替换」。 */
   listKey: ModelListKey;
+  /** 当前生效的接口地址；换了地址，上一次拉到的清单（连同窗口）就不能再拿去保存。 */
+  baseUrl?: string | null;
   busy: boolean;
-  onSave(models: string[]): void;
+  onSave(models: string[], definitions?: ProviderModelDefinition[]): void;
   /** 用配置里已有的 base url + 凭据去问接口要清单。 */
-  onFetch(): Promise<{ ok: true; endpoint: string; models: string[] } | { ok: false; detail: string }>;
+  onFetch(): Promise<{ ok: true; endpoint: string; models: ProviderModelDefinition[] } | { ok: false; detail: string }>;
 }) {
   const [query, setQuery] = useState("");
   const [custom, setCustom] = useState("");
   /** 接口回来的清单；`null` 表示这次还没问过。 */
-  const [fetched, setFetched] = useState<{ endpoint: string; models: string[] } | null>(null);
+  const [fetched, setFetched] = useState<{ endpoint: string; models: ProviderModelDefinition[] } | null>(null);
   const [fetching, setFetching] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+
+  // 地址一换，旧接口的模型清单与窗口就作废：留着它，「保存模型」会把旧窗口写进新地址。
+  useEffect(() => {
+    setFetched(null);
+    setFetchError(null);
+  }, [baseUrl]);
 
   const visible = useMemo(() => filterModelIds(models, query), [models, query]);
 
@@ -99,7 +109,7 @@ export function ModelPicker({
   };
 
   /** 接口回来的、我们清单里还没有的那些。 */
-  const missing = fetched ? fetched.models.filter((id) => !models.includes(id)) : [];
+  const missing = fetched ? fetched.models.filter((model) => !models.includes(model.id)).map((model) => model.id) : [];
 
   const remove = (id: string) => {
     if (busy) return;
@@ -109,13 +119,13 @@ export function ModelPicker({
   const add = (id: string) => {
     if (busy) return;
     const next = addModelId(models, id);
-    if (next.length !== models.length) onSave(next);
+    if (next.length !== models.length) onSave(next, fetched?.models.filter((model) => next.includes(model.id)));
   };
 
   const selectAll = () => {
     if (busy || !fetched) return;
-    const next = fetched.models.reduce((acc, id) => addModelId(acc, id), [...models]);
-    if (next.length !== models.length) onSave(next);
+    const next = fetched.models.reduce((acc, model) => addModelId(acc, model.id), [...models]);
+    if (next.length !== models.length) onSave(next, fetched.models.filter((model) => next.includes(model.id)));
   };
 
   return (
@@ -136,7 +146,14 @@ export function ModelPicker({
         />
         <PixelButton skin={skin} mini variant="ghost" label={t("orch.modelSelectAll")} disabled={busy || !fetched || missing.length === 0} onPress={selectAll} />
         <PixelButton skin={skin} mini variant="ghost" label={t("orch.modelSelectNone")} disabled={busy || models.length === 0} onPress={() => onSave([])} />
-      </View>
+        <PixelButton
+          skin={skin}
+          mini
+          variant="ghost"
+          label={t("orch.modelSave")}
+          disabled={busy || !fetched || models.length === 0}
+          onPress={() => onSave(models, fetched?.models.filter((model) => models.includes(model.id)))}
+        />      </View>
 
       {fetchError ? <Text style={styles.error}>{fetchError}</Text> : null}
       {fetched ? (
@@ -184,7 +201,10 @@ export function ModelPicker({
               accessibilityRole="button"
               accessibilityLabel={`${id}，${t("orch.modelAdd")}`}
               disabled={busy}
-              onPress={() => add(id)}
+              onPress={() => {
+                const next = addModelId(models, id);
+                onSave(next, fetched?.models.filter((model) => next.includes(model.id)));
+              }}
             >
               <Text style={styles.chipText}>＋ {id}</Text>
             </Pressable>

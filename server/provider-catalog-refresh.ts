@@ -138,7 +138,16 @@ export async function refreshProviderCatalog(
       warnings.push(`${id}：快照里一个模型也没有，选择器里会是空的`);
     }
     warnings.push(...capped.warnings);
-    providers.push({ id, models: capped.models });
+    const ids = new Set(capped.models);
+    const modelCapabilities = (entry.models ?? []).flatMap((model) => {
+      const modelId = typeof model?.id === "string" ? model.id.trim().slice(0, PROVIDER_MODEL_ID_MAX) : "";
+      if (!ids.has(modelId)) return [];
+      const capability: { id: string; contextWindowMaxTokens?: number; thinkingOptions?: Array<{ id: string; label: string }> } = { id: modelId };
+      if (typeof model.contextWindowMaxTokens === "number" && model.contextWindowMaxTokens > 0) capability.contextWindowMaxTokens = model.contextWindowMaxTokens;
+      if (Array.isArray(model.thinkingOptions) && model.thinkingOptions.length) capability.thinkingOptions = model.thinkingOptions as Array<{ id: string; label: string }>;
+      return capability.contextWindowMaxTokens || capability.thinkingOptions ? [capability] : [];
+    });
+    providers.push({ id, models: capped.models, ...(modelCapabilities.length ? { modelCapabilities } : {}) });
   }
 
   record(

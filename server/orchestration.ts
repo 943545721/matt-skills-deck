@@ -1,5 +1,14 @@
+import { statSync } from "node:fs";
+import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import { matchesWorkspaceScope } from "../shared/session.ts";
+import { judgeDispatchCaller, windowSlotsOf } from "../shared/window-gates.ts";
+import {
+  describeStaffTerritoryProblems,
+  rosterOf,
+  staffTerritoryProblems,
+  type StaffCard,
+} from "../shared/staff.ts";
 import {
   buildDispatchPreamble,
   buildAgentTree,
@@ -36,6 +45,7 @@ import {
   type ThinkingResolutionContext,
   type WorkspaceRoles,
 } from "../shared/orchestration.ts";
+import { readIdentityGaps, type IdentityGap } from "./identity-presence.ts";
 import {
   describeCodexEnsureFailure,
   ensureCodexAddressEffective,
@@ -75,22 +85,43 @@ import {
   type Site,
 } from "../shared/sites.ts";
 import { envKeysFor } from "../shared/provider-env.ts";
+import { catalogModelInputsOf } from "../shared/codex-model-catalog.ts";
+import {
+  cachedModelWindowsOf,
+  modelWindowMap,
+  normalizeModelWindowBaseUrl,
+  withCachedWindows,
+  type CachedModelWindow,
+  type ModelWindowCache,
+} from "../shared/model-window-cache.ts";
+import { readModelWindowCache } from "./model-window-cache.ts";
 import {
   baseUrlOf,
+  claudeCodeContextWindowOf,
+  CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY,
   configuredModelIds,
   credentialKeysOf,
   envDisplayOf,
   maskValue,
   modelListKeyOf,
+  positiveTokenCount,
+  providerBaseUrlKey,
   type ModelListKey,
 } from "../shared/provider-models.ts";
 import { createAgent, sessionErrorDetail } from "./session.ts";
+import {
+  catalogPathOfCommand,
+  codexCommandWithCatalog,
+  codexCommandWithoutCatalog,
+  writeCodexModelCatalog,
+  type CodexCatalogDeps,
+} from "./codex-model-catalog.ts";
 import { modelIdsOf, modelThinkingOf, type ModelThinking, type ProviderSnapshotEntry } from "./provider-snapshot-view.ts";
 import { createDispatchTicket, recordDispatchTicket } from "./tracker/dispatch-ticket.ts";
 import { collectStaffHistory } from "./staff-history.ts";
 import { writableRepoKeys } from "./tracker/targets.ts";
-import { readIssue } from "./tracker/read.ts";
 import { judgeDispatchTaskChain } from "./chain-gates.ts";
+import { dispatchRequirementKeyOf, gateDispatchTasks } from "./dispatch-ticket-gate.ts";
 import type { TicketReader } from "./contract-chain.ts";
 import { record } from "./logs.ts";
 
@@ -220,6 +251,52 @@ function recordOf(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+/** 配置条目的 env → 只收字符串值的键值表（宿主里可能是任何东西）。 */
+function envTextOf(value: unknown): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, item] of Object.entries(recordOf(value) ?? {})) {
+    if (typeof item === "string") env[key] = item;
+  }
+  return env;
+}
+
+/**
+ * 这个客户端真正在读的接入地址。
+ *
+ * 键的取舍与「问接口要模型清单」那边共用 `providerBaseUrlKey`：两边各选各的，
+ * 就会出现清单从 A 地址拉、窗口按 B 地址查，缓存永远补不上。
+ * 不认识的客户端退回「第一个像地址的键」。
+ */
+function baseUrlFor(provider: string, env: Record<string, string>): string {
+  const preferred = providerBaseUrlKey(provider);
+  const raw = preferred ? (env[preferred] ?? "").trim() : "";
+  if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, "");
+  return baseUrlOf(env)?.value ?? "";
+}
+
+/**
+ * 这个 provider 在当前接口地址下缓存过的窗口。
+ *
+ * 地址取配置里的 base url；地址对不上（用户换了接口）就当没有缓存，
+ * 不拿旧接口的窗口套新接口的模型。
+ */
+function cachedWindowsFor(
+  cache: ModelWindowCache,
+  provider: string,
+  env: Record<string, string>,
+): readonly CachedModelWindow[] {
+  return cachedModelWindowsOf(cache, provider, baseUrlFor(provider, env));
+}
+
+/** 去掉模型条目上的窗口：换了接口时，调用方带来的旧窗口不能再当新接口的能力。 */
+function withoutModelWindows<T extends Record<string, unknown>>(models: readonly T[]): T[] {
+  return models.map((model) => {
+    const copy = { ...model };
+    delete copy.contextWindowMaxTokens;
+    return copy as T;
+  });
+}
+
 /** 密钥只回尾 4 位；短值直接全遮，避免「尾 4 位就是全文」。实现在 `shared/provider-models.ts`。 */
 export function maskSecret(value: string): string {
   return maskValue(value);
@@ -260,6 +337,7 @@ export function profilesOf(config: DaemonConfigView | null): ClientProfile[] {
 function providerRows(
   snapshot: readonly ProviderSnapshotEntry[],
   config: DaemonConfigView | null,
+  windowCache: ModelWindowCache,
 ): Array<{
   id: string;
   label: string | null;
@@ -268,6 +346,7 @@ function providerRows(
   models: string[];
   /** 每个模型报出的推理档位；没报档位的模型不出现。 */
   modelThinking: ModelThinking[];
+    modelCapabilities: Array<{ id: string; contextWindowMaxTokens?: number; thinkingOptions?: Array<{ id: string; label: string }> }>;
   configModels: string[];
   modelsKey: ModelListKey;
   /** 派生客户端的基座；不是派生条目就是 null。 */
@@ -293,6 +372,28 @@ function providerRows(
     const models = modelIdsOf(entry);
     // 档位跟着模型报，模型没有就不带：界面据此决定要不要渲染下拉。
     const modelThinking = modelThinkingOf(entry);
+    const envText = envTextOf(configured?.env);
+    // 宿主保存模型时会裁掉窗口：配置与快照都可能没有，但接口那次拉取的结果还在工作区缓存里。
+    // 缓存是最近一次接口回复，优先级最高；地址对不上时这里就是空表。
+    const cachedWindows = modelWindowMap(cachedWindowsFor(windowCache, id, envText));
+    const configuredModels = modelObjectsOf(configured?.[modelListKeyOf(configured)]) ?? [];
+    const snapshotModels = Array.isArray(entry.models) ? entry.models : [];
+    const modelCapabilities = configuredModels.flatMap((saved) => {
+      const id = saved.id.trim();
+      const model = snapshotModels.find((candidate) => candidate?.id === id);
+      // 保存时取的是配置里的能力；宿主快照可能还是保存前的旧值，不能反过来盖掉刚存下的窗口。
+      const contextWindowMaxTokens = positiveTokenCount(
+        cachedWindows.get(id),
+        saved.contextWindowMaxTokens,
+        model?.contextWindowMaxTokens,
+      );
+      // 配置也可能被手改过；复用快照的清洗规则，坏档位退化成没有，不拖垮整个状态 RPC。
+      const options = Array.isArray(saved.thinkingOptions) && saved.thinkingOptions.length
+        ? modelThinkingOf({ models: [{ id, thinkingOptions: saved.thinkingOptions }] })[0]?.thinkingOptions
+        : modelThinking.find((candidate) => candidate.id === id)?.thinkingOptions;
+      if (!id || (!contextWindowMaxTokens && !options?.length)) return [];
+      return [{ id, ...(contextWindowMaxTokens ? { contextWindowMaxTokens } : {}), ...(options ? { thinkingOptions: options } : {}) }];
+    });
     const env = Object.entries(configured?.env ?? {})
       .map(([key, value]) => {
         const text = typeof value === "string" ? value : "";
@@ -306,10 +407,6 @@ function providerRows(
       })
       .sort((left, right) => left.key.localeCompare(right.key));
     const modelsKey = modelListKeyOf(configured);
-    const envText: Record<string, string> = {};
-    for (const [key, value] of Object.entries(configured?.env ?? {})) {
-      if (typeof value === "string") envText[key] = value;
-    }
     return {
       id,
       label: entry.label?.trim() ? entry.label.trim() : null,
@@ -317,6 +414,7 @@ function providerRows(
       status: entry.status ?? "unknown",
       models,
       modelThinking,
+      modelCapabilities,
       configModels: configuredModelIds(configured, modelsKey),
       modelsKey,
       extends: typeof own?.extends === "string" && own.extends.trim() ? own.extends.trim() : null,
@@ -416,6 +514,11 @@ export type OrchestrationStateResult =
         labels: Record<string, string>;
       }>;
       tree: ReturnType<typeof buildAgentTree>;
+      /**
+       * deck MCP 进程没拿到会话身份的会话：这些窗口调回传 / 派单 / 要人会被拒。
+       * 宿主快照不带环境变量，只能由 MCP 进程自己留痕、这里回收。
+       */
+      identityGaps: IdentityGap[];
       warnings: string[];
     }
   | { ok: false; reason: "invalid-workspace" | "config-failed" | "agents-failed"; detail: string };
@@ -442,6 +545,8 @@ export async function readOrchestrationState(
   }
   const warnings: string[] = [];
   const stored = await readOrchestration(input.workspaceDir);
+  const windowCache = await readModelWindowCache(input.workspaceDir);
+  if (windowCache.warning) warnings.push(windowCache.warning);
   if (stored.corrupt) {
     warnings.push(`编排设置解析失败，已按默认值处理：${stored.detail ?? "格式不对"}`);
   } else if (stored.readFailed) {
@@ -500,7 +605,7 @@ export async function readOrchestrationState(
   let providerList: ReturnType<typeof providerRows> = [];
   try {
     const snapshot = await paseo.providers.snapshot({ cwd: input.workspaceDir });
-    providerList = providerRows((snapshot?.entries ?? []) as ProviderSnapshotEntry[], config);
+    providerList = providerRows((snapshot?.entries ?? []) as ProviderSnapshotEntry[], config, windowCache.cache);
   } catch (error) {
     warnings.push(`客户端目录读取失败：${sessionErrorDetail(error)}`);
   }
@@ -690,6 +795,10 @@ export async function readOrchestrationState(
     warnings.push("指定的派单窗口不在当前工作区的会话列表里（可能已归档）：请重新指定");
   }
 
+  // 读不到的会话身份：目录不存在是常态（返回空），这里不把它写成 warning——
+  // 它要在会话树顶上单独提示，混进那串路由告警里就没人看了。
+  const identityGaps = await readIdentityGaps(input.workspaceDir);
+
   return {
     ok: true,
     workspaceId: input.workspaceId,
@@ -700,6 +809,7 @@ export async function readOrchestrationState(
     providers,
     agents: agents.map(({ updatedAt: _updatedAt, ...rest }) => rest),
     tree,
+    identityGaps,
     warnings,
   };
 }
@@ -721,6 +831,59 @@ export interface SaveInput {
 }
 
 /**
+ * 卡的「内容」是否一致：两侧都经过 `normalizeStaffCards` 重建，键序固定，可以直接比 JSON。
+ * 按 id 对齐后比较，与名单顺序无关。
+ */
+function sameStaffCard(a: StaffCard, b: StaffCard): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * 一条领地路径是否真的落在工作区里：`.` 之外的路径必须是工作区里存在的目录或文件。
+ * 先 resolve 再确认没逃出根目录——名册里的领地只描述工作区内部，`../x` 这类词法越界不算。
+ */
+function staffPathExists(workspaceDir: string, relativePath: string): boolean {
+  const root = path.resolve(workspaceDir);
+  const target = path.resolve(root, relativePath);
+  const relative = path.relative(root, target);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return false;
+  try {
+    const info = statSync(target);
+    return info.isDirectory() || info.isFile();
+  } catch (error) {
+    // 只有「确实没有」才当成不存在；权限 / IO 错误让保存失败，但别把它说成路径不存在。
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") {
+      record("warn", SCOPE, `校验领地路径 ${relativePath} 失败：${String(error)}`);
+    }
+    return false;
+  }
+}
+
+/**
+ * 保存前的领地校验：只查新增或内容有变化的卡。
+ *
+ * 没动过的老卡不参与——缺领地的历史卡由派单闸（#41）整批拦，保存别的设置不该被它连累。
+ * 读不出旧文件时没有可比基线，就按「全是新卡」从严校验。
+ */
+function staffTerritoryDetail(
+  workspaceDir: string,
+  previous: OrchestrationSettings,
+  next: OrchestrationSettings,
+): string | null {
+  const before = new Map(rosterOf(previous).map((card) => [card.id, card]));
+  const changed = rosterOf(next).filter((card) => {
+    const old = before.get(card.id);
+    return !old || !sameStaffCard(old, card);
+  });
+  if (!changed.length) return null;
+  const problems = staffTerritoryProblems(changed, (relativePath) =>
+    staffPathExists(workspaceDir, relativePath),
+  );
+  return problems.length ? describeStaffTerritoryProblems(problems) : null;
+}
+
+/**
  * 保存整份编排设置。
  *
  * 客户端提交的是「它以为的完整设置」，服务端用 `normalizeOrchestration` 再收一次：
@@ -730,6 +893,10 @@ export interface SaveInput {
 export async function saveOrchestration(input: SaveInput): Promise<SaveResult> {
   if (!input.workspaceDir.trim()) return { ok: false, reason: "invalid", detail: "缺少工作区目录" };
   const settings = normalizeOrchestration(input.settings);
+  // 领地校验要跟磁盘上的旧名册比：只有新增 / 改过的卡才必须填领地。
+  const previous = await readOrchestration(input.workspaceDir);
+  const territory = staffTerritoryDetail(input.workspaceDir, previous.settings, settings);
+  if (territory) return { ok: false, reason: "invalid", detail: territory };
   const warnings: string[] = [];
   if (!settings.roles.length) warnings.push("没有绑定任何工作区角色：派单会被拒绝");
   // 归属优先用调用方给的 id；只有没给时才退回「角色里唯一那个工作区」，
@@ -781,12 +948,16 @@ export type ProviderPatchResult =
 
 export interface ProviderPatchInput {
   provider: string;
+  /** 工作区目录：接口窗口缓存落在它的 `.deck/` 下。没有就照旧按配置里的窗口走。 */
+  workspaceDir?: string;
   env?: Record<string, string>;
   enabled?: boolean;
   /** 显示名（宿主 `label`）。空串表示「不改」，宿主没有删除 label 的语义。 */
   label?: string;
   /** 这个客户端声明的**完整**模型清单（替换语义）：没列进去的会被删掉。 */
   models?: string[];
+  /** 可选的接口模型目录；新增条目时一并保存其能力字段。 */
+  modelDefinitions?: Array<Record<string, unknown> & { id: string; label: string }>;
 }
 
 /**
@@ -840,6 +1011,7 @@ export async function revealProviderEnvValue(
 export async function patchProviderConfig(
   paseo: PaseoApi,
   input: ProviderPatchInput,
+  deps: CodexCatalogDeps = {},
 ): Promise<ProviderPatchResult> {
   const provider = input.provider.trim();
   if (!provider) return { ok: false, reason: "invalid", detail: "缺少 provider" };
@@ -929,7 +1101,7 @@ export async function patchProviderConfig(
   // 读清单的基准：新条目还没有自己的清单，就看内建那条。
   const modelBase = before ?? (creatingDerived ? providers.codex : undefined);
   const mergedEnv: Record<string, string> = {};
-  if (envKeys.length) {
+  if (envKeys.length || (provider === "claude" && input.models !== undefined)) {
     // 宿主的内存里补丁是深合并，**落盘时 `env` 是整块替换**。
     // 只提交新注入的那几个键，`config.json` 里原有的其它键（比如先配的 API key）就会消失，
     // daemon 一重启就没了。所以这里先读出现有 env，整体一起提交。
@@ -952,10 +1124,50 @@ export async function patchProviderConfig(
       if (inherited) mergedEnv[CODEX_CREDENTIAL_KEY] = inherited;
     }
     Object.assign(mergedEnv, patchEnv);
-    providerPatch.env = mergedEnv;
+    if (envKeys.length) providerPatch.env = mergedEnv;
   }
   if (input.enabled !== undefined) providerPatch.enabled = input.enabled;
+  // 保存时宿主可能已经不记得窗口了（它模型定义里只留 id / label / 档位）。
+  // 拿最近一次接口拉取的缓存补齐；地址跟着这次要写入的 env 一起算，
+  // 换接口的同一笔保存不会套用旧接口的窗口。
+  const cacheRead = await readModelWindowCache(input.workspaceDir);
+  const cacheWarning = cacheRead.warning;
+  const beforeEnv = envTextOf(before?.env);
+  const cacheEnv = { ...beforeEnv, ...mergedEnv };
+  const cachedWindows = cachedWindowsFor(cacheRead.cache, provider, cacheEnv);
+  const beforeBaseUrl = normalizeModelWindowBaseUrl(baseUrlFor(provider, beforeEnv));
+  const nextBaseUrl = normalizeModelWindowBaseUrl(baseUrlFor(provider, cacheEnv));
+  // 同一笔保存里换了接口：调用方带来的模型定义属于旧接口，窗口不能跟过去。
+  // 新接口的窗口只认缓存（缓存也按地址匹配），没有就保持没有。
+  const addressChanged = Boolean(beforeBaseUrl && nextBaseUrl && beforeBaseUrl !== nextBaseUrl);
   let modelsKey: ModelListKey | null = null;
+  // 接口报的窗口要写进 Codex 自己的模型目录，会话才会按它算上下文与自动压缩阈值。
+  let catalogApplied: string | null = null;
+  let catalogWarning: string | null = null;
+  /** 重建 Codex 目录；换地址而目录没写成时把旧目录从启动命令里摘掉，别让它继续按旧上限算。 */
+  const rebuildCatalog = async (items: readonly unknown[], command: unknown): Promise<void> => {
+    const catalog = await writeCodexModelCatalog(catalogModelInputsOf(items), deps);
+    if (catalog.ok) {
+      providerPatch.command = codexCommandWithCatalog(command, catalog.path);
+      catalogApplied = catalog.path;
+      return;
+    }
+    // 换接口时旧目录一律摘掉，不能只看「新地址没窗口」这一种原因：
+    // 目录这次没写成（写失败之类）却留着旧目录，等于让上一接口的窗口继续生效。
+    const stripped = addressChanged ? codexCommandWithoutCatalog(command) : null;
+    if (stripped) providerPatch.command = stripped;
+    if (catalog.reason === "no-window") {
+      // 只有这一种才是「新地址还没窗口」。写失败时缓存里其实有窗口，不能这么说。
+      if (stripped) {
+        catalogWarning =
+          "接口换了地址、新地址还没拿到模型窗口：已从 Codex 启动命令里去掉上一接口的模型目录，免得继续按旧窗口压缩；在新地址上获取模型并保存后会重新接上";
+      }
+      return;
+    }
+    catalogWarning = `Codex 模型目录没写成：${catalog.detail}。${
+      stripped ? "已从启动命令里去掉上一接口的模型目录，" : ""
+    }这批模型的窗口对会话仍然无效，自动压缩会偏晚（按启动命令里剩下的目录或 Codex 内置默认窗口算）`;
+  };
   if (input.models !== undefined) {
     // 模型清单是**替换**语义：传进来什么，写完就是什么，没列进去的会被删掉。
     // 落在哪把键上要看现存配置——`models` 是「替换内置列表」，往它的
@@ -983,9 +1195,66 @@ export async function patchProviderConfig(
       kept.push(typeof item === "string" ? { id, label: id } : { ...item });
     }
     for (const id of wanted) {
-      if (!kept.some((item) => item.id === id)) kept.push({ id, label: id });
+      if (!kept.some((item) => item.id === id)) {
+        const available = input.modelDefinitions?.find((model) => model.id === id);
+        kept.push(available ? { ...available } : { id, label: id });
+      }
     }
-    providerPatch[modelsKey] = kept;
+    for (const item of kept) {
+      const fresh = input.modelDefinitions?.find((model) => model.id === item.id);
+      if (fresh) Object.assign(item, fresh);
+    }
+    // 窗口补在写配置之前：宿主会裁掉这个字段，但这一次重建 Codex 目录与算
+    // `CLAUDE_CODE_MAX_CONTEXT_TOKENS` 都要用它；缓存里没有的模型保持原样，不编窗口。
+    // 换接口的同一笔保存先把旧定义里的窗口摘掉，只让新地址的缓存决定。
+    // 这次调用自己带回来的窗口比缓存新（缓存写失败时尤其明显），不要被旧缓存覆盖。
+    const freshWindows = new Set(
+      (input.modelDefinitions ?? [])
+        .filter((model) => positiveTokenCount(model.contextWindowMaxTokens) !== undefined)
+        .map((model) => model.id),
+    );
+    const keptWithWindows = withCachedWindows(
+      (addressChanged ? withoutModelWindows(kept) : kept) as Array<Record<string, unknown> & { id: string }>,
+      cachedWindows,
+      addressChanged ? undefined : freshWindows,
+    );
+    providerPatch[modelsKey] = keptWithWindows;
+    // 目录文件只在派生条目**真正生效**时才写：内建 `codex` 条目上的启动命令不会被会话用到，
+    // 写上去只是让配置看着像配过了。接口没报窗口时这一步自己跳过（不编一个默认值顶上）。
+    if (writesDerived) {
+      await rebuildCatalog(keptWithWindows, before?.command);
+    } else if (provider === "codex" && catalogModelInputsOf(keptWithWindows).some((model) => model.contextWindowMaxTokens !== undefined)) {
+      // 这条地址还没有，清单落在内建 `codex` 那一行，会话读不到派生条目的启动命令：
+      // 接口报了窗口也暂时用不上，说清楚比让用户以为「存好了就生效」强。
+      catalogWarning = "这个客户端还没配接入地址：模型清单先存在内建那一行，Codex 会话要等地址存上、清单再保存一次才会按接口的窗口跑";
+    }
+  } else if (writesDerived && addressChanged) {
+    // 只换地址、没动模型清单：目录内容仍旧属于上一个接口。按新地址的缓存重建一次；
+    // 新地址还没窗口就把旧目录从启动命令里摘掉，否则会话继续按上一个接口的上限压缩。
+    const source = modelObjectsOf(before?.[modelListKeyOf(before)]) ?? [];
+    await rebuildCatalog(withCachedWindows(source, cachedWindows), before?.command);
+  }
+  // env 与模型清单都合并完后再算，保存清单时换 ANTHROPIC_MODEL 也不能拿到旧值。
+  let claudeContextWindowApplied = false;
+  let claudeContextWindowCleared = false;
+  if (provider === "claude" && (envKeys.length || input.models !== undefined)) {
+    const key = modelsKey ?? modelListKeyOf(modelBase);
+    const configuredModels = modelObjectsOf(modelBase?.[key]) ?? [];
+    const models = input.models !== undefined
+      ? (providerPatch[key] as Array<{ id: string; contextWindowMaxTokens?: number }>)
+      : withCachedWindows(addressChanged ? withoutModelWindows(configuredModels) : configuredModels, cachedWindows);
+    const contextWindow = claudeCodeContextWindowOf(models, mergedEnv.ANTHROPIC_MODEL ?? textOf(before?.env?.ANTHROPIC_MODEL));
+    if (contextWindow !== undefined) {
+      mergedEnv[CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY] = String(contextWindow);
+      providerPatch.env = mergedEnv;
+      claudeContextWindowApplied = true;
+    } else if (addressChanged && mergedEnv[CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY] !== undefined) {
+      // 换了接口、新地址又没给窗口：上一接口写下的上限不能留着——
+      // Claude Code 会按旧上限压缩，先撞新接口的真实上限，正是这个票要修的那类故障。
+      delete mergedEnv[CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY];
+      providerPatch.env = mergedEnv;
+      claudeContextWindowCleared = true;
+    }
   }
   /**
    * 模型清单要写成**两份**。
@@ -1035,18 +1304,29 @@ export async function patchProviderConfig(
 
   const applied = [
     ...envKeys.map((key) => `env.${key}`),
+    ...(claudeContextWindowApplied && !envKeys.includes(CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY)
+      ? [`env.${CLAUDE_CODE_MAX_CONTEXT_TOKENS_KEY}`]
+      : []),
     // 调用方没提 enabled 而我们顺手开了它（写派生条目时）：这算这次改动的结果，得列出来。
     ...(input.enabled !== undefined || providerPatch.enabled === true ? ["enabled"] : []),
     ...(nextLabel ? ["label"] : []),
     ...(input.models !== undefined && modelsKey ? [modelsKey] : []),
+    ...(catalogApplied ? ["command"] : []),
     // 照写进内建条目的那份也算这次改动的结果：用户在看的就是两行选择器。
     ...(mirrorModels && mirrorKey && mirrorKey !== modelsKey ? [mirrorKey] : []),
   ];
   const warnings: string[] = [
     "注入配置对**之后新建**的会话生效；已经在跑的会话不受影响。",
   ];
+  if (cacheWarning) warnings.push(cacheWarning);
+  if (catalogWarning) warnings.push(catalogWarning);
+  if (claudeContextWindowCleared) {
+    warnings.push(
+      "接口换了地址、新地址还没拿到模型窗口：已去掉上一接口留下的 CLAUDE_CODE_MAX_CONTEXT_TOKENS，免得继续按旧上限压缩；在新地址上获取模型并保存后会按新接口写入",
+    );
+  }
   const keptKeys = Object.keys(mergedEnv).filter((key) => !envKeys.includes(key));
-  if (keptKeys.length) {
+  if (keptKeys.length && (envKeys.length || providerPatch.env !== undefined)) {
     warnings.push(`本次写入一并带上了已有的 ${keptKeys.length} 个键（宿主的补丁在落盘时整块替换 env，不带上就等于删掉）。`);
   }
   if (input.models !== undefined && modelsKey === "additionalModels") {
@@ -1075,12 +1355,19 @@ export async function patchProviderConfig(
       detail: `宿主没把 ${CODEX_SITE_PROVIDER} 存成能用的形状（继承 codex、地址、启用三样缺一不可）：这次地址不生效，先核对 ~/.paseo/config.json`,
     };
   }
+  // 目录路径也核一遍：宿主吞掉 `command` 时模型清单看着存好了，会话却继续按默认窗口跑，
+  // 这种「存了但没生效」必须当场说出来，否则用户只会再撞一次 ran out of room。
+  if (catalogApplied && catalogPathOfCommand(configuredAfter?.command) !== catalogApplied) {
+    warnings.push(
+      `Codex 的启动命令里没有带上模型目录（${catalogApplied}）：这批模型的窗口对会话仍然无效，自动压缩会偏晚；请核对 config.json 里 ${targetId} 的 command`,
+    );
+  }
   // 只改显示名时我们压根没往派生条目上写，不能拿「派生条目看不到」去报配置没落地。
   if (!configuredAfter && Object.keys(providerPatch).length) {
     warnings.push(`读回看不到客户端 ${provider} 的配置：这次写入可能没有落到 config.json 里，改完请核对一次`);
     return { ok: true, provider, applied, warnings };
   }
-  if (configuredAfter && envKeys.length) {
+  if (configuredAfter && providerPatch.env !== undefined) {
     const envAfter = configuredAfter.env ?? {};
     const missing = Object.keys(mergedEnv).filter((key) => (envAfter[key] ?? "") !== mergedEnv[key]);
     if (missing.length) {
@@ -1249,6 +1536,9 @@ export interface DispatchInput {
     requirementKey?: number;
     /** 需求票自己所在的仓库；子票仓库不能代替它判断父边能不能挂。 */
     requirementRepoKey?: string;
+    /** 内部调用方已经读过的需求正文 / 标签；RPC 入参不暴露，见 `DispatchTaskInput`。 */
+    requirementBody?: string;
+    requirementLabels?: readonly string[];
   }>;
   /** 这一批默认替哪张地图干活；逐条可以用 `tasks[].map` 覆盖。 */
   map?: string;
@@ -1303,7 +1593,13 @@ export type DispatchResult =
         | "depth-exceeded"
         | "invalid-workspace"
         | "settings-unreadable"
-        | "settings-corrupt";
+        | "settings-corrupt"
+        | "caller-unknown"
+        | "no-workspace"
+        | "main-cannot-dispatch"
+        | "requirement-cannot-dispatch"
+        | "progress-cannot-dispatch"
+        | "caller-not-dispatcher";
       detail: string;
     };
 
@@ -1380,6 +1676,25 @@ export async function runDispatch(
       detail: `编排文件解析失败：${stored.detail ?? "格式不对"}——先修好 ${stored.file}，不能拿默认值派单`,
     };
   }
+  const warnings: string[] = [];
+  // 入口门：带会话身份的派单必须是绑定的派单窗口；不带身份的是面板人工操作，放行但说出来。
+  // 这条闸必须在 `planDispatch` 之前：计划会把调用者 id 兜底成派单窗口，走到那里就分不清了。
+  const caller = input.callerAgentId?.trim() ?? "";
+  // 工作区没绑定要报 no-workspace；把它提前折成空槽位，会变成误导人的「没选派单窗口」。
+  const boundRoles = workspaceRolesOf(stored.settings, input.workspaceId);
+  if (caller) {
+    const verdict = judgeDispatchCaller({
+      callerAgentId: caller,
+      slots: boundRoles ? windowSlotsOf(boundRoles) : null,
+    });
+    if (!verdict.ok) {
+      // RPC 的 workspaceId 是必填的，不存在「分不清哪片」；这个分支只为类型收窄，不会真的走到。
+      const reason = verdict.reason === "workspace-ambiguous" ? "invalid-workspace" : verdict.reason;
+      return { ok: false, reason, detail: verdict.detail };
+    }
+  } else {
+    warnings.push("这次派单没有会话身份（面板人工操作）：按人工操作放行；会话内派单必须由绑定的派单窗口发起。");
+  }
   const config = await readDaemonConfig(paseo);
   const profiles = profilesOf(config);
   const dispatchId = input.dispatchId?.trim() || dispatchIdOf();
@@ -1399,6 +1714,20 @@ export async function runDispatch(
     workspaceDir: input.workspaceDir,
   });
 
+  // 「这个工作区没绑定」与「绑了但没选派单窗口」要在票门之前分清：票门会把没有票的
+  // 任务全拒掉，先跑它只会让用户拿一句「无票不干活」去修一条本来该补角色的配置。
+  const dispatchEntry = stored.settings.roles.find((role) => role.workspaceId === input.workspaceId) ?? null;
+  if (!dispatchEntry) {
+    return { ok: false, reason: "unknown-workspace", detail: "这个工作区没有任何角色绑定：先到「编排」里加一条工作区角色" };
+  }
+  if (!dispatchEntry.dispatcherAgentId?.trim()) {
+    return { ok: false, reason: "no-dispatcher", detail: "这个工作区还没有指定派单窗口：先到「编排」里选一个会话" };
+  }
+
+  // E 票门：无票不干活、需求没定稿不派，与 MCP 的 deck_dispatch_plan 同一口径。
+  // 必须在 `planDispatch` 之前：被拦下的任务不进计划，也就不占并发名额。
+  const ticketGate = await gateDispatchTasks(input.workspaceDir, input.tasks);
+
   // 多仓库工作区：没写 repoKey 的任务在这里就拒，别等票建不出来才发现。
   const repoListing = await writableRepoKeys(input.workspaceDir);
   const repoKeys = repoListing.keys;
@@ -1408,7 +1737,7 @@ export async function runDispatch(
     roles: stored.settings.roles,
     routing: stored.settings.routing,
     profiles,
-    tasks: input.tasks,
+    tasks: ticketGate.gated,
     maxDepth: stored.settings.maxDepth,
     maxChildrenPerDispatch: stored.settings.maxChildrenPerDispatch,
     minConcurrentStaff: stored.settings.minConcurrentStaff,
@@ -1424,15 +1753,10 @@ export async function runDispatch(
   });
 
   if (!plan.dispatcherAgentId) {
-    // 拒绝原因按计划里那条走：「没绑过角色」与「绑了但没选派单窗口」的下一步不一样，
-    // 统一报成 `no-dispatcher` 会让人去改一条根本不存在的角色。
-    if (plan.rejected.some((item) => item.reason === "unknown-workspace")) {
-      return { ok: false, reason: "unknown-workspace", detail: "这个工作区没有任何角色绑定：先到「编排」里加一条工作区角色" };
-    }
+    // 角色与派单窗口在票门之前就查过了；走到这里说明计划层自己没算出收件人。
     return { ok: false, reason: "no-dispatcher", detail: "这个工作区还没有指定派单窗口" };
   }
 
-  const warnings: string[] = [];
   // 仓库清单读不出来时 `repoKeys` 是空数组，多仓库校验会整段跳过：
   // 不说出来，用户会以为每条任务都验过 repoKey 了。
   if (repoListing.detail) {
@@ -1460,6 +1784,10 @@ export async function runDispatch(
   // 名册按目录合并（同一目录会有好几个 workspaceId），否则换个工作区打开就找不到卡。
   const workspaceRoles = workspaceRolesOf(stored.settings, input.workspaceId);
 
+  // 票门先拒的排在计划拒绝之前：它们连计划都没进，顺序也是调用方给的顺序。
+  for (const rejected of ticketGate.rejected) {
+    results.push({ key: rejected.key, ok: false, reason: rejected.reason, detail: rejected.detail });
+  }
   for (const rejected of plan.rejected) {
     results.push({ key: rejected.key, ok: false, reason: rejected.reason, detail: rejected.detail });
   }
@@ -1492,31 +1820,24 @@ export async function runDispatch(
       ledger: false,
     });
 
-  // 链条的事实每张需求读一次：同一批里多条任务挂同一条需求时，不逐条重复读正文。
-  const chainRequirements = new Map<
-    string,
-    { readonly body: string; readonly repoKey: string | null } | { readonly detail: string }
-  >();
+  // 链条的事实每张需求读一次：票门已经读过正文与标签，这里直接复用，不再读第二遍。
+  type ChainRequirement = { readonly body: string; readonly repoKey: string | null } | { readonly detail: string };
+  const chainRequirements = new Map<string, ChainRequirement>();
   for (const task of plan.tasks) {
     // 链条闸要在执行层再查一次：MCP 的 deck_dispatch_plan 只是预览，
     // 直接走 RPC 派单会绕过它。按票级判定，坏的一条不拖累整批。
     if (task.requirementKey !== undefined) {
-      const key = `${task.requirementRepoKey ?? ""}#${task.requirementKey}`;
+      const key = dispatchRequirementKeyOf(task);
       let requirement = chainRequirements.get(key);
       if (!requirement) {
         if (typeof task.requirementBody === "string") {
           // 需求拆票已经读过正文：直接用，避免执行层再读一遍（也避免拿工作区里不存在的票号误报）。
           requirement = { body: task.requirementBody, repoKey: task.requirementRepoKey ?? null };
         } else {
-          const read = await readIssue(input.workspaceDir, task.requirementKey, {
-            ...(task.requirementRepoKey ? { repoKey: task.requirementRepoKey } : {}),
-          });
-          requirement = !read.ok || !read.result.ok
-            ? { detail: read.ok ? (read.result.ok ? "需求票读回来了但没有正文" : read.result.detail) : read.detail }
-            : {
-                body: typeof read.result.issue.body === "string" ? read.result.issue.body : "",
-                repoKey: read.repoKey ?? null,
-              };
+          // 票门保证每条进计划的任务都读过需求，miss 只可能是源码里两处缓存键写法分了叉。
+          requirement = ticketGate.requirements.get(key) ?? {
+            detail: "票门缓存里没有这条需求：内部缓存键不一致",
+          };
         }
         chainRequirements.set(key, requirement);
       }
@@ -1635,6 +1956,8 @@ export async function runDispatch(
 
 export interface SaveSiteInput {
   provider: string;
+  /** 工作区目录：启用站点重建 Codex 目录时，从这里读接口窗口缓存。 */
+  workspaceDir?: string;
   site?: { id: string; label?: string; baseUrl: string; credential?: string };
   /** 按 id 删一条；与 `site` 二选一。 */
   removeId?: string;
@@ -1653,7 +1976,11 @@ export type SaveSiteResult =
  * 没有轮询也没有故障转移，所以同一时刻只有一条地址在用。换站 = 换这一份 env。
  * 已开的会话拿着开时的配置，不会被追溯——界面文案也是这么说的。
  */
-export async function saveClientSite(paseo: PaseoApi, input: SaveSiteInput): Promise<SaveSiteResult> {
+export async function saveClientSite(
+  paseo: PaseoApi,
+  input: SaveSiteInput,
+  deps: CodexCatalogDeps = {},
+): Promise<SaveSiteResult> {
   const provider = input.provider.trim();
   if (!provider) return { ok: false, reason: "invalid", detail: "缺少客户端 id" };
   // 不支持的家不给建站/启用（存了也没有会话会读，正是「配了却不生效」那条路）；
@@ -1713,7 +2040,7 @@ export async function saveClientSite(paseo: PaseoApi, input: SaveSiteInput): Pro
     const id = normalizeSiteId(input.enableId);
     const site = sitesOf(book, provider).find((item) => item.id === id);
     if (!site) return { ok: false, reason: "not-found", detail: `${provider} 下没有站点 ${id}` };
-    const enabled = await enableSite(paseo, provider, site);
+    const enabled = await enableSite(paseo, provider, site, input.workspaceDir, deps);
     if (!enabled.ok) return enabled;
     warnings.push(...enabled.warnings);
   }
@@ -1732,6 +2059,8 @@ async function enableSite(
   paseo: PaseoApi,
   provider: string,
   site: Site,
+  workspaceDir: string | undefined,
+  deps: CodexCatalogDeps = {},
 ): Promise<{ ok: true; warnings: string[] } | { ok: false; reason: "config-failed"; detail: string }> {
   // 配置里还没有这个客户端的条目是正常的（第一次给它配地址）：补丁会建出这一条。
   // 读不到整份配置才停下——那种情况下 patchProviderConfig 自己会拒绝。
@@ -1761,6 +2090,25 @@ async function enableSite(
   const modelSource = codexSiteUsable(targetBefore) ? targetBefore : before;
   const models = modelObjectsOf(modelSource?.models);
   const additionalModels = modelObjectsOf(modelSource?.additionalModels);
+  // 启用站点这条路径也会直接写派生条目：顺手把模型目录接上，否则「配好地址就能用」
+  // 之后开的第一批会话，窗口还是 Codex 的内置默认值（258k），压缩依旧偏晚。
+  // 宿主配置里的窗口可能早就被裁掉了：从工作区缓存按这次要启用的地址补回来。
+  const cacheRead = provider === "codex" ? await readModelWindowCache(workspaceDir) : null;
+  const targetEnv = { ...envTextOf(targetBefore?.env), ...env };
+  const cachedWindows = cacheRead ? cachedWindowsFor(cacheRead.cache, provider, targetEnv) : [];
+  // 换到另一条站点地址：旧目录属于上一个接口。新接口没窗口时不能让它继续生效，
+  // 否则新地址上同名模型的会话仍按旧接口的上限压缩。
+  // 与保存那条路径用同一把尺子：只差 query / userinfo 不算换了接口。
+  const beforeSiteUrl = normalizeModelWindowBaseUrl(baseUrlFor(provider, envTextOf(targetBefore?.env)));
+  const nextSiteUrl = normalizeModelWindowBaseUrl(baseUrlFor(provider, targetEnv));
+  const siteAddressChanged = Boolean(beforeSiteUrl && nextSiteUrl && beforeSiteUrl !== nextSiteUrl);
+  const catalogSource = provider === "codex" ? modelObjectsOf(modelSource?.[modelListKeyOf(modelSource)]) ?? [] : [];
+  const catalog = catalogSource.length
+    ? await writeCodexModelCatalog(catalogModelInputsOf(withCachedWindows(catalogSource, cachedWindows)), deps)
+    : null;
+  const staleCatalogCommand = siteAddressChanged && !catalog?.ok
+    ? codexCommandWithoutCatalog(targetBefore?.command)
+    : undefined;
   const providerPatch = provider === "codex"
     ? {
         extends: "codex",
@@ -1768,7 +2116,12 @@ async function enableSite(
         enabled: true,
         ...(models ? { models } : {}),
         ...(additionalModels ? { additionalModels } : {}),
-        env: { ...(targetBefore?.env ?? {}), ...env },
+        ...(catalog?.ok
+          ? { command: codexCommandWithCatalog(targetBefore?.command, catalog.path) }
+          : staleCatalogCommand
+            ? { command: staleCatalogCommand }
+            : {}),
+        env: targetEnv,
       }
     : null;
   // 模型清单要写成两份（同 `patchProviderConfig` 里那段说明）：这条路径直写补丁、
@@ -1798,11 +2151,31 @@ async function enableSite(
       return { ok: false, reason: "config-failed", detail: sessionErrorDetail(error) };
     }
   } else {
-    patched = await patchProviderConfig(paseo, { provider: targetProvider, env });
+    patched = await patchProviderConfig(paseo, {
+      provider: targetProvider,
+      env,
+      ...(workspaceDir ? { workspaceDir } : {}),
+    });
   }
   if (!patched.ok) return { ok: false, reason: "config-failed", detail: patched.detail };
 
-  const warnings: string[] = [];
+  // 补丁自己也会带回告警（窗口缓存读不出来、换了接口摘掉旧值之类）：
+  // 这条路径不走 `patchProviderConfig` 的返回值汇总，不并进来就等于没说。
+  const warnings: string[] = [...patched.warnings];
+  if (cacheRead?.warning) warnings.push(cacheRead.warning);
+  if (staleCatalogCommand) {
+    // 「新地址还没拿到窗口」只在真有缓存窗口却没写成时才是真的：写失败时缓存里是有窗口的，
+    // 下一句会说明目录没写成，这里不能替它下结论。
+    const noWindow = !catalog || (!catalog.ok && catalog.reason === "no-window");
+    warnings.push(
+      noWindow
+        ? "换到了另一条站点地址、新地址还没拿到模型窗口：已从 Codex 启动命令里去掉上一接口的模型目录，免得继续按旧窗口压缩；在新地址上获取模型并保存后会重新接上"
+        : "换到了另一条站点地址、目录这次没写成：已从 Codex 启动命令里去掉上一接口的模型目录，免得继续按旧窗口压缩；在新地址上重新获取模型并保存后会重新接上",
+    );
+  }
+  if (catalog && !catalog.ok && catalog.reason !== "no-window") {
+    warnings.push(`Codex 模型目录没写成：${catalog.detail}。这批模型的窗口对会话仍然无效，自动压缩会偏晚`);
+  }
   const afterConfig = await readDaemonConfig(paseo);
   // 「整份配置读不到」只能说「没法核对」（写入可能已经成功）；
   // 「配置读得到、就是没有这一条」则是写入没落地，必须报失败。

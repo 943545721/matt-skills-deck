@@ -9,6 +9,7 @@ import {
   buildNewBugPrompt,
   buildNewSpecPrompt,
   buildNewWayfinderPrompt,
+  entryRepoLabel,
 } from "../../shared/entry-prompt";
 import { repoTargetsRpc } from "../../shared/repo";
 import type { RequirementMode } from "../../shared/requirement";
@@ -131,7 +132,7 @@ export function DeckPanel({ theme, layout, workspaceId, tab, navigation }: Plugi
     title: "",
   });
 
-  // 「新建需求 / + bug」开场白里的仓库字段：优先工作区选定的默认仓库，只有一个时直接用。
+  // 「新建需求 / + bug」开场白里的仓库字段：有默认仓库就用它，只有一个时直接用，多项目时列出清单。
   const repoTargets = useRpc(repoTargetsRpc);
   const targets = useQuery({
     queryKey: ["deck", "repo-targets", workspace?.directory ?? ""],
@@ -148,12 +149,13 @@ export function DeckPanel({ theme, layout, workspaceId, tab, navigation }: Plugi
     const hasGitHub = repos === null || repos.some((repo) => repo.host === "github");
     return hasGitHub ? TABS : TABS.filter((item) => item.key !== "pr");
   }, [targets.data]);
-  const entryRepo = useMemo(() => {
-    if (!targets.data?.ok) return "";
-    const { defaultKey, repos } = targets.data;
-    return defaultKey ?? (repos.length === 1 ? (repos[0]?.key ?? "") : "");
-  }, [targets.data]);
-  // 没有可自动填入的仓库时，入口不该发出「仓库：」后面空白的开场白。
+  // 多项目工作区没有默认仓库时列出全部清单，而不是留空把三个入口锁死。
+  const entryRepo = useMemo(
+    () => (targets.data?.ok === true ? entryRepoLabel(targets.data, lang) : ""),
+    [targets.data, lang],
+  );
+  // 一个仓库都读不出来时，入口不该发出「仓库：」后面空白的开场白；
+  // 刷新失败时也不拿上一次的清单继续用（isSuccess 会变 false）。
   const entryReady = Boolean(workspace?.directory) && targets.isSuccess && entryRepo !== "";
   const touch = Platform.OS === "ios" || Platform.OS === "android";
 

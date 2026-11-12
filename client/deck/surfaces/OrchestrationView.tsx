@@ -21,6 +21,7 @@ import {
   orchestrationWindowRpc,
 } from "../../../shared/orchestration-rpc.ts";
 import type { FixedRole } from "../../../shared/orchestration.ts";
+import type { ProviderModelDefinition } from "../../../shared/provider-models.ts";
 import { MAX_STAFF_CARDS, rosterOf, withDirectoryRoster } from "../../../shared/staff.ts";
 import type { DeckLang } from "../../../shared/requirement.ts";
 import { usePanelText } from "../panel/panelText.tsx";
@@ -342,11 +343,13 @@ export function OrchestrationView({
   };
 
   const patchProvider = useMutation({
-    mutationFn: (input: { provider: string; env?: Record<string, string>; models?: string[]; label?: string }) =>
+    mutationFn: (input: { provider: string; env?: Record<string, string>; models?: string[]; label?: string; modelDefinitions?: ProviderModelDefinition[] }) =>
       providerRpc({
         provider: input.provider,
+        ...(workspaceDir ? { workspaceDir } : {}),
         ...(input.env ? { env: input.env } : {}),
         ...(input.models ? { models: input.models } : {}),
+        ...(input.modelDefinitions ? { modelDefinitions: input.modelDefinitions } : {}),
         ...(input.label ? { label: input.label } : {}),
       }),
     onSuccess: (result) => {
@@ -602,7 +605,7 @@ export function OrchestrationView({
                 }}
                 onSaveSite={async (input) => {
                   try {
-                    const result = await siteRpc(input);
+                    const result = await siteRpc({ ...input, ...(workspaceDir ? { workspaceDir } : {}) });
                     if (!result.ok) return { ok: false as const, detail: result.detail };
                     for (const warning of result.warnings) toast.show(warning, { variant: "warning" });
                     // 站点表与「现在生效的是哪条」都是服务端读盘 + 读宿主配置算出来的：重取一次。
@@ -614,7 +617,8 @@ export function OrchestrationView({
                 }}
                 onFetchModels={async (provider) => {
                   try {
-                    const result = await modelsRpc({ provider });
+                    const result = await modelsRpc({ provider, ...(workspaceDir ? { workspaceDir } : {}) });
+                    if (result.ok && result.cacheWarning) toast.show(result.cacheWarning, { variant: "warning" });
                     return result.ok
                       ? { ok: true as const, endpoint: result.endpoint, models: result.models }
                       : { ok: false as const, detail: result.detail };
@@ -657,7 +661,7 @@ export function OrchestrationView({
                 onPatch={route}
               />
             ) : (
-              <TreePanel skin={skin} t={t} tree={data.tree} />
+              <TreePanel skin={skin} t={t} tree={data.tree} identityGaps={data.identityGaps} />
             )}
           </View>
         </View>

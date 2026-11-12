@@ -63,12 +63,14 @@ export const orchestrationSettingsSchema = z.object({
     z.object({
       workspaceId: z.string().min(1).max(300),
       mainAgentId: z.string().max(300).optional(),
+      requirementAgentId: z.string().max(300).optional(),
       dispatcherAgentId: z.string().max(300).optional(),
       progressAgentId: z.string().max(300).optional(),
       /** 用户改过的身份提示词；没改的那一段回落默认值。 */
       prompts: z
         .object({
           main: z.string().max(MAX_ROLE_PROMPT_CHARS).optional(),
+          requirement: z.string().max(MAX_ROLE_PROMPT_CHARS).optional(),
           dispatcher: z.string().max(MAX_ROLE_PROMPT_CHARS).optional(),
           progress: z.string().max(MAX_ROLE_PROMPT_CHARS).optional(),
         })
@@ -137,6 +139,19 @@ export const agentRowSchema = z.object({
   labels: z.record(z.string(), z.string()),
 });
 
+/**
+ * 一个 deck MCP 进程没拿到会话身份（`PASEO_AGENT_ID` 为空）。
+ *
+ * 宿主快照里没有环境变量，所以这只能由 MCP 进程自己留痕、编排状态读取时回收。
+ * `pid` 用来判断那个窗口还在不在；`lastTool` 是最近一次因此被拒的工具（还没被拒过就是 null）。
+ */
+export const identityGapSchema = z.object({
+  pid: z.number().int().positive(),
+  since: z.string(),
+  lastTool: z.string().nullable(),
+  lastAt: z.string().nullable(),
+});
+
 /** 树节点的线上形状；递归结构在 zod 里要显式标注类型。 */
 export interface TreeNodeWire {
   agentId: string;
@@ -201,6 +216,11 @@ export const providerRowSchema = z.object({
    * 模型清单的读写与镜像逻辑不受影响。
    */
   modelThinking: z.array(modelThinkingSchema).optional(),
+  modelCapabilities: z.array(z.object({
+    id: z.string(),
+    contextWindowMaxTokens: z.number().positive().optional(),
+    thinkingOptions: z.array(thinkingOptionSchema).optional(),
+  })).optional(),
   /** 配置里自己声明的模型 id（`models` 或 `additionalModels` 里的）。 */
   configModels: z.array(z.string()),
   /** 声明放在哪把键上：`models` = 替换内置列表，`additionalModels` = 追加。 */
@@ -297,6 +317,8 @@ export const orchestrationStateRpc = defineRpc({
       providers: z.array(providerStateRowSchema),
       agents: z.array(agentRowSchema),
       tree: z.array(treeNodeSchema),
+      /** 缺会话身份的窗口（窗口关了自动消失）。 */
+      identityGaps: z.array(identityGapSchema),
       warnings: z.array(z.string()),
     }),
     z.object({
@@ -340,6 +362,8 @@ export const orchestrationProviderRpc = defineRpc({
   name: "deck.orchestration.provider",
   input: z.object({
     provider: z.string().min(1).max(120),
+    /** 工作区目录：保存模型时从它的 `.deck/` 读接口窗口缓存。 */
+    workspaceDir: z.string().min(1).max(4096).optional(),
     /**
      * 只支持「新增/修改某个键」。
      * 宿主的配置补丁是深合并：`undefined` 跳过、`null` 会被写成 null，
@@ -355,6 +379,17 @@ export const orchestrationProviderRpc = defineRpc({
      * 落在宿主的 `models`（替换内置）或 `additionalModels`（追加内置）上，由服务端按现存配置决定。
      */
     models: z.array(z.string().max(200)).max(200).optional(),
+    modelDefinitions: z.array(z.object({
+      id: z.string().max(200),
+      label: z.string().max(200),
+      description: z.string().max(2000).optional(),
+      contextWindowMaxTokens: z.number().positive().optional(),
+      defaultThinkingOptionId: z.string().max(120).optional(),
+      thinkingOptions: z.array(z.object({
+        id: z.string().max(120), label: z.string().max(200),
+        description: z.string().max(1000).optional(), isDefault: z.boolean().optional(),
+      })).max(100).optional(),
+    })).max(200).optional(),
   }),
   output: z.union([
     z.object({ ok: z.literal(true), provider: z.string(), applied: z.array(z.string()), warnings: z.array(z.string()) }),
@@ -479,6 +514,8 @@ export const orchestrationSiteRpc = defineRpc({
   name: "deck.orchestration.site",
   input: z.object({
     provider: z.string().min(1).max(120),
+    /** 工作区目录：启用站点重建 Codex 目录时读这里的接口窗口缓存。 */
+    workspaceDir: z.string().min(1).max(4096).optional(),
     /** 加或改一条；`credential` 省略/留空 = 沿用这条站点已存的那份。 */
     site: z
       .object({
@@ -581,6 +618,10 @@ const dispatchOutcomeSchema = z.union([
       "region-unowned",
       "create-failed",
       "ticket-failed",
+      /** E 票门：无票 / 读不出 / 没定稿，逐条拒，不进计划也不占并发。 */
+      "no-requirement",
+      "requirement-unreadable",
+      "requirement-not-finalized",
     ]),
     detail: z.string(),
     ticket: dispatchTicketRefSchema.nullable().optional(),
@@ -631,6 +672,13 @@ export const orchestrationDispatchRpc = defineRpc({
         "invalid-workspace",
         "settings-unreadable",
         "settings-corrupt",
+        // 入口门：带身份的派单只认绑定的派单窗口；主窗口 / 需求窗口 / 进度窗口 / 其他会话各有原因。
+        "caller-unknown",
+        "no-workspace",
+        "main-cannot-dispatch",
+        "requirement-cannot-dispatch",
+        "progress-cannot-dispatch",
+        "caller-not-dispatcher",
       ]),
       detail: z.string(),
     }),
@@ -691,6 +739,8 @@ export const orchestrationRequirementDispatchRpc = defineRpc({
         "settings-unreadable",
         "settings-corrupt",
         "no-dispatcher",
+        /** 名册里有卡没写领地：整批拒绝，detail 点名张数与卡名。 */
+        "staff-territory-missing",
       ]),
       detail: z.string(),
     }),
@@ -709,14 +759,29 @@ export type ProviderRowWire = z.infer<typeof providerRowSchema>;
  */
 export const orchestrationProviderModelsRpc = defineRpc({
   name: "deck.orchestration.provider.models",
-  input: z.object({ provider: z.string().min(1).max(120) }),
+  input: z.object({
+    provider: z.string().min(1).max(120),
+    /** 工作区目录：拉到的窗口缓存在它的 `.deck/` 下，保存模型与重载后再取。 */
+    workspaceDir: z.string().min(1).max(4096).optional(),
+  }),
   output: z.union([
     z.object({
       ok: z.literal(true),
       provider: z.string(),
       /** 真正成功的那个地址，出问题时能说清是哪个端点答的。 */
       endpoint: z.string(),
-      models: z.array(z.string().max(200)).max(500),
+      /** 接口窗口没缓存成功时的告警；清单本身可用。 */
+      cacheWarning: z.string().optional(),
+      models: z.array(z.object({
+        id: z.string().max(200), label: z.string().max(200),
+        description: z.string().max(2000).optional(),
+        contextWindowMaxTokens: z.number().positive().optional(),
+        defaultThinkingOptionId: z.string().max(120).optional(),
+        thinkingOptions: z.array(z.object({
+          id: z.string().max(120), label: z.string().max(200),
+          description: z.string().max(1000).optional(), isDefault: z.boolean().optional(),
+        })).max(100).optional(),
+      })).max(500),
     }),
     z.object({
       ok: z.literal(false),
@@ -748,6 +813,11 @@ export const PROVIDER_MODELS_MAX = 2000;
 export const providerModelListSchema = z.object({
   id: z.string(),
   models: z.array(z.string().max(PROVIDER_MODEL_ID_MAX)).max(PROVIDER_MODELS_MAX),
+  modelCapabilities: z.array(z.object({
+    id: z.string().max(PROVIDER_MODEL_ID_MAX),
+    contextWindowMaxTokens: z.number().positive().optional(),
+    thinkingOptions: z.array(z.object({ id: z.string(), label: z.string() })).optional(),
+  })).max(PROVIDER_MODELS_MAX).optional(),
 });
 
 /** 刷新后一个客户端与它的模型 id。 */
@@ -992,7 +1062,7 @@ export const orchestrationWindowRpc = defineRpc({
   input: z.object({
     workspaceDir: z.string().min(1).max(4096),
     workspaceId: z.string().min(1).max(300),
-    /** 三个固定窗口之一；不认识的 role 在 schema 这一层就拒掉。 */
+    /** 四个固定窗口之一；不认识的 role 在 schema 这一层就拒掉。 */
     role: z.enum(FIXED_ROLE_NAMES),
     /** true：建好新窗口之后再归档旧的（建失败则旧窗口原样留着）。缺省 false，只建不归档。 */
     recreate: z.boolean().optional(),

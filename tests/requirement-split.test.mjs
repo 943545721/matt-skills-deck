@@ -263,6 +263,45 @@ test("多仓库工作区：repoKey 由路径 / 经理领地带出", () => {
   assert.equal(result.batches[0].tickets[0].staff.id, "w-api");
 });
 
+test("多仓库工作区：仓库键带 owner 前缀时，相对路径与带前缀路径都能落 repoKey 并命中员工", () => {
+  const repos = ["943545721/kxhyapp.com", "943545721/kxhyapp.com-saas"];
+  const roster = [
+    worker("staff-fmmr0g", ["kxhyapp.com-saas/src"]),
+    worker("staff-client", ["kxhyapp.com/apps/admin-web"]),
+  ];
+  for (const area of [
+    "kxhyapp.com-saas/src/Service",
+    "943545721/kxhyapp.com-saas/src/Service",
+  ]) {
+    const result = planRequirementSplit({
+      requirement: requirement(),
+      impact: [row({ area, pathPrefix: area, repoKey: "" })],
+      workspaces: [workspace({ repos, roster })],
+    });
+    assert.equal(result.rejected.length, 0, `${area} 不该被拒：${JSON.stringify(result.rejected)}`);
+    const ticket = result.batches[0].tickets[0];
+    assert.equal(ticket.repoKey, "943545721/kxhyapp.com-saas", area);
+    assert.equal(ticket.staff.id, "staff-fmmr0g", area);
+  }
+});
+
+test("多仓库工作区：仓库键末段重复时不靠猜，仍按最长匹配或拒绝", () => {
+  // 两个仓库末段同名（不同 owner）：基名不足以区分，路径只给基名时不能瞎落。
+  const result = planRequirementSplit({
+    requirement: requirement(),
+    impact: [row({ area: "app-saas/src", pathPrefix: "app-saas/src", repoKey: "" })],
+    workspaces: [
+      workspace({
+        repos: ["a/app-saas", "b/app-saas"],
+        roster: [worker("w-saas", ["app-saas/src"])],
+      }),
+    ],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.batches.length, 0);
+  assert.equal(result.rejected[0].reason, "missing-repo-key");
+});
+
 test("多仓库工作区：显式 repoKey 优先", () => {
   const result = planRequirementSplit({
     requirement: requirement(),
