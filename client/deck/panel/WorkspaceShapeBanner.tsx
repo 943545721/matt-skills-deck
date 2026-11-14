@@ -56,10 +56,6 @@ export function WorkspaceShapeBanner({
     [skin],
   );
 
-  const data = query.data;
-  // 单项目、人已表态、或读不到：都不打扰。
-  if (!data || data.shape === "single" || data.acknowledged || !data.prompt) return null;
-
   /** 「不再提示」把判定的形状记进配置：人说过一次，就不该再被问第二次。 */
   const dismiss = useMutation({
     mutationFn: (shape: "single" | "container" | "mixed") => acknowledge({ workspaceDir, shape }),
@@ -71,6 +67,11 @@ export function WorkspaceShapeBanner({
       void queryClient.invalidateQueries({ queryKey: ["deck", "workspace-shape"] });
     },
   });
+
+  const data = query.data;
+  // 单项目、人已表态、或读不到：都不打扰。注意：这个提前返回必须在所有 Hook 之后，
+  // 否则首次渲染少调用一个 Hook、数据到达后多调用一个，React 会直接抛 #310。
+  if (!data || data.shape === "single" || data.acknowledged || !data.prompt) return null;
 
   const copy = () => {
     if (!data.surveyPrompt) return;
