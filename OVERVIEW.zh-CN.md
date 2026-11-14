@@ -6,7 +6,7 @@ MattSkillsDeck 把 Matt Pocock 的工程技能套件和一个 issue 任务板带
 
 新建 agent 会话时，插件会为它起一个小型 MCP 服务，提供二十个 MCP 工具。读上下文、读票、读地图、读下一步、PR 列表、环境探针、派单预览、需求拆票清单与下一步建议是预授权的；`deck_handoff`、`deck_handoff_to_dispatcher` 与 `deck_staff_request` 也是预授权的——它们只写子会话自己名下的回传件或本地队列文件，否则无人值守的派单会在最后一步断掉；发评论、建票、改票、改标签、报告缺陷、挂票与建地图计划会先请求你的确认。GitHub / GitLab 远端一定挂载；本地后端只在工作区已有 `.deck/`（或在设置里选了 local）时挂载。
 
-后端在插件设置页选择：GitHub 走 `gh`、GitLab 走 `glab`（每次写前要求当前账号至少 Reporter 权限）、本地 Markdown 写 `.deck/`（也读已有的 `.scratch/` 布局）。插件自己不保存 token；GitHub / GitLab 的数据只发往对应远端。daemon 所在机器需要装好所选后端依赖的 CLI 并完成登录；只用本地后端则不需要 CLI。GitHub 没登录时，任务板与诊断页会直接给一个「登录 GitHub」入口：浏览器流程把 gh 的一次性验证码显示在面板上；连不上 github.com 的机器可以改用 Token，token 经 stdin 交给 gh，插件不保存。插件要求 Paseo 0.13。
+后端在插件设置页选择：GitHub 走 `gh`、GitLab 走 `glab`（每次写前要求当前账号至少 Reporter 权限）、本地 Markdown 写 `.deck/`（也读已有的 `.scratch/` 布局）。插件自己不保存 token；GitHub / GitLab 的数据只发往对应远端。daemon 所在机器需要装好所选后端依赖的 CLI 并完成登录；只用本地后端则不需要 CLI。GitHub 没登录时，任务板与诊断页会直接给一个「登录 GitHub」入口：浏览器流程把 gh 的一次性验证码显示在面板上；连不上 github.com 的机器可以改用 Token，token 经 stdin 交给 gh，插件不保存。插件要求 Paseo 0.13–0.15。
 
 界面语言跟随 App，中英双语。插件以 daemon 用户权限在 daemon 上运行，与其它插件一致，并且只在所属工作区内执行 `git`、`gh` 与 `glab`。
 

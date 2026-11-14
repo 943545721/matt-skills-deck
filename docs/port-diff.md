@@ -1,7 +1,7 @@
 # 与 DSH 版的逐项对照
 
 源仓库：[FeatherHunter/dsh-mattpocock-skills-deck](https://github.com/FeatherHunter/dsh-mattpocock-skills-deck)（DSH CLI 插件）。
-本仓库是同一套产品思路的 **Paseo 0.13 插件**。两边宿主能提供的面不一样，所以差异分四类：
+本仓库是同一套产品思路的 **Paseo 0.13–0.15 插件**。两边宿主能提供的面不一样，所以差异分四类：
 
 - **已有**：功能与语义都对上，落在 Paseo 有的面上。
 - **已有 + 换面**：主要能力都在，个别动作因为宿主限制换了出口（例如「注入输入框」改成写入宿主的草稿 store）。

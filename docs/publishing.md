@@ -3,7 +3,7 @@
 > **现状（D6）**：决定**不上架公开注册表**。本文保留为流程与约束的备查记录，
 > 下面的「还差什么」不再是待办。
 
-本文只写**已经在本机 Paseo 0.13 CLI / `@getpaseo/protocol` 源码里核对过**的条款，以及本仓库现在离发布还差什么。
+本文只写**已经在本机 Paseo 0.13–0.15 CLI / `@getpaseo/protocol` 源码里核对过**的条款，以及本仓库现在离发布还差什么。
 没有核对到的部分（人工审核流程、提交入口表单）如实标成未知，不猜。
 
 ## 客户端怎么找到插件
@@ -47,7 +47,7 @@
 
 已经就绪：
 
-- 清单 `paseo-plugin.json`（id、`requirements.paseo: >=0.13.0 <0.15.0`）；
+- 清单 `paseo-plugin.json`（id、`requirements.paseo: >=0.13.0 <0.16.0`）；
 - 双语 overview、README、LICENSE / NOTICE；
 - 可用的 `npm run typecheck` 与 `npm test`（提交前门槛）。
 - **远端**：`git@github.com:943545721/matt-skills-deck.git`，默认分支 `main`，**已转为公开**
