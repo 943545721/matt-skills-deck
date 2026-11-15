@@ -59,7 +59,7 @@
 - **文档核对**：README、双语 OVERVIEW 的清理读回说明补上「未选中的模型清单、追加模型说明 / 默认项 / 思考档位少一样即失败」；源视图说明补上「主地址与已配置模型名原样，地址自身带 userinfo 或凭据类查询参数时同样掩码」。核对 `GLOSSARY.md`、`docs/port-diff.md` 与 `AGENTS.md`，没有与本次相冲的领域决定，仓库仍无 `docs/adr/`。
 - **包内容**：`npm pack --dry-run --json` 519 条，本轮新增的客户端 / 服务端模块全部包含。
 - **两轴复审**：规格轴复验 **APPROVE**；原残余风险（需求 1 的 UI 接线无自动化测试）已由 `tests/provider-edit-wiring.test.mjs` 8 条覆盖，定向复验 **APPROVE**，残留 LOW 为地址 / 显示名编辑未调各自的 `onSave`、`useFieldEditing` / `useEnvAddition` 未直接驱动、`cardProps` 约 55 行，均不阻断。规范轴复验 **REQUEST_CHANGES**，唯一 MEDIUM 为 `useCardOpenState.ts` 收起当前卡片时提前 `return`，跳过明文 / 编辑态 / 安装确认清理；已把三项清理移到分支之前，并新增 `tests/card-open-state.test.mjs` 4 条钉住收起、切换、高级区与配置源开关。同轮 LOW 中的 `installingFor` 死代码与 3 个多余导出已删除 / 收窄；函数长度 51–63 行的 4 处仍为 LOW（主要是 prop 解构），不阻断。规范轴最终复验 **APPROVE**；两轴均通过。
-- 本轮仍只用模拟 Paseo API 与临时文件；没有读取或删除真实宿主 provider 配置，没有部署、reload、提交或推送。
+- **交付验证（2026-11-15）**：本地提交 `89e3efb` 并推送到 `origin/feat/multi-project-workspace`；`paseo plugin reload matt-skills-deck` 后状态 running（02:25:24 停止、02:25:30 就绪，无错误）。用插件只读 RPC `deck.orchestration.provider.source` 对真实宿主验证：`codex` 返回派生 `deck-codex`（effective）与基座 `codex`，凭据 `OPENAI_API_KEY` 只给 `••••6f2b`，地址 `OPENAI_BASE_URL` 原样；`claude` 未配置返回 not-found。未调用清理 RPC、未修改宿主配置、未打印原始密钥。应用界面可见插件命令与任务板「编排」子页；源弹窗的逐项点击未完成，UI 接线由 `tests/provider-edit-wiring.test.mjs` 覆盖。
 
 ### P19 测量（2026-10-28）
 
