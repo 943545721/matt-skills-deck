@@ -1,6 +1,6 @@
 import { CODEX_SITE_PROVIDER } from "../shared/orchestration.ts";
 import type { ModelThinkingDefault, ThinkingResolutionContext } from "../shared/model-thinking.ts";
-import { configuredModelIds, modelListKeyOf } from "../shared/provider-models.ts";
+import { configuredModelIds, modelArrayProblem, modelListKeyOf } from "../shared/provider-models.ts";
 
 /**
  * daemon 配置里「一个客户端那一格」的视图。
@@ -151,6 +151,30 @@ export function codexSiteUsable(entry: ProviderConfigView | undefined): boolean 
     entry.enabled !== false &&
     textOf(entry?.env?.[CODEX_ADDRESS_KEY]) !== ""
   );
+}
+
+/**
+ * 是否为空条目，可直接随清理移除：没有 env、模型清单或 `command` / `options` 等
+ * 行为字段。`label` / `enabled` / `extends` 是元数据，不影响空条目判定。
+ * 返回 false 仍可整条删除，但调用方必须用 `allowNonEmpty` 明确确认连同内容一起移除。
+ */
+const REMOVABLE_PROVIDER_FIELDS = new Set(["env", "models", "additionalModels", "label", "enabled", "extends"]);
+
+export function isRemovableProviderEntry(entry: ProviderConfigView): boolean {
+  // 手改坏的 env / 模型形状不算空条目；整条删除需要确认，但不要求先修好这些字段。
+  const rawEnv: unknown = entry.env;
+  if (rawEnv !== undefined && (typeof rawEnv !== "object" || rawEnv === null || Array.isArray(rawEnv))) {
+    return false;
+  }
+  const rawModels: unknown = entry.models;
+  if (Object.prototype.hasOwnProperty.call(entry, "models") && modelArrayProblem(rawModels)) return false;
+  const rawAdditional: unknown = entry.additionalModels;
+  if (Object.prototype.hasOwnProperty.call(entry, "additionalModels") && modelArrayProblem(rawAdditional)) {
+    return false;
+  }
+  const models = configuredModelIds(entry, modelListKeyOf(entry));
+  const meaningful = Object.keys(entry).filter((key) => !REMOVABLE_PROVIDER_FIELDS.has(key));
+  return Object.keys(rawEnv ?? {}).length === 0 && models.length === 0 && meaningful.length === 0;
 }
 
 /**

@@ -26,8 +26,8 @@ export interface DaemonProfileRead {
   detail: string | null;
 }
 
-export function daemonConfigPath(): string {
-  return path.join(daemonHome(), "config.json");
+export function daemonConfigPath(homeDir = daemonHome()): string {
+  return path.join(homeDir, "config.json");
 }
 
 function recordOf(value: unknown): Record<string, unknown> | null {

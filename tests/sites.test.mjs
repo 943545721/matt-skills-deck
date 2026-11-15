@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, stat, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { saveClientSite } from "../server/orchestration.ts";
+import { deletedProviderEntries, markProviderEntryDeleted } from "../server/provider-tombstones.ts";
 import { readSiteBook, sitesFile, updateSiteBook } from "../server/sites-store.ts";
 import {
   enabledSiteOf,
@@ -33,17 +34,22 @@ async function tempHome() {
 }
 
 /** 内存里存一份线上形状的配置；`patch` 按宿主的行为深合并。 */
-function fakePaseo(initial) {
+function fakePaseo(initial, options = {}) {
   let current = structuredClone(initial);
   const patches = [];
   return {
     patches,
     get config() {
       return {
-        get: async () => ({ config: structuredClone(current) }),
+        get: async () => {
+          if (patches.length && options.readBackError) throw new Error("模拟写后读回失败");
+          return { config: structuredClone(current) };
+        },
         patch: async (patch) => {
           patches.push(structuredClone(patch));
-          current = merge(current, patch);
+          if (options.patchError) throw new Error("模拟宿主拒绝写入");
+          if (!options.ignorePatch) current = merge(current, structuredClone(patch));
+          options.afterPatch?.(current);
           return { config: structuredClone(current) };
         },
       };
@@ -273,6 +279,112 @@ test("启用 Codex 站点：配置派生 provider 并使用 Codex 适配器读�
   assert.equal(paseo.disk().providers.codex.env, undefined, "不能让 builtin codex 的旧配置与派生 provider 混淆");
 });
 
+test("删过 codex / deck-codex 后启用站点：墓碑清掉，站点操作不被当成「不要它」", async () => {
+  await tempHome();
+  const paseo = fakePaseo({
+    providers: {
+      codex: { models: [{ id: "gpt-5-codex", label: "GPT-5 Codex", isDefault: true }] },
+    },
+  });
+  await saveClientSite(paseo, {
+    provider: "codex",
+    site: { id: "main", baseUrl: "https://api.example.test/v1", credential: "codex-test-credential" },
+  });
+  assert.deepEqual(markProviderEntryDeleted("codex"), { ok: true });
+  assert.deepEqual(markProviderEntryDeleted("deck-codex"), { ok: true });
+
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+
+  assert.equal(enabled.ok, true);
+  const tombstones = deletedProviderEntries();
+  assert.equal(tombstones.ok, true);
+  assert.ok(tombstones.ok && !tombstones.ids.includes("codex"));
+  assert.ok(tombstones.ok && !tombstones.ids.includes("deck-codex"));
+});
+
+for (const [scenario, options] of [
+  ["宿主拒绝补丁", { patchError: true }],
+  ["写后读回失败", { readBackError: true }],
+  ["宿主忽略补丁", { ignorePatch: true }],
+  ["派生关系没有生效", { afterPatch: (config) => { delete config.providers["deck-codex"].extends; } }],
+  ["地址没有生效", { afterPatch: (config) => { config.providers["deck-codex"].env.OPENAI_BASE_URL = "https://old.test"; } }],
+  ["凭据没有生效", { afterPatch: (config) => { delete config.providers["deck-codex"].env.OPENAI_API_KEY; } }],
+  ["派生模型没有生效", { afterPatch: (config) => { config.providers["deck-codex"].models = []; } }],
+  ["保留的 env 丢失", { afterPatch: (config) => { delete config.providers["deck-codex"].env.EXTRA_FLAG; } }],
+  ["镜像模型没有生效", { afterPatch: (config) => { config.providers.codex.models = []; } }],
+]) {
+  test(`启用 Codex 站点：${scenario}时保留已有删除记录`, async () => {
+    await tempHome();
+    const paseo = fakePaseo({ providers: {
+      codex: { models: [{ id: "gpt-old", label: "Old" }] },
+      "deck-codex": { extends: "codex", enabled: true,
+        models: [{ id: "gpt-new", label: "New" }],
+        env: { OPENAI_BASE_URL: "https://old.test", EXTRA_FLAG: "keep" } },
+    } }, options);
+    const saved = await saveClientSite(paseo, {
+      provider: "codex",
+      site: { id: "main", baseUrl: "https://api.example.test/v1", credential: "codex-test-credential" },
+    });
+    assert.equal(saved.ok, true);
+    for (const id of ["codex", "deck-codex", "claude"]) assert.deepEqual(markProviderEntryDeleted(id), { ok: true });
+    const result = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+    assert.deepEqual(deletedProviderEntries(), { ok: true, ids: ["codex", "deck-codex", "claude"] });
+    if (result.ok) assert.match(result.warnings.join("\n"), /删除记录.*保留|保留.*删除记录/);
+  });
+}
+
+test("启用 Codex 站点：模型元数据任一字段被宿主吞掉时保留删除记录", async (t) => {
+  const model = {
+    id: "gpt-site",
+    label: "Site model",
+    description: "Proxy model",
+    isDefault: true,
+    thinkingOptions: [{ id: "high", label: "High", description: "More reasoning", isDefault: true }],
+  };
+  for (const field of ["label", "description", "isDefault", "thinkingOptions"]) {
+    await t.test(field, async (t) => {
+      const home = await tempHome();
+      t.after(() => rm(home, { recursive: true, force: true }));
+      const paseo = fakePaseo({ providers: { codex: { models: [model] } } }, {
+        afterPatch: (stored) => { delete stored.providers["deck-codex"].models[0][field]; },
+      });
+      const saved = await saveClientSite(paseo, {
+        provider: "codex",
+        site: { id: "main", baseUrl: "https://api.example.test/v1", credential: "cred-x" },
+      });
+      assert.equal(saved.ok, true);
+      for (const id of ["codex", "deck-codex", "claude"]) assert.deepEqual(markProviderEntryDeleted(id), { ok: true });
+      const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+      const { [field]: omitted, ...kept } = model;
+      assert.notEqual(omitted, undefined, `${field} 在原模型中有值`);
+      assert.deepEqual(paseo.patches[0].providers["deck-codex"].models, [model], `${field} 随模型一并提交`);
+      assert.deepEqual(paseo.disk().providers["deck-codex"].models, [kept], `只丢失 ${field}`);
+      assert.equal(paseo.disk().providers["deck-codex"].env.OPENAI_BASE_URL, "https://api.example.test/v1");
+      assert.deepEqual(deletedProviderEntries(), { ok: true, ids: ["codex", "deck-codex", "claude"] }, `${field} 未落地不能恢复记录`);
+      assert.equal(enabled.ok, true);
+      assert.match(enabled.warnings.join("\n"), /删除记录.*保留|保留.*删除记录/, `${field} 丢失应反馈恢复校验警告`);
+    });
+  }
+});
+
+test("启用 Codex 站点：删除记录不可读时将恢复失败反馈到结果", async () => {
+  const home = await tempHome();
+  const paseo = fakePaseo({ providers: { codex: {} } });
+  const saved = await saveClientSite(paseo, {
+    provider: "codex",
+    site: { id: "main", baseUrl: "https://api.example.test/v1", credential: "codex-test-credential" },
+  });
+  assert.equal(saved.ok, true);
+  await writeFile(path.join(home, "matt-skills-deck-state.json"), JSON.stringify({ deletedProviderEntries: null }));
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "main" });
+  assert.equal(enabled.ok, true);
+  assert.equal(paseo.disk().providers["deck-codex"].env.OPENAI_BASE_URL, "https://api.example.test/v1");
+  const warning = enabled.warnings.filter((line) => line.includes("删除记录")).join("\n");
+  assert.match(warning, /codex/);
+  assert.match(warning, /deck-codex/);
+  assert.match(warning, /失败|未能|无法/);
+});
+
 test("启用 Codex 站点：站点没填凭证时沿用它原本那把键上的凭证，不要求再贴一遍", async () => {
   await tempHome();
   const paseo = fakePaseo({
@@ -457,6 +569,40 @@ test("启用 Codex 站点：换到另一条地址且新地址没有窗口时，�
     enabled.warnings.some((line) => line.includes("去掉上一接口的模型目录")),
     "摘掉旧目录要说明原因",
   );
+});
+
+test("启用 Codex 站点：宿主未摘掉旧模型目录参数时保留删除记录", async (t) => {
+  const home = await tempHome();
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const command = ["codex", "--profile", "site", "-c", `model_catalog_json="${path.join(home, "old-catalog.json")}"`];
+  const paseo = fakePaseo({ providers: {
+    codex: { models: [{ id: "gpt-site", label: "Site model" }] },
+    "deck-codex": {
+      extends: "codex", enabled: true,
+      models: [{ id: "gpt-site", label: "Site model" }],
+      env: { OPENAI_BASE_URL: "https://old.example.test/v1", OPENAI_API_KEY: "cred-x" },
+      command,
+    },
+  } }, { afterPatch: (stored) => { stored.providers["deck-codex"].command = [...command]; } });
+  const saved = await saveClientSite(paseo, {
+    provider: "codex",
+    site: { id: "new", baseUrl: "https://new.example.test/v1", credential: "cred-x" },
+  });
+  assert.equal(saved.ok, true);
+  for (const id of ["codex", "deck-codex", "claude"]) assert.deepEqual(markProviderEntryDeleted(id), { ok: true });
+  const written = [];
+  const enabled = await saveClientSite(paseo, { provider: "codex", enableId: "new" }, {
+    readBundled: async () => ({ models: [] }),
+    writeFile: async (target, content) => { written.push({ target, content }); },
+    catalogPath: () => path.join(home, "new-catalog.json"),
+  });
+  assert.equal(written.length, 0, "新接口没有窗口，不写新目录");
+  assert.deepEqual(paseo.patches[0].providers["deck-codex"].command, ["codex", "--profile", "site"]);
+  assert.deepEqual(paseo.disk().providers["deck-codex"].command, command, "宿主仍保留旧目录参数");
+  assert.equal(paseo.disk().providers["deck-codex"].env.OPENAI_BASE_URL, "https://new.example.test/v1");
+  assert.deepEqual(deletedProviderEntries(), { ok: true, ids: ["codex", "deck-codex", "claude"] });
+  assert.equal(enabled.ok, true);
+  assert.match(enabled.warnings.join("\n"), /删除记录.*保留|保留.*删除记录/);
 });
 
 test("启用 Codex 站点：写进去了但读回没有这一条，就报失败，不谎报已生效", async () => {

@@ -30,6 +30,28 @@ export function isModelEnvKey(key: string): boolean {
 }
 
 /**
+ * 模型清单里的坏条目：宿主只收字符串或带非空 `id` 的对象。
+ *
+ * 清理写回前用它拒绝 `null` / 数字 / 缺 id / 空串；不能静默丢掉——读回也用同一套
+ * 归一化比较，丢掉同样会报成功，那就成了「只删勾选项」的反面。
+ */
+export function modelItemProblem(item: unknown): string | null {
+  if (typeof item === "string") return item.trim() ? null : "空字符串";
+  if (!item || typeof item !== "object" || Array.isArray(item)) return "不是字符串或对象";
+  const id = (item as { id?: unknown }).id;
+  return typeof id === "string" && id.trim() ? null : "缺 id";
+}
+
+export function modelArrayProblem(value: unknown): string | null {
+  if (!Array.isArray(value)) return "不是数组";
+  for (const item of value) {
+    const problem = modelItemProblem(item);
+    if (problem) return problem;
+  }
+  return null;
+}
+
+/**
  * 这个键值该不该明文显示。
  *
  * 只放行模型 id 与纯数字的上下文窗口：前者限 `ANTHROPIC_*_MODEL`，后者限

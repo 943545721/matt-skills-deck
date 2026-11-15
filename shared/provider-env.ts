@@ -29,3 +29,13 @@ export function envKeysFor(provider: string, baseEnvKeys: readonly string[]): En
     credentialKey: baseEnvKeys.find((key) => CREDENTIAL_KEY.test(key)) ?? `${prefix}_API_KEY`,
   };
 }
+
+/**
+ * 地址/凭据键：清理注入源时默认保护，需要用户二次确认。
+ *
+ * 前后端共用同一判据：不能靠 `envDisplayOf` 的 `masked`（空值也会返回 false），
+ * 也不能让两端各写一份后缀正则——那正是「UI 不确认、服务端拒绝」的来源。
+ */
+export function isProtectedEnvKey(key: string): boolean {
+  return /(_BASE_URL|_API_KEY|_AUTH_TOKEN|_TOKEN)$/i.test(key.trim());
+}

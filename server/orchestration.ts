@@ -71,6 +71,9 @@ import {
   type ProviderConfigView,
   type ProviderModelItemView,
 } from "./provider-entry.ts";
+import { withProviderConfigWriteLock } from "./provider-config-lock.ts";
+import { deletedProviderEntries } from "./provider-tombstones.ts";
+import { restoreCodexMaintenanceAfterWrite } from "./provider-write-restore.ts";
 import { readOrchestration, writeOrchestration } from "./orchestration-store.ts";
 import { readSiteBook, updateSiteBook } from "./sites-store.ts";
 import {
@@ -563,7 +566,11 @@ export async function readOrchestrationState(
   // 这里把它搬到派生条目——打开面板看到的就是会话真正在用的那份，不用用户自己再点一遍。
   // 每次运行只试一遍同一条地址（`unadoptable`），宿主不接受派生 provider 时不会反复写盘。
   let codexAddressWarned = false;
-  if (config) {
+  const deletionState = deletedProviderEntries();
+  if (!deletionState.ok) {
+    warnings.push(`provider 删除记录无法读取，Codex 自动接管、重复 env 清理和模型镜像已暂停：${deletionState.detail}`);
+  }
+  if (config && deletionState.ok) {
     const ensured = await ensureCodexAddressEffective(paseo, config);
     if (!ensured.ok) {
       // 两种失败不能混着说：`unverified` 是「已经写进去了、只是没核对上」，说成「接管失败」
@@ -1008,7 +1015,13 @@ export async function revealProviderEnvValue(
   return { ok: true, provider, key, value };
 }
 
-export async function patchProviderConfig(
+export function patchProviderConfig(
+  ...args: Parameters<typeof patchProviderConfigUnlocked>
+): ReturnType<typeof patchProviderConfigUnlocked> {
+  return withProviderConfigWriteLock(() => patchProviderConfigUnlocked(...args));
+}
+
+async function patchProviderConfigUnlocked(
   paseo: PaseoApi,
   input: ProviderPatchInput,
   deps: CodexCatalogDeps = {},
@@ -1336,6 +1349,7 @@ export async function patchProviderConfig(
 
   // 读回校验：写成功不代表 daemon 真的收下了（补丁字段可能不被支持）。
   const after = await readDaemonConfig(paseo);
+  warnings.push(...restoreCodexMaintenanceAfterWrite(provider, providers, patches, after));
   // 整份配置读不回来只能说「没法核对」：写入可能已经成功，别把它报成没落地。
   if (!after) {
     warnings.push("读回读不到 daemon 配置：这次写入没法核对是否落地，请到 config.json 确认一次");
@@ -1976,7 +1990,13 @@ export type SaveSiteResult =
  * 没有轮询也没有故障转移，所以同一时刻只有一条地址在用。换站 = 换这一份 env。
  * 已开的会话拿着开时的配置，不会被追溯——界面文案也是这么说的。
  */
-export async function saveClientSite(
+export function saveClientSite(
+  ...args: Parameters<typeof saveClientSiteUnlocked>
+): ReturnType<typeof saveClientSiteUnlocked> {
+  return withProviderConfigWriteLock(() => saveClientSiteUnlocked(...args));
+}
+
+async function saveClientSiteUnlocked(
   paseo: PaseoApi,
   input: SaveSiteInput,
   deps: CodexCatalogDeps = {},
@@ -2140,18 +2160,18 @@ async function enableSite(
   const mirrorChanged = Boolean(
     mirrorKey && mirrorModels && mirrorModels.length !== (modelObjectsOf(before?.[mirrorKey])?.length ?? 0),
   );
+  const patches: Record<string, Record<string, unknown>> = providerPatch ? { [targetProvider]: providerPatch } : {};
+  if (mirrorKey && mirrorModels && mirrorChanged) patches.codex = { [mirrorKey]: mirrorModels };
   let patched: ProviderPatchResult;
   if (providerPatch) {
     try {
-      const patches: Record<string, Record<string, unknown>> = { [targetProvider]: providerPatch };
-      if (mirrorKey && mirrorModels && mirrorChanged) patches.codex = { [mirrorKey]: mirrorModels };
       await paseo.config.patch({ providers: patches });
       patched = { ok: true, provider: targetProvider, applied: Object.keys(env).map((key) => `env.${key}`), warnings: [] };
     } catch (error) {
       return { ok: false, reason: "config-failed", detail: sessionErrorDetail(error) };
     }
   } else {
-    patched = await patchProviderConfig(paseo, {
+    patched = await patchProviderConfigUnlocked(paseo, {
       provider: targetProvider,
       env,
       ...(workspaceDir ? { workspaceDir } : {}),
@@ -2159,8 +2179,7 @@ async function enableSite(
   }
   if (!patched.ok) return { ok: false, reason: "config-failed", detail: patched.detail };
 
-  // 补丁自己也会带回告警（窗口缓存读不出来、换了接口摘掉旧值之类）：
-  // 这条路径不走 `patchProviderConfig` 的返回值汇总，不并进来就等于没说。
+  // 补丁自己也会带回告警（窗口缓存读不出来、换了接口摘掉旧值之类）。
   const warnings: string[] = [...patched.warnings];
   if (cacheRead?.warning) warnings.push(cacheRead.warning);
   if (staleCatalogCommand) {
@@ -2177,6 +2196,7 @@ async function enableSite(
     warnings.push(`Codex 模型目录没写成：${catalog.detail}。这批模型的窗口对会话仍然无效，自动压缩会偏晚`);
   }
   const afterConfig = await readDaemonConfig(paseo);
+  warnings.push(...restoreCodexMaintenanceAfterWrite(provider, providers, patches, afterConfig));
   // 「整份配置读不到」只能说「没法核对」（写入可能已经成功）；
   // 「配置读得到、就是没有这一条」则是写入没落地，必须报失败。
   if (!afterConfig) {

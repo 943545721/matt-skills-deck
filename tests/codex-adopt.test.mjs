@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 import {
   adoptLegacyCodexAddress,
@@ -11,6 +14,10 @@ import {
 } from "../server/codex-adopt.ts";
 import { legacyCodexAddressOf, modelObjectsOf } from "../server/provider-entry.ts";
 import { listLogs, resetLogs } from "../server/logs.ts";
+import {
+  markProviderEntryDeleted,
+  setTombstoneStatePathForTest,
+} from "../server/provider-tombstones.ts";
 import { CODEX_SITE_PROVIDER } from "../shared/orchestration.ts";
 
 /**
@@ -29,7 +36,16 @@ import { CODEX_SITE_PROVIDER } from "../shared/orchestration.ts";
 const CREDENTIAL = "sk-legacy-value-9f2c";
 
 // 「补不进去」的记忆是模块级的：每个用例从干净的起点开始，免得上一个用例的失败影响下一个。
-test.beforeEach(() => forgetMirrorFailures());
+let tombstoneDir;
+test.beforeEach(() => {
+  forgetMirrorFailures();
+  tombstoneDir = mkdtempSync(path.join(tmpdir(), "deck-tombstone-"));
+  setTombstoneStatePathForTest(path.join(tombstoneDir, "state.json"));
+});
+test.afterEach(() => {
+  setTombstoneStatePathForTest(null);
+  rmSync(tombstoneDir, { recursive: true, force: true });
+});
 
 /** 一份可变的假宿主：patch 直接写进 config.get 返回的那份配置。 */
 function fakePaseo(config, options = {}) {
@@ -205,13 +221,12 @@ test("写完读不回来核对：报「没核对上」，不报「宿主不收�
   resetLogs();
   t.after(() => resetLogs());
   const config = legacyConfig();
-  let reads = 0;
   const state = { config, patches: [] };
   const paseo = {
     config: {
-      // 写完之后读不回来（daemon 掉线）——这正是「写进去了但核对不上」。
+      // 写前读取成功，写后才掉线，不能依赖写前不可读时回退旧快照。
       get: async () => {
-        reads += 1;
+        if (state.patches.length === 0) return { config: structuredClone(state.config) };
         throw new Error("daemon 掉线");
       },
       patch: async (input) => {
@@ -232,9 +247,12 @@ test("写完读不回来核对：报「没核对上」，不报「宿主不收�
   assert.equal(result.ok, false);
   assert.match(result.detail, /读不到宿主配置核对/);
   assert.equal(/宿主可能不接受派生 provider/.test(result.detail), false, "不能把读失败说成宿主不收派生 provider");
-  // 没核对上不算「确定搬不动」：下次读状态还该再试一次。
+  // 仍读不到新配置时不再写；连接恢复后也不能把先前读回失败记成「确定搬不动」。
   await adoptLegacyCodexAddress(paseo, providersOf(config));
-  assert.equal(state.patches.length, 2);
+  assert.equal(state.patches.length, 1);
+  const recovered = fakePaseo(legacyConfig());
+  assert.equal((await adoptLegacyCodexAddress(recovered.paseo, providersOf(config))).ok, true);
+  assert.equal(recovered.state.patches.length, 1);
 });
 
 test("用户改过配置之后忘了这条地址的失败记录：值得再试一次", async (t) => {
@@ -273,11 +291,10 @@ test("ensureCodexAddressEffective：搬不动与「写进去了但核对不上�
   resetAdoptAttemptsForTest();
   const config = legacyConfig();
   const state = { config, patches: [] };
-  let reads = 0;
   const paseo = {
     config: {
       get: async () => {
-        reads += 1;
+        if (state.patches.length === 0) return { config: structuredClone(state.config) };
         throw new Error("daemon 掉线");
       },
       patch: async (input) => {
@@ -510,6 +527,129 @@ test("宿主没收下照写：报「没对齐」，不静默当成功", async (t
 
   assert.equal(result.ok, false);
   assert.match(result.detail, /读回还缺/);
+});
+
+test("wrapper 拿到锁后重读：调用方旧快照不会把已生效的派生条目覆盖回去", async () => {
+  resetAdoptAttemptsForTest();
+  const state = {
+    config: {
+      providers: {
+        "deck-codex": { extends: "codex", enabled: true, env: { OPENAI_BASE_URL: "http://new" } },
+      },
+    },
+    patches: [],
+  };
+  const paseo = {
+    config: {
+      get: async () => ({ config: state.config }),
+      patch: async (input) => {
+        state.patches.push(input);
+        return { ok: true };
+      },
+    },
+  };
+  const stale = { codex: { env: { OPENAI_BASE_URL: "http://old" } } };
+  const result = await adoptLegacyCodexAddress(paseo, stale);
+  assert.equal(result.ok, true);
+  assert.equal(result.adopted, false, "当前配置已有 deck-codex，旧快照不该触发搬家");
+  assert.equal(state.patches.length, 0, "不该用旧快照写回");
+});
+
+for (const [name, run] of [
+  ["adopt", (paseo) => adoptLegacyCodexAddress(paseo, providersOf(legacyConfig()))],
+  ["prune", (paseo) => pruneRedundantCodexEnv(paseo, providersOf(siteConfig({
+    OPENAI_BASE_URL: "https://api.example.test/v1", OPENAI_API_KEY: CREDENTIAL, OLD_API_KEY: CREDENTIAL,
+  })))],
+  ["mirror", (paseo) => mirrorCodexSiteModels(paseo, mirrorConfig({
+    derivedModels: [{ id: "a", label: "a" }], codexModels: undefined,
+  }))],
+  ["ensure", (paseo) => ensureCodexAddressEffective(paseo, legacyConfig())],
+]) {
+  test(`${name}：锁内读不到最新配置时拒绝用调用方旧快照写入`, async () => {
+    const patches = [];
+    const paseo = {
+      config: {
+        get: async () => { throw new Error("daemon 掉线"); },
+        patch: async (patch) => { patches.push(patch); return { ok: true }; },
+      },
+    };
+    const result = await run(paseo);
+    assert.equal(patches.length, 0, "读取失败不能把已删除的条目从旧快照写回来");
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /读不到/);
+  });
+}
+
+for (const state of ["deleted", "malformed"]) {
+  test(`prune 与 ensure 尊重派生条目的删除记录（${state}）`, async () => {
+    if (state === "deleted") assert.deepEqual(markProviderEntryDeleted(CODEX_SITE_PROVIDER), { ok: true });
+    else writeFileSync(path.join(tombstoneDir, "state.json"), JSON.stringify({ version: 1, deletedProviderEntries: null }));
+    const config = siteConfig({
+      OPENAI_BASE_URL: "https://api.example.test/v1", OPENAI_API_KEY: CREDENTIAL, OLD_API_KEY: CREDENTIAL,
+    });
+    const { paseo, state: host } = fakePaseo(config);
+    const pruned = await pruneRedundantCodexEnv(paseo, providersOf(config));
+    assert.equal(pruned.ok, true);
+    assert.deepEqual(pruned.pruned, []);
+    const ensured = await ensureCodexAddressEffective(paseo, config);
+    assert.equal(ensured.ok, true);
+    assert.equal(host.patches.length, 0, "ensure 内部的清理也不能绕过删除记录");
+  });
+}
+
+for (const value of [{}, { deletedProviderEntries: "codex" }, { deletedProviderEntries: ["codex", null] }]) {
+  test(`状态 JSON 字段损坏时不自动重建：${JSON.stringify(value)}`, async () => {
+    writeFileSync(path.join(tombstoneDir, "state.json"), JSON.stringify(value));
+    const mirror = mirrorConfig({ derivedModels: [{ id: "a", label: "a" }], codexModels: undefined });
+    const host = fakePaseo(mirror);
+    assert.equal((await mirrorCodexSiteModels(host.paseo, mirror)).mirrored, false);
+    assert.equal(host.state.patches.length, 0);
+    const legacy = legacyConfig();
+    const second = fakePaseo(legacy);
+    assert.equal((await adoptLegacyCodexAddress(second.paseo, providersOf(legacy))).adopted, false);
+    assert.equal(second.state.patches.length, 0);
+  });
+}
+
+test("用户删过 deck-codex：adopt 不按内建 codex 的旧地址重建", async () => {
+  assert.deepEqual(markProviderEntryDeleted("deck-codex"), { ok: true });
+  const config = legacyConfig();
+  const { paseo, state } = fakePaseo(config);
+
+  const result = await adoptLegacyCodexAddress(paseo, { codex: config.providers.codex });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.adopted, false);
+  assert.equal(state.patches.length, 0, "删掉的派生条目不能被旧地址重建");
+});
+
+test("墓碑文件坏了：镜像与 adopt 都按「有未确认删除」跳过，不重建", async () => {
+  writeFileSync(path.join(tombstoneDir, "state.json"), "{ nope", "utf8");
+  const mirror = mirrorConfig({ derivedModels: [{ id: "a", label: "a" }], codexModels: undefined });
+  const first = fakePaseo(mirror);
+  const mirrored = await mirrorCodexSiteModels(first.paseo, mirror);
+  assert.equal(mirrored.ok, true);
+  assert.equal(mirrored.mirrored, false);
+  assert.equal(first.state.patches.length, 0);
+
+  const legacy = legacyConfig();
+  const second = fakePaseo(legacy);
+  const adopted = await adoptLegacyCodexAddress(second.paseo, providersOf(legacy));
+  assert.equal(adopted.ok, true);
+  assert.equal(adopted.adopted, false);
+  assert.equal(second.state.patches.length, 0);
+});
+
+test("用户整条删过 codex：镜像自愈不重建", async () => {
+  assert.deepEqual(markProviderEntryDeleted("codex"), { ok: true });
+  const config = mirrorConfig({ derivedModels: [{ id: "a", label: "a" }], codexModels: undefined });
+  const { paseo, state } = fakePaseo(config);
+
+  const result = await mirrorCodexSiteModels(paseo, config);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.mirrored, false);
+  assert.equal(state.patches.length, 0, "用户删掉的条目不能被镜像写回来");
 });
 
 test("补不进去只写一次盘：同一份清单再读一次只重复那句原因，不反复改配置", async (t) => {

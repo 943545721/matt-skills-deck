@@ -485,6 +485,98 @@ export const orchestrationProviderRevealRpc = defineRpc({
 });
 
 /**
+ * 注入源文件的只读视图。
+ *
+ * 卡片上的「N 个密钥」统计的是生效条目 `env` 的全部键；这个接口把源文件路径与
+ * 各条 provider 的 env 键名 / 掩码值摊开，用户能对上「地址 + 凭据 + 其它」到底几条。
+ * 凭据默认掩码；仅无用户信息的主地址和已配置清单内的模型名原样显示，不返回原始密钥。
+ */
+export const providerSourceEnvRowSchema = z.object({
+  key: z.string(),
+  display: z.string(),
+  masked: z.boolean(),
+});
+
+export const providerSourceEntrySchema = z.object({
+  id: z.string(),
+  /** 卡片这次实际读的那条（Codex 站点启用时是派生条目）。 */
+  effective: z.boolean(),
+  extends: z.string().nullable(),
+  enabled: z.boolean(),
+  models: z.array(z.string()),
+  /** 是否为空条目；false 时仍可整条删除，但需 `allowNonEmpty` 明确确认。 */
+  removable: z.boolean(),
+  /** provider 条目的顶层字段名（只看名字，不返回值）。 */
+  fields: z.array(z.string()),
+  env: z.array(providerSourceEnvRowSchema),
+});
+
+export const orchestrationProviderSourceRpc = defineRpc({
+  name: "deck.orchestration.provider.source",
+  input: z.object({ provider: z.string().min(1).max(120) }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      provider: z.string(),
+      path: z.string(),
+      entries: z.array(providerSourceEntrySchema),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["config-missing", "config-invalid", "read-failed", "not-found"]),
+      detail: z.string(),
+    }),
+  ]),
+});
+
+/**
+ * 按用户勾选清理注入源：删 env 键或整条条目。
+ *
+ * 宿主补丁深合并，删键要用 `removeProviders` 摘掉，再在同一补丁写回保留字段；
+ * 整条删除只摘掉、不写回，两种操作均读回核对。地址与凭据键需 `allowProtected`，
+ * 非空或字段格式异常条目整条删除需 `allowNonEmpty` 明确确认。
+ */
+export const providerCleanupEntrySchema = z.object({
+  entryId: z.string().min(1).max(200),
+  /** 要删的 env 键；整条删除时必须为空，不允许同时提交两种操作。 */
+  keys: z.array(z.string().min(1).max(200)).max(200).default([]),
+  /** 整条删除；非空条目（还有模型 / command 等）需要 `allowNonEmpty` 明确确认。 */
+  removeEntry: z.boolean().optional(),
+});
+
+export const orchestrationProviderCleanupRpc = defineRpc({
+  name: "deck.orchestration.provider.cleanup",
+  input: z.object({
+    provider: z.string().min(1).max(120),
+    cleanups: z.array(providerCleanupEntrySchema).min(1).max(20),
+    /** 用户已经确认要删地址/凭据；没带时服务端拒绝这类键。 */
+    allowProtected: z.boolean().optional(),
+    /** 用户已经确认要整条删非空条目；没带时服务端拒绝。 */
+    allowNonEmpty: z.boolean().optional(),
+  }),
+  output: z.union([
+    z.object({
+      ok: z.literal(true),
+      provider: z.string(),
+      removed: z.array(
+        z.object({
+          entryId: z.string(),
+          keys: z.array(z.string()),
+          entryRemoved: z.boolean(),
+        }),
+      ),
+      /** 清理已读回核对成功，但宿主响应异常等附带情况仍需向用户说明。 */
+      warnings: z.array(z.string()).optional(),
+    }),
+    z.object({
+      ok: z.literal(false),
+      reason: z.enum(["invalid", "not-found", "protected", "config-failed", "verify-failed"]),
+      detail: z.string(),
+    }),
+  ]),
+});
+
+/**
  * 宿主的 provider 诊断原文（解析到的路径、版本、PATH、which 结果）。
  *
  * 「装了没有」由 provider 快照的 `status` 回答，这里回答的是「为什么」。

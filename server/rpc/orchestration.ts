@@ -13,6 +13,8 @@ import type {
   orchestrationProviderRefreshRpc,
   orchestrationProviderRevealRpc,
   orchestrationProviderRpc,
+  orchestrationProviderCleanupRpc,
+  orchestrationProviderSourceRpc,
   orchestrationRequirementDispatchRpc,
   orchestrationSaveRpc,
   orchestrationSiteRpc,
@@ -55,6 +57,8 @@ import {
   saveProfile,
 } from "../orchestration.ts";
 import { thinkingContextOf } from "../provider-entry.ts";
+import { readProviderSource } from "../provider-source.ts";
+import { cleanupProviderSource } from "../provider-cleanup.ts";
 import { createAgent, sessionErrorDetail } from "../session.ts";
 import {
   readRequirementForDispatch,
@@ -571,6 +575,21 @@ export async function orchestrationProviderRevealHandler(
   context: PluginHandlerContext,
 ): Promise<RpcOutput<typeof orchestrationProviderRevealRpc>> {
   return revealProviderEnvValue(context.paseo, { provider: input.provider, key: input.key });
+}
+
+/** 注入源文件的只读视图：路径 + 各 provider 条目的 env 键名 / 掩码值。 */
+export async function orchestrationProviderSourceHandler(
+  input: RpcInput<typeof orchestrationProviderSourceRpc>,
+): Promise<RpcOutput<typeof orchestrationProviderSourceRpc>> {
+  return readProviderSource(input.provider);
+}
+
+/** 按勾选清理注入源：删 env 键或明确确认后整条删除；写后读回核对。 */
+export async function orchestrationProviderCleanupHandler(
+  input: RpcInput<typeof orchestrationProviderCleanupRpc>,
+  context: PluginHandlerContext,
+): Promise<RpcOutput<typeof orchestrationProviderCleanupRpc>> {
+  return cleanupProviderSource(context.paseo, input);
 }
 
 /** 客户端下的站点：加/改/删/启用。凭证只在服务端落盘，回给界面的一律是掩码。 */

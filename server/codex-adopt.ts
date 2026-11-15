@@ -16,6 +16,8 @@ import {
   type ProviderConfigView,
 } from "./provider-entry.ts";
 import { configuredModelIds, modelListKeyOf } from "../shared/provider-models.ts";
+import { withProviderConfigWriteLock } from "./provider-config-lock.ts";
+import { deletedProviderEntries } from "./provider-tombstones.ts";
 import { sessionErrorDetail } from "./session.ts";
 
 const SCOPE = "orchestration";
@@ -86,9 +88,9 @@ export function resetAdoptAttemptsForTest(): void {
 }
 
 /** 读一份 provider 配置；读失败与「读到但形状不对」必须分开，否则诊断会张冠李戴。 */
-type ConfigRead = { ok: true; config: ProviderConfigSource } | { ok: false; detail: string };
+export type ConfigRead = { ok: true; config: ProviderConfigSource } | { ok: false; detail: string };
 
-async function readProviderConfig(paseo: PaseoApi): Promise<ConfigRead> {
+export async function readProviderConfig(paseo: PaseoApi): Promise<ConfigRead> {
   try {
     const result = await paseo.config.get();
     const config = result?.config;
@@ -117,10 +119,33 @@ async function readProviderConfig(paseo: PaseoApi): Promise<ConfigRead> {
  * `OPENAI_API_KEY`、模型清单跟着搬——搬完就是「卡片上看到的 = 会话真正用的」。
  * 写完读回核对，对不上就报失败（不静默：那种情况下每条 Codex 会话都会退回旧地址）。
  */
-export async function adoptLegacyCodexAddress(
+export function adoptLegacyCodexAddress(
+  paseo: PaseoApi,
+  providers: Record<string, ProviderConfigView>,
+): ReturnType<typeof adoptLegacyCodexAddressUnlocked> {
+  return withProviderConfigWriteLock(async () => {
+    const read = await readProviderConfig(paseo);
+    if (!read.ok) {
+      return { ok: false, reason: "patch-failed", detail: `读不到最新 daemon 配置，已停止接管，未使用旧快照写入：${read.detail}` };
+    }
+    return adoptLegacyCodexAddressUnlocked(paseo, providersRawOf(read.config));
+  });
+}
+
+async function adoptLegacyCodexAddressUnlocked(
   paseo: PaseoApi,
   providers: Record<string, ProviderConfigView>,
 ): Promise<CodexAdoptResult> {
+  // 用户主动整条删过 codex 或派生条目：不要再把旧地址搬回来。
+  // 搬家实际创建的是 `deck-codex`，所以两个 id 都要看。
+  const deleted = deletedProviderEntries();
+  if (!deleted.ok) {
+    record("warn", SCOPE, `读不到 provider 墓碑文件，跳过接管以避免重建：${deleted.detail}`);
+    return { ok: true, adopted: false };
+  }
+  if (deleted.ids.includes("codex") || deleted.ids.includes(CODEX_SITE_PROVIDER)) {
+    return { ok: true, adopted: false };
+  }
   const baseUrl = legacyCodexAddressOf(providers);
   if (!baseUrl) return { ok: true, adopted: false };
   // 同一条地址**确定**搬不动时不再重试（读一次状态写一次盘、刷一行日志没有意义）；
@@ -215,10 +240,27 @@ export type CodexPruneResult =
  * 唯一能真删的口径是 `removeProviders` 整条摘掉——宿主**先处理移除、再合并同一补丁里的新条目**，
  * 所以一个补丁里「摘掉 + 写回干净形状」不会留下空窗。
  */
-export async function pruneRedundantCodexEnv(
+export function pruneRedundantCodexEnv(
+  paseo: PaseoApi,
+  providers: Record<string, ProviderConfigView>,
+): ReturnType<typeof pruneRedundantCodexEnvUnlocked> {
+  return withProviderConfigWriteLock(async () => {
+    const read = await readProviderConfig(paseo);
+    if (!read.ok) return { ok: false, detail: `读不到最新 daemon 配置，已停止清理，未使用旧快照写入：${read.detail}` };
+    return pruneRedundantCodexEnvUnlocked(paseo, providersRawOf(read.config));
+  });
+}
+
+async function pruneRedundantCodexEnvUnlocked(
   paseo: PaseoApi,
   providers: Record<string, ProviderConfigView>,
 ): Promise<CodexPruneResult> {
+  const deleted = deletedProviderEntries();
+  if (!deleted.ok) {
+    record("warn", SCOPE, `读不到 provider 删除记录，跳过派生条目清理：${deleted.detail}`);
+    return { ok: true, pruned: [] };
+  }
+  if (deleted.ids.includes(CODEX_SITE_PROVIDER)) return { ok: true, pruned: [] };
   const entry = providers[CODEX_SITE_PROVIDER];
   if (!codexSiteUsable(entry)) return { ok: true, pruned: [] };
   const env = entry?.env as Record<string, unknown> | undefined;
@@ -307,10 +349,28 @@ export type CodexModelMirrorResult =
  * - 只对齐**可用**的派生条目：停用或没地址时，模型清单本来就该回落到内建条目，
  *   那是用户明确留下的状态，翻过来会把他刚关掉的站点又打开。
  */
-export async function mirrorCodexSiteModels(
+export function mirrorCodexSiteModels(
+  paseo: PaseoApi,
+  config: ProviderConfigSource,
+): ReturnType<typeof mirrorCodexSiteModelsUnlocked> {
+  return withProviderConfigWriteLock(async () => {
+    const read = await readProviderConfig(paseo);
+    if (!read.ok) return { ok: false, detail: `读不到最新 daemon 配置，已停止镜像，未使用旧快照写入：${read.detail}` };
+    return mirrorCodexSiteModelsUnlocked(paseo, read.config);
+  });
+}
+
+async function mirrorCodexSiteModelsUnlocked(
   paseo: PaseoApi,
   config: ProviderConfigSource,
 ): Promise<CodexModelMirrorResult> {
+  // 用户主动整条删过 codex：镜像自愈不能把它写回来，否则「整条删除」会自我撤销。
+  const deleted = deletedProviderEntries();
+  if (!deleted.ok) {
+    record("warn", SCOPE, `读不到 provider 墓碑文件，跳过镜像以避免重建：${deleted.detail}`);
+    return { ok: true, mirrored: false };
+  }
+  if (deleted.ids.includes("codex")) return { ok: true, mirrored: false };
   const providers = providersRawOf(config);
   const derived = providers[CODEX_SITE_PROVIDER];
   if (!codexSiteUsable(derived)) return { ok: true, mirrored: false };
@@ -363,11 +423,24 @@ export async function mirrorCodexSiteModels(
  * 读配置 + 该接管就接管，一步到位：面板读状态与建会话钩子走的是同一段流程，
  * 两处各写一遍迟早分叉（一处重读成功、另一处静默用旧配置）。
  */
-export async function ensureCodexAddressEffective(
+export function ensureCodexAddressEffective(
+  paseo: PaseoApi,
+  config: ProviderConfigSource,
+): ReturnType<typeof ensureCodexAddressEffectiveUnlocked> {
+  return withProviderConfigWriteLock(async () => {
+    const read = await readProviderConfig(paseo);
+    if (!read.ok) {
+      return { ok: false, reason: "unverified", detail: `读不到最新 daemon 配置，已停止接管，未使用旧快照写入：${read.detail}` };
+    }
+    return ensureCodexAddressEffectiveUnlocked(paseo, read.config);
+  });
+}
+
+async function ensureCodexAddressEffectiveUnlocked(
   paseo: PaseoApi,
   config: ProviderConfigSource,
 ): Promise<CodexEnsureResult> {
-  const adopted = await adoptLegacyCodexAddress(paseo, providersRawOf(config));
+  const adopted = await adoptLegacyCodexAddressUnlocked(paseo, providersRawOf(config));
   if (!adopted.ok) {
     return adopted.reason === "unverified"
       ? { ok: false, reason: "unverified", detail: adopted.detail }
@@ -377,7 +450,7 @@ export async function ensureCodexAddressEffective(
   let current = adopted.adopted ? adopted.config : config;
   // 顺手收掉派生条目里纯重复的凭据键（早先整份照抄留下的残渣）。纯装饰性：失败只记日志，
   // 不挡读状态、也不挡建会话——为了一行没人读的配置把会话建不出来是荒唐的。
-  const prune = await pruneRedundantCodexEnv(paseo, providersRawOf(current));
+  const prune = await pruneRedundantCodexEnvUnlocked(paseo, providersRawOf(current));
   if (!prune.ok) record("warn", SCOPE, `清理派生条目里重复的凭据键没成（不影响会话）：${prune.detail}`);
   else if (prune.config) current = prune.config;
   return { ok: true, adopted: adopted.adopted, config: current };

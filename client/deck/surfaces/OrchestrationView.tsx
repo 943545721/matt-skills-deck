@@ -561,6 +561,7 @@ export function OrchestrationView({
                 providers={data.providers}
                 // 默认档走设置保存：两个忙碌源都算上，否则保存往返里按钮仍可连点。
                 busy={patchProvider.isPending || busy}
+                onChanged={() => void state.refetch()}
                 onSaveEnv={(input) => patchProvider.mutate(input)}
                 onSaveModel={(input) => patchProvider.mutate(input)}
                 onSaveLabel={(input) => patchProvider.mutate(input)}

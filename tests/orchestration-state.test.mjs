@@ -8,9 +8,19 @@ import { announcePresence } from "../server/identity-presence.ts";
 import { forgetMirrorFailures, resetAdoptAttemptsForTest } from "../server/codex-adopt.ts";
 import { isListedClient, isSupportedClient, SUPPORTED_CLIENTS, SUPPORTED_CLIENTS_LABEL } from "../shared/orchestration.ts";
 import { providerRowSchema } from "../shared/orchestration-rpc.ts";
+import { setTombstoneStatePathForTest } from "../server/provider-tombstones.ts";
 
 // 「模型清单补不进去」的记忆是模块级的：每个用例从干净的起点开始。
-test.beforeEach(() => forgetMirrorFailures());
+let tombstoneDir;
+test.beforeEach(async () => {
+  forgetMirrorFailures();
+  tombstoneDir = await mkdtemp(join(tmpdir(), "deck-state-tombstones-"));
+  setTombstoneStatePathForTest(join(tombstoneDir, "state.json"));
+});
+test.afterEach(async () => {
+  setTombstoneStatePathForTest(null);
+  await rm(tombstoneDir, { recursive: true, force: true });
+});
 
 /**
  * 编排页的数据来源：`deck.orchestration.state` 背后的组装逻辑。
@@ -116,6 +126,31 @@ test("编排状态：数据来自根级 providers / agentProfiles（线上形状
   assert.equal(claude.modelsKey, "additionalModels");
   assert.equal(claude.env.length, 2, "注入的键必须读得出来");
 });
+
+for (const failure of ["invalid-json", "read-failed"]) {
+  test(`编排状态：删除记录 ${failure} 时显示自动维护暂停且不改宿主配置`, async (t) => {
+    const dir = await workspace(t);
+    const target = join(tombstoneDir, "state.json");
+    const secret = "synthetic-state-warning-secret-82d1";
+    if (failure === "invalid-json") await writeFile(target, `{\"token\":\"${secret}\"`);
+    else await mkdir(target);
+    let writes = 0;
+    const config = { providers: {
+      codex: { env: { OPENAI_BASE_URL: "https://old.test", OPENAI_API_KEY: "test-key" } },
+      "deck-codex": { extends: "codex", env: { OPENAI_BASE_URL: "https://new.test" },
+        models: [{ id: "gpt-test", label: "Test" }] },
+    } };
+    const paseo = fakePaseo({ config: {
+      get: async () => ({ config: structuredClone(config) }),
+      patch: async () => { writes += 1; },
+    } });
+    const state = await readOrchestrationState(paseo, { workspaceId: "ws1", workspaceDir: dir });
+    assert.equal(state.ok, true);
+    assert.match(state.warnings.join("\n"), /删除记录.*(?:不可读|读不到|无法读取).*自动.*暂停/);
+    assert.equal(JSON.stringify(state).includes(secret), false);
+    assert.equal(writes, 0, "读不到删除意图时自动接管、清理和镜像都必须暂停");
+  });
+}
 
 test("编排状态：推理档位随客户端行下发，没报档位的模型不占位", async (t) => {
   const dir = await workspace(t);
